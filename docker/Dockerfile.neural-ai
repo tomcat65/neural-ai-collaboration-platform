@@ -1,0 +1,44 @@
+# Neural AI Collaboration Platform Dockerfile
+FROM node:18-alpine
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apk add --no-cache \
+    curl \
+    python3 \
+    make \
+    g++ \
+    && rm -rf /var/cache/apk/*
+
+# Copy package files
+COPY package*.json ./
+COPY tsconfig.json ./
+
+# Install dependencies
+RUN npm ci --only=production
+
+# Copy built files
+COPY dist/ ./dist/
+
+# Create directories and set permissions
+RUN mkdir -p /app/data && chmod 755 /app/data
+
+# Create non-root user
+RUN addgroup -g 1001 -S nodejs
+RUN adduser -S neural-ai -u 1001
+
+# Change ownership
+RUN chown -R neural-ai:nodejs /app
+USER neural-ai
+
+# Expose ports
+EXPOSE 3000 3001 5174
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
+    CMD curl -f http://localhost:3000/health || exit 1
+
+# Start the Neural AI Platform
+CMD ["npm", "run", "unified:start"] 
