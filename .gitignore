@@ -176,3 +176,6 @@ agent-logs/
 
 # Modules directory (as requested)
 modules/
+
+# Claude state file (can get very large)
+claude-state.json
