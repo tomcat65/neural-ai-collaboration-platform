@@ -1,0 +1,296 @@
+{
+  "name": "Neural AI Collaboration Platform - Weaviate Vector Database Schema",
+  "description": "Vector database schema for semantic search and AI memory storage",
+  "classes": [
+    {
+      "class": "AIAgent",
+      "description": "AI agent entities with their capabilities and characteristics",
+      "vectorIndexType": "hnsw",
+      "vectorizer": "text2vec-openai",
+      "properties": [
+        {
+          "name": "agentId",
+          "dataType": ["string"],
+          "description": "Unique identifier for the AI agent"
+        },
+        {
+          "name": "name",
+          "dataType": ["string"],
+          "description": "Human-readable name of the agent"
+        },
+        {
+          "name": "type",
+          "dataType": ["string"],
+          "description": "Type of AI agent (reasoning, implementation, analysis, etc.)"
+        },
+        {
+          "name": "capabilities",
+          "dataType": ["string[]"],
+          "description": "List of capabilities the agent possesses"
+        },
+        {
+          "name": "description",
+          "dataType": ["text"],
+          "description": "Detailed description of the agent's purpose and abilities"
+        },
+        {
+          "name": "trustScore",
+          "dataType": ["number"],
+          "description": "Trust score between 0 and 1"
+        },
+        {
+          "name": "performanceMetrics",
+          "dataType": ["object"],
+          "description": "Performance statistics and metrics"
+        },
+        {
+          "name": "lastActive",
+          "dataType": ["date"],
+          "description": "Last activity timestamp"
+        }
+      ]
+    },
+    {
+      "class": "CollaborativeMemory",
+      "description": "Shared memories and knowledge from AI collaboration",
+      "vectorIndexType": "hnsw",
+      "vectorizer": "text2vec-openai",
+      "properties": [
+        {
+          "name": "memoryId",
+          "dataType": ["string"],
+          "description": "Unique identifier for the memory"
+        },
+        {
+          "name": "content",
+          "dataType": ["text"],
+          "description": "The actual content or knowledge stored"
+        },
+        {
+          "name": "type",
+          "dataType": ["string"],
+          "description": "Type of memory (conversation, decision, solution, pattern, etc.)"
+        },
+        {
+          "name": "participants",
+          "dataType": ["string[]"],
+          "description": "IDs of agents that contributed to this memory"
+        },
+        {
+          "name": "tags",
+          "dataType": ["string[]"],
+          "description": "Categorization tags for the memory"
+        },
+        {
+          "name": "confidence",
+          "dataType": ["number"],
+          "description": "Confidence score of the memory accuracy"
+        },
+        {
+          "name": "context",
+          "dataType": ["object"],
+          "description": "Context information when memory was created"
+        },
+        {
+          "name": "createdAt",
+          "dataType": ["date"],
+          "description": "When the memory was created"
+        },
+        {
+          "name": "lastAccessed",
+          "dataType": ["date"],
+          "description": "When the memory was last accessed"
+        },
+        {
+          "name": "accessCount",
+          "dataType": ["int"],
+          "description": "Number of times this memory has been accessed"
+        }
+      ]
+    },
+    {
+      "class": "CollaborationPattern",
+      "description": "Patterns of successful AI collaboration",
+      "vectorIndexType": "hnsw",
+      "vectorizer": "text2vec-openai",
+      "properties": [
+        {
+          "name": "patternId",
+          "dataType": ["string"],
+          "description": "Unique identifier for the collaboration pattern"
+        },
+        {
+          "name": "name",
+          "dataType": ["string"],
+          "description": "Name of the collaboration pattern"
+        },
+        {
+          "name": "description",
+          "dataType": ["text"],
+          "description": "Detailed description of the pattern"
+        },
+        {
+          "name": "participants",
+          "dataType": ["string[]"],
+          "description": "Types of agents that typically use this pattern"
+        },
+        {
+          "name": "scenario",
+          "dataType": ["text"],
+          "description": "When and why this pattern is effective"
+        },
+        {
+          "name": "steps",
+          "dataType": ["string[]"],
+          "description": "Sequential steps in the collaboration pattern"
+        },
+        {
+          "name": "successRate",
+          "dataType": ["number"],
+          "description": "Historical success rate of this pattern"
+        },
+        {
+          "name": "averageDuration",
+          "dataType": ["number"],
+          "description": "Average time to complete this pattern"
+        },
+        {
+          "name": "complexity",
+          "dataType": ["string"],
+          "description": "Complexity level (simple, moderate, complex, critical)"
+        },
+        {
+          "name": "domain",
+          "dataType": ["string[]"],
+          "description": "Domains where this pattern is applicable"
+        }
+      ]
+    },
+    {
+      "class": "ConsensuDecision",
+      "description": "Decisions made through consensus mechanisms",
+      "vectorIndexType": "hnsw", 
+      "vectorizer": "text2vec-openai",
+      "properties": [
+        {
+          "name": "decisionId",
+          "dataType": ["string"],
+          "description": "Unique identifier for the consensus decision"
+        },
+        {
+          "name": "proposal",
+          "dataType": ["text"],
+          "description": "The original proposal that was voted on"
+        },
+        {
+          "name": "context",
+          "dataType": ["text"],
+          "description": "Context and background for the decision"
+        },
+        {
+          "name": "participants",
+          "dataType": ["string[]"],
+          "description": "Agent IDs that participated in the consensus"
+        },
+        {
+          "name": "outcome",
+          "dataType": ["string"],
+          "description": "Final decision outcome (approved, rejected, no_quorum)"
+        },
+        {
+          "name": "votes",
+          "dataType": ["object"],
+          "description": "Detailed voting information"
+        },
+        {
+          "name": "reasoning",
+          "dataType": ["string[]"],
+          "description": "Reasoning provided by voting agents"
+        },
+        {
+          "name": "confidence",
+          "dataType": ["number"],
+          "description": "Overall confidence in the decision"
+        },
+        {
+          "name": "duration",
+          "dataType": ["number"],
+          "description": "Time taken to reach consensus (milliseconds)"
+        },
+        {
+          "name": "topology",
+          "dataType": ["string"],
+          "description": "Network topology used for consensus"
+        },
+        {
+          "name": "createdAt",
+          "dataType": ["date"],
+          "description": "When the consensus process started"
+        }
+      ]
+    },
+    {
+      "class": "PerformanceInsight",
+      "description": "Insights derived from system performance analysis",
+      "vectorIndexType": "hnsw",
+      "vectorizer": "text2vec-openai",
+      "properties": [
+        {
+          "name": "insightId",
+          "dataType": ["string"],
+          "description": "Unique identifier for the insight"
+        },
+        {
+          "name": "title",
+          "dataType": ["string"],
+          "description": "Brief title of the insight"
+        },
+        {
+          "name": "description",
+          "dataType": ["text"],
+          "description": "Detailed description of the insight"
+        },
+        {
+          "name": "category",
+          "dataType": ["string"],
+          "description": "Category of insight (latency, throughput, accuracy, etc.)"
+        },
+        {
+          "name": "metrics",
+          "dataType": ["object"],
+          "description": "Specific metrics that support this insight"
+        },
+        {
+          "name": "recommendations",
+          "dataType": ["string[]"],
+          "description": "Actionable recommendations based on the insight"
+        },
+        {
+          "name": "impact",
+          "dataType": ["string"],
+          "description": "Expected impact level (low, medium, high, critical)"
+        },
+        {
+          "name": "confidence",
+          "dataType": ["number"],
+          "description": "Confidence in the insight validity"
+        },
+        {
+          "name": "source",
+          "dataType": ["string"],
+          "description": "Source of the data that generated the insight"
+        },
+        {
+          "name": "timeframe",
+          "dataType": ["string"],
+          "description": "Time period this insight covers"
+        },
+        {
+          "name": "generatedAt",
+          "dataType": ["date"],
+          "description": "When the insight was generated"
+        }
+      ]
+    }
+  ]
+}
