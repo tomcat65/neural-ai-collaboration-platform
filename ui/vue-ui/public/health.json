@@ -1,0 +1,12 @@
+{
+  "status": "healthy",
+  "service": "multi-agent-observatory",
+  "version": "1.0.0",
+  "timestamp": "2025-07-17T21:20:00.000Z",
+  "endpoints": {
+    "dashboard": "/",
+    "analytics": "/api/analytics",
+    "agent-status": "/api/agent-status",
+    "activity-pulse": "/api/activity-pulse"
+  }
+} 
