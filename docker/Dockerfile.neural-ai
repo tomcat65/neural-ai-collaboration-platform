@@ -19,8 +19,12 @@ COPY tsconfig.json ./
 # Install dependencies
 RUN npm ci --only=production
 
-# Copy built files
+# Copy built files and configs
 COPY dist/ ./dist/
+COPY claude-code-mcp.json ./
+COPY start-claude-code-bridge.sh ./
+COPY docker/start-docker-services.sh ./
+RUN chmod +x start-claude-code-bridge.sh start-docker-services.sh
 
 # Create directories and set permissions
 RUN mkdir -p /app/data && chmod 755 /app/data
@@ -40,5 +44,5 @@ EXPOSE 3000 3001 5174
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
     CMD curl -f http://localhost:3000/health || exit 1
 
-# Start the Neural AI Platform
-CMD ["npm", "run", "unified:start"] 
+# Start all Neural AI Platform services
+CMD ["/bin/sh", "-c", "/app/start-docker-services.sh"] 

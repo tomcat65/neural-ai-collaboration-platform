@@ -230,7 +230,7 @@ export class NetworkMCPServer {
         console.log(`💬 AI Message: ${from} → ${to}: ${actualMessage}`);
         
         // Store message in memory system
-        const messageId = await this.memoryManager.store(from, {
+        const messageId = await this.memoryManager.store(from || 'system', {
           id: `message-${Date.now()}`,
           to,
           message: actualMessage,
@@ -264,22 +264,128 @@ export class NetworkMCPServer {
       try {
         const { agentId } = req.params;
         
-        // Search for messages addressed to this agent
-        const searchResults = await this.memoryManager.search(`to ${agentId}`, { shared: true });
+        // Search for messages where this agent is the recipient (to field)
+        // We need to search for content that contains the agentId in the "to" field
+        const searchResults = await this.memoryManager.search(`"to":"${agentId}"`, { shared: true });
+        
+        // Also search for messages sent by this agent
+        const sentMessages = await this.memoryManager.search(agentId, { shared: true });
+        
+        // Combine and filter for actual messages (type: ai_message)
+        const allResults = [...searchResults, ...sentMessages];
+        const messageResults = allResults.filter(result => {
+          // Check if this is an AI message by examining the content structure
+          return result.content && (result.content.message || result.content.to);
+        });
+        
+        // Remove duplicates and format response
+        const uniqueMessages = new Map();
+        messageResults.forEach(result => {
+          if (!uniqueMessages.has(result.id)) {
+            uniqueMessages.set(result.id, {
+              id: result.id,
+              content: result.content,
+              timestamp: result.timestamp,
+              from: result.source || 'unknown'
+            });
+          }
+        });
         
         res.json({
           agentId,
-          messages: searchResults.map(result => ({
-            id: result.id,
-            content: result.content,
-            timestamp: result.timestamp,
-            from: result.source || 'unknown'
-          }))
+          messages: Array.from(uniqueMessages.values())
         });
 
       } catch (error) {
         console.error('❌ Get messages error:', error);
         res.status(500).json({ error: 'Failed to get messages' });
+      }
+    });
+    
+    // Debug endpoint to see all stored messages
+    this.app.get('/debug/all-messages', async (req, res) => {
+      try {
+        const searchResults = await this.memoryManager.search('', { shared: true });
+        res.json({
+          total: searchResults.length,
+          messages: searchResults.filter(r => r.content && (r.content.message || r.content.content))
+        });
+      } catch (error) {
+        res.status(500).json({ error: error.message });
+      }
+    });
+
+    // Comprehensive system status endpoint
+    this.app.get('/system/status', async (req, res) => {
+      try {
+        const memoryStatus = await this.memoryManager.getSystemStatus();
+        
+        // Get memory statistics
+        const memoryStats = {
+          individualAgents: this.memoryManager.getMemorySystem().individual.size,
+          sharedKnowledge: this.memoryManager.getSharedMemory().knowledge.length,
+          activeTasks: this.memoryManager.getSharedMemory().tasks.tasks.size,
+          projectArtifacts: this.memoryManager.getSharedMemory().artifacts.length,
+          consensusDecisions: this.memoryManager.getSharedMemory().decisions.length
+        };
+
+        // Get advanced system statistics if available
+        let advancedStats: any = {};
+        if (memoryStatus.advancedSystemsEnabled) {
+          try {
+            if (memoryStatus.redis.connected && this.memoryManager.redisClient) {
+              const redisStats = await this.memoryManager.redisClient.getCacheStats();
+              advancedStats.redis = redisStats;
+            }
+            
+            if (memoryStatus.weaviate.connected && this.memoryManager.weaviateClient) {
+              const weaviateStats = await this.memoryManager.weaviateClient.getStatistics();
+              advancedStats.weaviate = weaviateStats;
+            }
+            
+            // Neo4j stats would require additional implementation
+            advancedStats.neo4j = { status: 'connected', note: 'Statistics not yet implemented' };
+          } catch (statsError) {
+            console.warn('⚠️ Error getting advanced system statistics:', statsError);
+          }
+        }
+
+        const systemStatus = {
+          timestamp: new Date().toISOString(),
+          service: 'shared-memory-mcp',
+          version: '0.1.0',
+          uptime: process.uptime(),
+          memory: {
+            used: process.memoryUsage(),
+            system: memoryStats
+          },
+          databases: memoryStatus,
+          advanced: advancedStats,
+          messageHub: this.messageHub ? {
+            enabled: true,
+            port: 3003,
+            status: 'active'
+          } : {
+            enabled: false
+          },
+          endpoints: {
+            health: `/health`,
+            aiMessages: `/ai-message`,
+            getMessages: `/ai-messages/:agentId`,
+            mcpProtocol: `/mcp`,
+            systemStatus: `/system/status`,
+            debug: `/debug/all-messages`
+          }
+        };
+
+        res.json(systemStatus);
+      } catch (error) {
+        console.error('❌ System status error:', error);
+        res.status(500).json({ 
+          error: 'Failed to get system status',
+          message: error.message,
+          timestamp: new Date().toISOString()
+        });
       }
     });
   }

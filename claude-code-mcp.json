@@ -1,0 +1,38 @@
+{
+  "mcpServers": {
+    "neural-ai-collaboration": {
+      "command": "node",
+      "args": ["dist/mcp-http-server.js"],
+      "cwd": "/home/tomcat65/projects/shared-memory-mcp",
+      "env": {
+        "MCP_PORT": "5174",
+        "NODE_ENV": "development"
+      },
+      "description": "Neural AI Collaboration Platform - Direct AI-to-AI communication and memory sharing",
+      "capabilities": [
+        "ai-messaging",
+        "memory-management", 
+        "project-collaboration",
+        "task-coordination",
+        "consensus-voting",
+        "knowledge-sharing"
+      ]
+    },
+    "neural-ai-bridge": {
+      "command": "tsx",
+      "args": ["src/mcp-bridge/examples/bridge-demo.ts"],
+      "cwd": "/home/tomcat65/projects/shared-memory-mcp",
+      "env": {
+        "BRIDGE_MODE": "claude-code",
+        "CLAUDE_ROLE": "orchestrator"
+      },
+      "description": "Multi-AI Agent Bridge for coordinating with other AI providers",
+      "capabilities": [
+        "multi-agent-coordination",
+        "cross-provider-messaging",
+        "routing-optimization",
+        "conflict-resolution"
+      ]
+    }
+  }
+}

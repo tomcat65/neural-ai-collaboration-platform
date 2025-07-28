@@ -6,7 +6,7 @@ export class Neo4jMemoryClient {
 
   constructor() {
     this.driver = neo4j.driver(
-      'bolt://localhost:7687',
+      'bolt://neo4j:7687',
       neo4j.auth.basic('neo4j', 'password')
     );
   }

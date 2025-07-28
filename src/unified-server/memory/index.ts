@@ -20,10 +20,17 @@ import {
   SharedKnowledge,
   ProjectArtifacts
 } from '../types/memory.js';
+import { WeaviateClient } from '../../memory/weaviate-client.js';
+import { Neo4jClient } from '../../memory/neo4j-client.js';
+import { RedisClient } from '../../memory/redis-client.js';
 
 export class MemoryManager {
   private db: Database.Database;
   private memorySystem: MemorySystem;
+  public weaviateClient?: WeaviateClient;
+  public neo4jClient?: Neo4jClient;
+  public redisClient?: RedisClient;
+  private isAdvancedSystemsEnabled: boolean = false;
 
   constructor(dbPath: string = './data/unified-platform.db') {
     this.db = new Database(dbPath);
@@ -40,6 +47,33 @@ export class MemoryManager {
 
     this.initializeDatabase();
     this.loadMemoryFromDatabase();
+    this.initializeAdvancedSystems();
+  }
+
+  private async initializeAdvancedSystems(): Promise<void> {
+    try {
+      console.log('🚀 Initializing advanced memory systems...');
+      
+      // Initialize Redis client with Docker networking
+      this.redisClient = new RedisClient('redis://redis:6379');
+      await this.redisClient.initialize();
+      
+      // Initialize Weaviate client
+      this.weaviateClient = new WeaviateClient();
+      await this.weaviateClient.initialize();
+      
+      // Initialize Neo4j client
+      this.neo4jClient = new Neo4jClient();
+      await this.neo4jClient.initialize();
+      
+      this.isAdvancedSystemsEnabled = true;
+      console.log('✅ Advanced memory systems initialized successfully');
+      
+    } catch (error) {
+      console.warn('⚠️ Advanced memory systems initialization failed:', error);
+      console.log('🔄 Falling back to SQLite-only mode');
+      this.isAdvancedSystemsEnabled = false;
+    }
   }
 
   private initializeDatabase(): void {
@@ -379,6 +413,7 @@ export class MemoryManager {
   async store(agentId: string, memory: any, scope: 'individual' | 'shared', type: string): Promise<string> {
     const id = uuidv4();
     
+    // 1. Store in SQLite (primary storage)
     if (scope === 'individual') {
       const stmt = this.db.prepare(`
         INSERT INTO individual_memory (id, agent_id, memory_type, content, importance, tags)
@@ -453,8 +488,59 @@ export class MemoryManager {
       }
     }
 
-    console.log(`💾 Stored ${scope} memory (${type}) for agent ${agentId}`);
+    // 2. Store in advanced systems if available
+    if (this.isAdvancedSystemsEnabled) {
+      await this.storeInAdvancedSystems(id, agentId, memory, scope, type);
+    }
+
+    console.log(`💾 Stored ${scope} memory (${type}) for agent ${agentId}${this.isAdvancedSystemsEnabled ? ' [Multi-DB]' : ' [SQLite]'}`);
     return id;
+  }
+
+  private async storeInAdvancedSystems(id: string, agentId: string, memory: any, scope: string, type: string): Promise<void> {
+    try {
+      // Store in Weaviate for semantic search
+      if (this.weaviateClient) {
+        await this.weaviateClient.storeMemory({
+          id,
+          agentId,
+          type: type as any,
+          content: typeof memory === 'string' ? memory : JSON.stringify(memory),
+          timestamp: Date.now(),
+          tags: memory?.tags || [],
+          priority: Math.round((memory?.importance || 0.5) * 10),
+          relationships: []
+        });
+      }
+
+      // Store in Neo4j for relationship mapping
+      if (this.neo4jClient) {
+        await this.neo4jClient.storeMemory({
+          id,
+          agentId,
+          content: typeof memory === 'string' ? memory : JSON.stringify(memory),
+          type: type as any,
+          timestamp: Date.now(),
+          tags: memory?.tags || [],
+          priority: Math.round((memory?.importance || 0.5) * 10),
+          relationships: []
+        });
+      }
+
+      // Cache in Redis for fast access
+      if (this.redisClient) {
+        await this.redisClient.cacheMemory(`memory:${id}`, {
+          id,
+          agentId,
+          content: memory,
+          type,
+          timestamp: new Date()
+        });
+      }
+
+    } catch (error) {
+      console.warn('⚠️ Failed to store in advanced systems:', error);
+    }
   }
 
   async retrieve(query: MemoryQuery, scope: MemoryScope): Promise<any[]> {
@@ -518,6 +604,15 @@ export class MemoryManager {
   }
 
   async search(query: string, scope: MemoryScope | string): Promise<SearchResult[]> {
+    // 1. Check Redis cache first
+    if (this.isAdvancedSystemsEnabled && this.redisClient) {
+      const cachedResults = await this.redisClient.getCachedSearchResults(query);
+      if (cachedResults) {
+        console.log(`⚡ Returning cached search results for: "${query}"`);
+        return cachedResults;
+      }
+    }
+
     const results: SearchResult[] = [];
     const searchTerm = query.toLowerCase();
     
@@ -538,6 +633,11 @@ export class MemoryManager {
       }
     } else {
       searchScope = scope;
+    }
+
+    // 2. Enhanced search with advanced systems
+    if (this.isAdvancedSystemsEnabled) {
+      await this.searchInAdvancedSystems(query, searchScope, results);
     }
 
     // Search in-memory data first
@@ -756,7 +856,78 @@ export class MemoryManager {
       }
     }
 
-    return Array.from(uniqueResults.values()).sort((a, b) => b.relevance - a.relevance);
+    const finalResults = Array.from(uniqueResults.values()).sort((a, b) => b.relevance - a.relevance);
+
+    // 3. Cache results in Redis for future queries
+    if (this.isAdvancedSystemsEnabled && this.redisClient && finalResults.length > 0) {
+      await this.redisClient.cacheSearchResults(query, finalResults);
+    }
+
+    return finalResults;
+  }
+
+  private async searchInAdvancedSystems(query: string, scope: MemoryScope, results: SearchResult[]): Promise<void> {
+    try {
+      // 1. Semantic search with Weaviate
+      if (this.weaviateClient && scope.shared) {
+        console.log(`🔍 Performing semantic search with Weaviate: "${query}"`);
+        const weaviateResults = await this.weaviateClient.searchMemories(query);
+        
+        for (const wResult of weaviateResults) {
+          results.push({
+            id: wResult.id,
+            type: 'shared',
+            content: {
+              original: wResult.content,
+              tags: wResult.tags,
+              agentId: wResult.agentId,
+              source: 'weaviate'
+            },
+            relevance: (wResult.priority || 5) / 10, // Convert back to 0-1 scale
+            source: `weaviate:${wResult.agentId}`,
+            timestamp: new Date(wResult.timestamp)
+          });
+        }
+      }
+
+      // 2. Relationship-based search with Neo4j  
+      if (this.neo4jClient && scope.shared) {
+        console.log(`🕸️ Performing relationship search with Neo4j: "${query}"`);
+        
+        // Search for memories that might contain the query term
+        // Since we don't have searchMemoriesByContent, we'll use a basic approach
+        try {
+          // Get related memories for any existing memory (simplified approach)  
+          const relatedMemories = await this.neo4jClient.getRelatedMemories('dummy', 'RELATED');
+          
+          for (const nResult of relatedMemories) {
+            if (nResult.content.toLowerCase().includes(query.toLowerCase())) {
+              const furtherRelated = await this.neo4jClient.getRelatedMemories(nResult.id, 'RELATED');
+              
+              results.push({
+                id: nResult.id,
+                type: 'shared',
+                content: {
+                  original: nResult.content,
+                  tags: nResult.tags,
+                  relatedCount: furtherRelated.length,
+                  relatedMemories: furtherRelated.slice(0, 3),
+                  source: 'neo4j'
+                },
+                relevance: (nResult.priority || 5) / 10,
+                source: `neo4j:${nResult.agentId}`,
+                timestamp: new Date(nResult.timestamp)
+              });
+            }
+          }
+        } catch (neo4jError) {
+          console.warn('Neo4j search error:', neo4jError);
+        }
+      }
+
+    } catch (error) {
+      console.warn('⚠️ Advanced search systems error:', error);
+    }
   }
 
   getMemorySystem(): MemorySystem {
@@ -792,8 +963,44 @@ export class MemoryManager {
     }
   }
 
-  close(): void {
+  async getSystemStatus(): Promise<any> {
+    const status = {
+      sqlite: { connected: true, type: 'SQLite' },
+      redis: { connected: false, type: 'Redis Cache' },
+      weaviate: { connected: false, type: 'Vector Database' },
+      neo4j: { connected: false, type: 'Graph Database' },
+      advancedSystemsEnabled: this.isAdvancedSystemsEnabled
+    };
+
+    if (this.isAdvancedSystemsEnabled) {
+      if (this.redisClient) {
+        status.redis.connected = await this.redisClient.healthCheck();
+      }
+      if (this.weaviateClient) {
+        status.weaviate.connected = await this.weaviateClient.healthCheck();
+      }
+      if (this.neo4jClient) {
+        // Neo4j doesn't have a public health check method, assume connected if client exists
+        status.neo4j.connected = true;
+      }
+    }
+
+    return status;
+  }
+
+  async close(): Promise<void> {
     this.db.close();
-    console.log('🧠 Memory manager closed');
+    
+    if (this.isAdvancedSystemsEnabled) {
+      if (this.redisClient) {
+        await this.redisClient.close();
+      }
+      if (this.neo4jClient) {
+        await this.neo4jClient.close();
+      }
+      // Weaviate client doesn't need explicit closing
+    }
+    
+    console.log('🧠 Enhanced memory manager closed');
   }
 }

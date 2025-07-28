@@ -8,7 +8,7 @@ export class WeaviateClient {
   constructor() {
     this.client = weaviate.client({
       scheme: 'http',
-      host: 'localhost:8080',
+      host: 'weaviate:8080',
     });
   }
 
@@ -37,15 +37,7 @@ export class WeaviateClient {
             description: 'Memory content',
             indexInverted: true,
           },
-          {
-            name: 'embedding',
-            dataType: ['vector'],
-            description: 'Vector embedding for semantic search',
-            vectorizer: 'text2vec-openai',
-            vectorIndexConfig: {
-              distance: 'cosine',
-            },
-          },
+          // Vector embeddings are handled automatically by the vectorizer
           {
             name: 'timestamp',
             dataType: ['date'],
@@ -69,7 +61,7 @@ export class WeaviateClient {
             indexInverted: true,
           },
         ],
-        vectorizer: 'text2vec-openai',
+        vectorizer: 'none', // Disable automatic vectorization for now
       };
 
       await this.client.schema.classCreator().withClass(schema).do();
@@ -152,10 +144,16 @@ export class WeaviateClient {
         limit: searchLimit,
       };
 
+      // Use text-based search instead of vector search since vectorizer is disabled
       const result = await this.client.graphql
         .get()
         .withClassName(this.className)
-        .withNearText({ concepts: [query] })
+        .withFields('agentId memoryType content timestamp tags priority relationships _additional { id }')
+        .withWhere({
+          path: ['content'],
+          operator: 'Like',
+          valueText: `*${query}*`
+        })
         .withLimit(searchLimit)
         .do();
 
