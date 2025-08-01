@@ -94,21 +94,123 @@ export class NetworkMCPServer {
       });
     });
 
-    // MCP over HTTP endpoint - this is where external AIs connect
-    this.app.post('/mcp', async (_req, res) => {
+    // Direct HTTP API endpoints for MCP tools (immediate access)
+    this.app.get('/api/tools', async (_req, res) => {
       try {
-        console.log('🔗 MCP Request received:', _req.body);
-        
-        // Create SSE transport for this request
-        const transport = new SSEServerTransport('/mcp/events', res);
-        
-        // Connect the MCP server to this transport
-        await this.server.connect(transport);
-        
-        console.log('✅ MCP client connected via HTTP');
+        const tools = await this._handleToolsList();
+        res.json(tools);
       } catch (error) {
-        console.error('❌ MCP connection error:', error);
-        res.status(500).json({ error: 'MCP connection failed' });
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+      }
+    });
+
+    this.app.post('/api/tools/:toolName', async (req, res) => {
+      try {
+        const { toolName } = req.params;
+        const args = req.body;
+        const result = await this._handleToolCall(toolName, args);
+        res.json(result);
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+      }
+    });
+
+    this.app.get('/api/tools/search_nodes/:query', async (req, res) => {
+      try {
+        const { query } = req.params;
+        const result = await this._handleToolCall('search_nodes', { query });
+        res.json(result);
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+      }
+    });
+
+    // MCP over HTTP endpoint - JSON-RPC over HTTP (not SSE)
+    this.app.post('/mcp', async (req, res) => {
+      // Set proper JSON headers first
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Cache-Control', 'no-cache');
+      
+      try {
+        console.log('🔗 MCP Request received:', req.body);
+        
+        const { jsonrpc = '2.0', id, method, params = {} } = req.body || {};
+        let result;
+        
+        // Handle empty requests (initialization handshake)
+        if (!method) {
+          console.log('🤝 MCP Initialization handshake');
+          return res.json({
+            jsonrpc: '2.0',
+            id: id || 1,
+            result: {
+              protocolVersion: '2024-11-05',
+              capabilities: {
+                tools: {},
+                prompts: {},
+                resources: {}
+              },
+              serverInfo: {
+                name: 'shared-memory-mcp-network',
+                version: '0.1.0'
+              }
+            }
+          });
+        }
+
+        // Handle MCP methods with proper JSON-RPC response format
+        switch (method) {
+          case 'initialize':
+            result = {
+              protocolVersion: '2024-11-05',
+              capabilities: {
+                tools: {},
+                prompts: {},
+                resources: {}
+              },
+              serverInfo: {
+                name: 'shared-memory-mcp-network',
+                version: '0.1.0'
+              }
+            };
+            break;
+            
+          case 'tools/list':
+            result = await this._handleToolsList();
+            break;
+            
+          case 'tools/call':
+            result = await this._handleToolCall(params.name, params.arguments);
+            break;
+            
+          default:
+            return res.json({
+              jsonrpc: '2.0',
+              id: id || 1,
+              error: {
+                code: -32601,
+                message: `Method not found: ${method}`
+              }
+            });
+        }
+        
+        console.log('✅ MCP request processed via HTTP');
+        return res.json({
+          jsonrpc: '2.0',
+          id: id || 1,
+          result
+        });
+        
+      } catch (error) {
+        console.error('❌ MCP request error:', error);
+        return res.json({
+          jsonrpc: '2.0',
+          id: req.body?.id || 1,
+          error: {
+            code: -32603,
+            message: error instanceof Error ? error.message : 'Internal error'
+          }
+        });
       }
     });
 
@@ -233,6 +335,7 @@ export class NetworkMCPServer {
         const messageId = await this.memoryManager.store(from || 'system', {
           id: `message-${Date.now()}`,
           to,
+          target: to,  // Add target field for compatibility
           message: actualMessage,
           type: type || 'direct',
           timestamp: new Date().toISOString()
@@ -264,18 +367,19 @@ export class NetworkMCPServer {
       try {
         const { agentId } = req.params;
         
-        // Search for messages where this agent is the recipient (to field)
-        // We need to search for content that contains the agentId in the "to" field
-        const searchResults = await this.memoryManager.search(`"to":"${agentId}"`, { shared: true });
+        // Search for messages where this agent is the recipient (to or target field)
+        // We need to search for content that contains the agentId in either "to" or "target" field
+        const toSearchResults = await this.memoryManager.search(`"to":"${agentId}"`, { shared: true });
+        const targetSearchResults = await this.memoryManager.search(`"target":"${agentId}"`, { shared: true });
         
         // Also search for messages sent by this agent
         const sentMessages = await this.memoryManager.search(agentId, { shared: true });
         
         // Combine and filter for actual messages (type: ai_message)
-        const allResults = [...searchResults, ...sentMessages];
+        const allResults = [...toSearchResults, ...targetSearchResults, ...sentMessages];
         const messageResults = allResults.filter(result => {
           // Check if this is an AI message by examining the content structure
-          return result.content && (result.content.message || result.content.to);
+          return result.content && (result.content.message || result.content.to || result.content.target);
         });
         
         // Remove duplicates and format response
@@ -490,7 +594,72 @@ export class NetworkMCPServer {
               required: ['entities'],
             },
           },
-          // Add more tools as needed...
+          {
+            name: 'search_nodes',
+            description: 'Search for nodes in the knowledge graph based on a query',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                query: { type: 'string', description: 'The search query to match against entity names, types, and observation content' }
+              },
+              required: ['query']
+            }
+          },
+          {
+            name: 'add_observations',
+            description: 'Add new observations to existing entities in the knowledge graph',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                observations: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      entityName: { type: 'string', description: 'The name of the entity to add the observations to' },
+                      contents: { 
+                        type: 'array', 
+                        items: { type: 'string' },
+                        description: 'An array of observation contents to add' 
+                      }
+                    },
+                    required: ['entityName', 'contents']
+                  }
+                }
+              },
+              required: ['observations']
+            }
+          },
+          {
+            name: 'create_relations',
+            description: 'Create multiple new relations between entities in the knowledge graph',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                relations: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      from: { type: 'string', description: 'The name of the entity where the relation starts' },
+                      to: { type: 'string', description: 'The name of the entity where the relation ends' },
+                      relationType: { type: 'string', description: 'The type of the relation' }
+                    },
+                    required: ['from', 'to', 'relationType']
+                  }
+                }
+              },
+              required: ['relations']
+            }
+          },
+          {
+            name: 'read_graph',
+            description: 'Read the entire knowledge graph',
+            inputSchema: {
+              type: 'object',
+              properties: {}
+            }
+          }
         ],
       };
     });
@@ -500,6 +669,129 @@ export class NetworkMCPServer {
       const { name, arguments: args = {} } = request.params;
       return await this._handleToolCall(name, args);
     });
+  }
+
+  private async _handleToolsList() {
+    return {
+      tools: [
+        {
+          name: 'send_ai_message',
+          description: 'Send a direct message to another AI agent',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              to: { type: 'string', description: 'Target AI agent ID' },
+              message: { type: 'string', description: 'Message content' },
+              type: { type: 'string', description: 'Message type', default: 'direct' }
+            },
+            required: ['to', 'message']
+          }
+        },
+        {
+          name: 'get_ai_messages',
+          description: 'Get messages sent to this AI agent',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              agentId: { type: 'string', description: 'AI agent ID to get messages for' }
+            },
+            required: ['agentId']
+          }
+        },
+        {
+          name: 'create_entities',
+          description: 'Create multiple new entities in the knowledge graph',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              entities: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string', description: 'The name of the entity' },
+                    entityType: { type: 'string', description: 'The type of the entity' },
+                    observations: {
+                      type: 'array',
+                      items: { type: 'string' },
+                      description: 'An array of observation contents associated with the entity',
+                    },
+                  },
+                  required: ['name', 'entityType', 'observations'],
+                },
+              },
+            },
+            required: ['entities'],
+          },
+        },
+        {
+          name: 'search_nodes',
+          description: 'Search for nodes in the knowledge graph based on a query',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              query: { type: 'string', description: 'The search query to match against entity names, types, and observation content' }
+            },
+            required: ['query']
+          }
+        },
+        {
+          name: 'add_observations',
+          description: 'Add new observations to existing entities in the knowledge graph',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              observations: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    entityName: { type: 'string', description: 'The name of the entity to add the observations to' },
+                    contents: { 
+                      type: 'array', 
+                      items: { type: 'string' },
+                      description: 'An array of observation contents to add' 
+                    }
+                  },
+                  required: ['entityName', 'contents']
+                }
+              }
+            },
+            required: ['observations']
+          }
+        },
+        {
+          name: 'create_relations',
+          description: 'Create multiple new relations between entities in the knowledge graph',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              relations: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    from: { type: 'string', description: 'The name of the entity where the relation starts' },
+                    to: { type: 'string', description: 'The name of the entity where the relation ends' },
+                    relationType: { type: 'string', description: 'The type of the relation' }
+                  },
+                  required: ['from', 'to', 'relationType']
+                }
+              }
+            },
+            required: ['relations']
+          }
+        },
+        {
+          name: 'read_graph',
+          description: 'Read the entire knowledge graph',
+          inputSchema: {
+            type: 'object',
+            properties: {}
+          }
+        }
+      ]
+    };
   }
 
   private async _handleToolCall(name: string, args: any = {}) {
@@ -571,6 +863,128 @@ export class NetworkMCPServer {
               {
                 type: 'text',
                 text: JSON.stringify(createdEntities, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'search_nodes': {
+          const { query } = args;
+          const searchResults = await this.memoryManager.search(query, { shared: true });
+          
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  query,
+                  total: searchResults.length,
+                  results: searchResults
+                }, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'add_observations': {
+          const { observations } = args;
+          const agent = args.agentId || this.agentId;
+          
+          const results = await Promise.all(observations.map(async (obs: any) => {
+            const observationData = {
+              entityName: obs.entityName,
+              contents: obs.contents,
+              addedBy: agent,
+              timestamp: new Date().toISOString()
+            };
+            
+            const observationId = await this.memoryManager.store(agent, observationData, 'shared', 'observation');
+            return { id: observationId, ...observationData };
+          }));
+
+          await this.publishEventToUnified('knowledge.updated', {
+            observations: results,
+            agent: agent
+          });
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  added: results.length,
+                  observations: results
+                }, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'create_relations': {
+          const { relations } = args;
+          const agent = args.agentId || this.agentId;
+          
+          const createdRelations = await Promise.all(relations.map(async (relation: any) => {
+            const relationData = {
+              from: relation.from,
+              to: relation.to,
+              relationType: relation.relationType,
+              createdBy: agent,
+              timestamp: new Date().toISOString()
+            };
+            
+            const relationId = await this.memoryManager.store(agent, relationData, 'shared', 'relation');
+            return { id: relationId, ...relationData };
+          }));
+
+          await this.publishEventToUnified('knowledge.relations.created', {
+            relations: createdRelations,
+            agent: agent
+          });
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  created: createdRelations.length,
+                  relations: createdRelations
+                }, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'read_graph': {
+          const agent = args.agentId || this.agentId;
+          
+          // Get all entities, relations, and observations
+          const entities = await this.memoryManager.search('', { shared: true });
+          const entitiesOnly = entities.filter(e => e.content?.type === 'entity');
+          const relationsOnly = entities.filter(e => e.content?.type === 'relation');
+          const observationsOnly = entities.filter(e => e.content?.type === 'observation');
+          
+          const graphData = {
+            timestamp: new Date().toISOString(),
+            requestedBy: agent,
+            statistics: {
+              totalNodes: entities.length,
+              entities: entitiesOnly.length,
+              relations: relationsOnly.length,
+              observations: observationsOnly.length
+            },
+            graph: {
+              entities: entitiesOnly,
+              relations: relationsOnly,
+              observations: observationsOnly
+            }
+          };
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(graphData, null, 2),
               },
             ],
           };

@@ -1,0 +1,39 @@
+# Docker Compose for Universal MCP Gateway Only
+# Use this for testing the gateway in isolation
+version: '3.8'
+
+services:
+  # Universal MCP Gateway - Standalone for testing
+  universal-gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.universal-gateway
+    container_name: universal-mcp-gateway-standalone
+    ports:
+      - "5200:5200"
+    environment:
+      - NODE_ENV=development
+      - GATEWAY_PORT=5200
+      - NEURAL_AI_URL=http://host.docker.internal:5174
+      - REDIS_URL=redis://host.docker.internal:6379
+      - NEO4J_URL=bolt://host.docker.internal:7687
+      - WEAVIATE_URL=http://host.docker.internal:8080
+      - POSTGRES_URL=postgresql://postgres:postgres@host.docker.internal:5432/unified_platform
+      - DEBUG=true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5200/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    labels:
+      - "service=universal-mcp-gateway"
+      - "version=1.0.0"
+      - "environment=standalone"
+
+networks:
+  default:
+    name: gateway-network
+    driver: bridge

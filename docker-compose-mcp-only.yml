@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  # Unified Neural MCP Server - Connects to existing databases
+  neural-mcp-unified:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.unified-neural-mcp
+    container_name: neural-mcp-unified
+    ports:
+      - "0.0.0.0:6174:6174"  # Neural MCP Server - bind to all interfaces for Windows access
+      - "0.0.0.0:3003:3003"  # Message Hub WebSocket - bind to all interfaces
+    environment:
+      - NEURAL_MCP_PORT=6174
+      - MESSAGE_HUB_PORT=3003
+      - NODE_ENV=production
+      - REDIS_URL=redis://docker-redis-1:6379
+      - NEO4J_URL=bolt://docker-neo4j-1:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=neural-ai-password
+      - WEAVIATE_URL=http://docker-weaviate-1:8080
+      - POSTGRES_URL=postgresql://postgres:postgres@neural-ai-postgres-simple:5432/postgres
+    volumes:
+      - neural_unified_data:/app/data
+      - ./logs:/app/logs
+      - ./memory-backup/20250731_153103:/app/backup:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6174/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - docker_default
+      - docker_neural-network
+
+volumes:
+  neural_unified_data:
+    driver: local
+
+networks:
+  docker_default:
+    external: true
+  docker_neural-network:
+    external: true

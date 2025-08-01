@@ -63,8 +63,8 @@ export class Neo4jMemoryClient {
         content: memory.content,
         agentId: memory.agentId,
         timestamp: new Date(memory.timestamp).toISOString(),
-        tags: memory.tags,
-        metadata: memory.metadata,
+        tags: memory.tags || [],
+        metadata: memory.metadata || {},
       });
     } catch (error) {
       console.error('❌ Error storing memory in Neo4j:', error);

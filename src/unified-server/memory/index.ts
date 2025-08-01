@@ -55,7 +55,7 @@ export class MemoryManager {
       console.log('🚀 Initializing advanced memory systems...');
       
       // Initialize Redis client with Docker networking
-      this.redisClient = new RedisClient('redis://redis:6379');
+      this.redisClient = new RedisClient(process.env.REDIS_URL || 'redis://redis:6379');
       await this.redisClient.initialize();
       
       // Initialize Weaviate client
@@ -509,7 +509,8 @@ export class MemoryManager {
           timestamp: Date.now(),
           tags: memory?.tags || [],
           priority: Math.round((memory?.importance || 0.5) * 10),
-          relationships: []
+          relationships: [],
+          metadata: memory?.metadata || {}
         });
       }
 
@@ -523,7 +524,8 @@ export class MemoryManager {
           timestamp: Date.now(),
           tags: memory?.tags || [],
           priority: Math.round((memory?.importance || 0.5) * 10),
-          relationships: []
+          relationships: [],
+          metadata: memory?.metadata || {}
         });
       }
 

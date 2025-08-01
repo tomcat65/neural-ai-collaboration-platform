@@ -1,0 +1,149 @@
+version: '3.8'
+
+services:
+  # Unified Neural MCP Server - Latest Code
+  neural-mcp-unified:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.unified-neural-mcp
+    container_name: neural-mcp-unified
+    ports:
+      - "6174:6174"  # Neural MCP Server (avoiding conflict with 5174)
+      - "3003:3003"  # Message Hub WebSocket
+    environment:
+      - NEURAL_MCP_PORT=6174
+      - MESSAGE_HUB_PORT=3003
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+      - NEO4J_URL=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=neural-ai-password
+      - WEAVIATE_URL=http://weaviate:8080
+      - POSTGRES_URL=postgresql://postgres:postgres@postgres:5432/postgres
+    volumes:
+      - neural_unified_data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      weaviate:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6174/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - neural-network
+
+  # Use existing Redis container
+  redis:
+    image: redis:7-alpine
+    container_name: neural-redis-unified
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_unified_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - neural-network
+
+  # Use existing Neo4j container
+  neo4j:
+    image: neo4j:5.15-community
+    container_name: neural-neo4j-unified
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/neural-ai-password
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+    volumes:
+      - neo4j_unified_data:/data
+      - neo4j_unified_logs:/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7474/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - neural-network
+
+  # Use existing Weaviate container
+  weaviate:
+    image: semitechnologies/weaviate:1.22.4
+    container_name: neural-weaviate-unified
+    ports:
+      - "8080:8080"
+    environment:
+      - QUERY_DEFAULTS_LIMIT=25
+      - AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true
+      - PERSISTENCE_DATA_PATH=/var/lib/weaviate
+      - DEFAULT_VECTORIZER_MODULE=none
+      - CLUSTER_HOSTNAME=node1
+    volumes:
+      - weaviate_unified_data:/var/lib/weaviate
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/.well-known/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - neural-network
+
+  # Use existing PostgreSQL container
+  postgres:
+    image: postgres:15-alpine
+    container_name: neural-postgres-unified
+    environment:
+      - POSTGRES_DB=neural_ai_db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    volumes:
+      - postgres_unified_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - neural-network
+
+volumes:
+  neural_unified_data:
+    driver: local
+  redis_unified_data:
+    driver: local
+  neo4j_unified_data:
+    driver: local
+  neo4j_unified_logs:
+    driver: local
+  weaviate_unified_data:
+    driver: local
+  postgres_unified_data:
+    driver: local
+
+networks:
+  neural-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16

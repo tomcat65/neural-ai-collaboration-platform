@@ -1,0 +1,33 @@
+{
+  "mcpServers": {
+    "universal-mcp-gateway": {
+      "command": "curl",
+      "args": [
+        "-X",
+        "POST",
+        "http://localhost:5174/mcp",
+        "-H",
+        "Content-Type: application/json"
+      ]
+    }
+  },
+  "description": "Universal MCP Gateway Configuration - Works with Claude Code, Claude Desktop, Cursor, OpenAI, and Gemini",
+  "features": [
+    "Federated memory across all platforms",
+    "Universal entity CRUD operations", 
+    "Cross-platform messaging",
+    "Memory synchronization",
+    "Platform registry and routing",
+    "HTTP API fallback for non-MCP clients"
+  ],
+  "tools": [
+    "universal:create_entities",
+    "universal:get_entities", 
+    "universal:search_entities",
+    "universal:update_entities",
+    "universal:delete_entities",
+    "universal:send_message",
+    "universal:get_platform_status",
+    "universal:sync_memory"
+  ]
+}

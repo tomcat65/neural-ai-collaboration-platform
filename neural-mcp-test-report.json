@@ -1,0 +1,126 @@
+{
+  "testSummary": {
+    "timestamp": "2025-07-31T20:01:59.095Z",
+    "totalTests": 30,
+    "passedTests": 30,
+    "failedTests": 0,
+    "successRate": "100.0%",
+    "averageResponseTime": "106.6ms"
+  },
+  "toolCoverage": {
+    "expectedTools": 27,
+    "availableTools": 27,
+    "missingTools": [],
+    "coveragePercentage": "100.0%"
+  },
+  "performanceMetrics": {
+    "create_entities": [
+      6,
+      3
+    ],
+    "search_entities": [
+      16,
+      2
+    ],
+    "add_observations": [
+      7
+    ],
+    "create_relations": [
+      5,
+      2
+    ],
+    "read_graph": [
+      10
+    ],
+    "register_agent": [
+      4
+    ],
+    "send_ai_message": [
+      6
+    ],
+    "get_ai_messages": [
+      4
+    ],
+    "get_agent_status": [
+      2
+    ],
+    "get_provider_status": [
+      2
+    ],
+    "execute_ai_request": [
+      2120
+    ],
+    "stream_ai_response": [
+      4
+    ],
+    "configure_providers": [
+      19
+    ],
+    "set_token_budget": [
+      7
+    ],
+    "configure_agent_behavior": [
+      2
+    ],
+    "start_autonomous_mode": [
+      6
+    ],
+    "trigger_agent_action": [
+      6
+    ],
+    "translate_path": [
+      2
+    ],
+    "test_connectivity": [
+      6
+    ],
+    "generate_configs": [
+      5
+    ],
+    "sync_platforms": [
+      931
+    ],
+    "submit_consensus_vote": [
+      4
+    ],
+    "get_consensus_status": [
+      4
+    ],
+    "coordinate_agents": [
+      2
+    ],
+    "resolve_conflicts": [
+      2
+    ],
+    "get_system_status": [
+      5
+    ],
+    "configure_system": [
+      5
+    ],
+    "concurrency": {
+      "totalRequests": 10,
+      "successfulRequests": 10,
+      "totalTime": 12,
+      "averageResponseTime": 9.8,
+      "successRate": 1
+    },
+    "memoryStress": {
+      "entitiesCreated": 50,
+      "relationsCreated": 25,
+      "totalTime": 8,
+      "searchSuccess": true
+    }
+  },
+  "errors": [],
+  "systemValidation": {
+    "healthCheck": "passed",
+    "mcpCompliance": "passed",
+    "toolsAvailable": 27,
+    "realTimeMessaging": "enabled",
+    "advancedMemory": "enabled"
+  },
+  "recommendations": [
+    "System ready for production deployment"
+  ]
+}

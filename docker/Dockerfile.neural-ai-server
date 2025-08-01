@@ -1,0 +1,118 @@
+FROM node:20-alpine AS base
+
+# Install system dependencies
+RUN apk add --no-cache \
+    curl \
+    git \
+    python3 \
+    make \
+    g++ \
+    linux-headers \
+    libc6-compat
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY tsconfig.json ./
+
+# Install all dependencies (including dev deps for build)
+RUN npm ci && npm cache clean --force
+
+# Copy source code
+COPY src/ ./src/
+COPY data/ ./data/
+COPY *.js ./
+COPY *.ts ./
+COPY *.json ./
+
+# Build TypeScript to JavaScript
+RUN npm run build
+
+# Create production stage
+FROM node:20-alpine AS production
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    curl \
+    git \
+    ca-certificates \
+    tzdata
+
+# Create app user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S appuser -u 1001
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files first for production installation
+COPY --chown=appuser:nodejs package*.json ./
+
+# Install all dependencies (need ts-node for runtime) 
+RUN npm ci && npm cache clean --force
+
+# Install ts-node globally for TypeScript execution
+RUN npm install -g ts-node typescript
+
+# Copy built files and source
+COPY --from=base --chown=appuser:nodejs /app/dist ./dist
+COPY --from=base --chown=appuser:nodejs /app/src ./src
+COPY --from=base --chown=appuser:nodejs /app/data ./data
+COPY --from=base --chown=appuser:nodejs /app/*.ts ./
+COPY --from=base --chown=appuser:nodejs /app/*.js ./
+COPY --from=base --chown=appuser:nodejs /app/tsconfig.json ./
+
+# Copy additional files
+COPY --chown=appuser:nodejs docker/scripts/ ./scripts/
+COPY --chown=appuser:nodejs docker/config/ ./config/
+
+# Create directories with proper permissions
+RUN mkdir -p /app/logs /app/data/shared /app/data/generated /app/tmp && \
+    chown -R appuser:nodejs /app
+
+# Health check script
+COPY --chown=appuser:nodejs <<EOF /app/health-check.cjs
+const http = require('http');
+
+const options = {
+  hostname: 'localhost',
+  port: 5174,
+  path: '/health',
+  method: 'GET',
+  timeout: 5000
+};
+
+const req = http.request(options, (res) => {
+  if (res.statusCode === 200) {
+    process.exit(0);
+  } else {
+    process.exit(1);
+  }
+});
+
+req.on('error', () => process.exit(1));
+req.on('timeout', () => process.exit(1));
+req.end();
+EOF
+
+# Switch to non-root user
+USER appuser
+
+# Environment variables
+ENV NODE_ENV=production \
+    PORT=3001 \
+    WS_PORT=3002 \
+    ADMIN_PORT=3003 \
+    HOST=0.0.0.0
+
+# Expose ports
+EXPOSE 3001 3002 3003
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD node health-check.cjs
+
+# Start command with built JavaScript version
+CMD ["npm", "run", "mcp:start"]

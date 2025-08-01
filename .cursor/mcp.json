@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "neural-ai-collaboration": {
+      "command": "node",
+      "args": [
+        "/home/tomcat65/projects/shared-memory-mcp/.cursor/mcp-stdio-bridge-fixed.cjs"
+      ]
+    }
+  }
+}

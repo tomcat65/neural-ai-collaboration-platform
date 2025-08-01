@@ -1,0 +1,59 @@
+# Smart Event-Driven Autonomous Agent Container
+FROM node:18-alpine
+
+# Install dependencies
+RUN apk add --no-cache \
+    curl \
+    git \
+    bash \
+    procps \
+    tmux \
+    && rm -rf /var/cache/apk/*
+
+# Create app directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci --only=production && npm cache clean --force
+
+# Copy smart agent files
+COPY src/event-driven-agents/smart-autonomous-agent.js ./
+COPY src/mcp-http-server.ts ./src/
+
+# Install additional packages for WebSocket and HTTP
+RUN npm install ws express axios
+
+# Create necessary directories
+RUN mkdir -p /app/data/logs /app/data/pids
+
+# Environment variables
+ENV NODE_ENV=production
+ENV AGENT_ID=""
+ENV AGENT_ROLE=""
+ENV ORCHESTRATOR_URL="ws://event-orchestrator:3005"
+ENV MCP_SERVER_URL="http://neural-ai-server:3001"
+ENV WEBHOOK_PORT=4100
+ENV LOG_DIR=/app/data/logs
+
+# Health check script
+RUN echo '#!/bin/bash\n# Check if agent process is running and responsive\nif pgrep -f "smart-autonomous-agent.js" > /dev/null; then\n  # Try to connect to webhook endpoint if available\n  if [ ! -z "$WEBHOOK_PORT" ]; then\n    curl -f http://localhost:$WEBHOOK_PORT/health 2>/dev/null || echo "Agent running but webhook not responsive"\n  fi\n  exit 0\nelse\n  exit 1\nfi' > /app/health-check.sh && chmod +x /app/health-check.sh
+
+# Expose webhook port range
+EXPOSE 4100-4110
+
+# Create startup script
+RUN echo '#!/bin/bash\nset -e\n\n# Validate required environment variables\nif [ -z "$AGENT_ID" ]; then\n  echo "❌ AGENT_ID environment variable is required"\n  exit 1\nfi\n\nif [ -z "$AGENT_ROLE" ]; then\n  echo "❌ AGENT_ROLE environment variable is required"\n  exit 1\nfi\n\necho "🤖 Starting Smart Event-Driven Agent: $AGENT_ID"\necho "🎭 Role: $AGENT_ROLE"\necho "🔗 Orchestrator: $ORCHESTRATOR_URL"\necho "🧠 MCP Server: $MCP_SERVER_URL"\necho "📝 Logs: $LOG_DIR"\n\n# Create log directory\nmkdir -p "$LOG_DIR"\n\n# Start the smart autonomous agent\nexec node smart-autonomous-agent.js "$AGENT_ID"' > /app/start.sh && chmod +x /app/start.sh
+
+# Start the smart agent
+CMD ["sh", "-c", "echo '🤖 Starting Smart Event-Driven Agent:' $AGENT_ID && node smart-autonomous-agent.js $AGENT_ID"]
+
+# Health check
+HEALTHCHECK --interval=60s --timeout=15s --retries=5 CMD /app/health-check.sh
+
+# Labels
+LABEL service="smart-agent" \
+      version="1.0.0" \
+      description="Event-driven smart autonomous agent with token efficiency"

@@ -1,0 +1,312 @@
+FROM node:20-alpine AS base
+
+# Install system dependencies
+RUN apk add --no-cache curl ca-certificates
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci --only=production && npm cache clean --force
+
+# Create production stage
+FROM node:20-alpine AS production
+
+# Install runtime dependencies
+RUN apk add --no-cache curl ca-certificates
+
+# Create app user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S appuser -u 1001
+
+# Set working directory
+WORKDIR /app
+
+# Copy application
+COPY --from=base --chown=appuser:nodejs /app/node_modules ./node_modules
+COPY --from=base --chown=appuser:nodejs /app/package*.json ./
+
+# Create the configuration server
+COPY --chown=appuser:nodejs <<EOF /app/config-server.js
+const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const cors = require('cors');
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+const NEURAL_AI_SERVER_URL = process.env.NEURAL_AI_SERVER_URL || 'http://localhost:3001';
+
+// Enable CORS for all routes
+app.use(cors());
+app.use(express.json());
+
+// Serve static files
+app.use('/static', express.static(path.join(__dirname, 'generated')));
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'healthy', 
+    service: 'neural-ai-config-server',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Generate and serve MCP configurations
+app.get('/config/:client', (req, res) => {
+  const { client } = req.params;
+  const config = generateMCPConfig(client);
+  
+  if (!config) {
+    return res.status(404).json({ error: 'Configuration not found for client: ' + client });
+  }
+  
+  res.json(config);
+});
+
+// Generate platform-specific setup instructions
+app.get('/setup/:platform', (req, res) => {
+  const { platform } = req.params;
+  const instructions = generateSetupInstructions(platform);
+  
+  res.json(instructions);
+});
+
+// Download configuration files
+app.get('/download/:client', (req, res) => {
+  const { client } = req.params;
+  const config = generateMCPConfig(client);
+  
+  if (!config) {
+    return res.status(404).json({ error: 'Configuration not found' });
+  }
+  
+  const filename = \`\${client}-mcp-config.json\`;
+  res.setHeader('Content-Disposition', \`attachment; filename=\${filename}\`);
+  res.setHeader('Content-Type', 'application/json');
+  res.send(JSON.stringify(config, null, 2));
+});
+
+// List all available configurations
+app.get('/configs', (req, res) => {
+  const configs = {
+    'claude-desktop': 'Claude Desktop MCP Configuration',
+    'cursor': 'Cursor IDE MCP Configuration',
+    'claude-cli': 'Claude CLI MCP Configuration',
+    'vscode': 'VS Code MCP Configuration'
+  };
+  
+  res.json(configs);
+});
+
+// Generate MCP configuration for different clients
+function generateMCPConfig(client) {
+  const baseConfig = {
+    mcpServers: {
+      'neural-ai-collaboration': {
+        command: 'node',
+        args: ['-'],
+        env: {
+          NEURAL_AI_SERVER_URL: NEURAL_AI_SERVER_URL,
+          CLIENT_TYPE: client,
+          CONTAINER_MODE: 'true'
+        }
+      }
+    }
+  };
+
+  switch (client) {
+    case 'claude-desktop':
+      return {
+        ...baseConfig,
+        mcpServers: {
+          'neural-ai-collaboration': {
+            ...baseConfig.mcpServers['neural-ai-collaboration'],
+            command: 'curl',
+            args: [
+              '-s',
+              '-X', 'POST',
+              '-H', 'Content-Type: application/json',
+              \`\${NEURAL_AI_SERVER_URL}/mcp\`
+            ]
+          }
+        }
+      };
+
+    case 'cursor':
+      return {
+        ...baseConfig,
+        mcpServers: {
+          'neural-ai-collaboration': {
+            ...baseConfig.mcpServers['neural-ai-collaboration'],
+            command: 'curl',
+            args: [
+              '-s',
+              '-X', 'POST',
+              '-H', 'Content-Type: application/json',
+              \`\${NEURAL_AI_SERVER_URL}/mcp\`
+            ]
+          }
+        }
+      };
+
+    case 'claude-cli':
+      return {
+        ...baseConfig,
+        mcpServers: {
+          'neural-ai-collaboration': {
+            ...baseConfig.mcpServers['neural-ai-collaboration'],
+            env: {
+              ...baseConfig.mcpServers['neural-ai-collaboration'].env,
+              WSL_MODE: 'true'
+            }
+          }
+        }
+      };
+
+    case 'vscode':
+      return {
+        ...baseConfig,
+        mcpServers: {
+          'neural-ai-collaboration': {
+            ...baseConfig.mcpServers['neural-ai-collaboration'],
+            command: 'node',
+            args: ['mcp-client.js'],
+            env: {
+              ...baseConfig.mcpServers['neural-ai-collaboration'].env,
+              IDE: 'vscode'
+            }
+          }
+        }
+      };
+
+    default:
+      return null;
+  }
+}
+
+// Generate setup instructions for different platforms
+function generateSetupInstructions(platform) {
+  const baseInstructions = {
+    platform,
+    serverUrl: NEURAL_AI_SERVER_URL,
+    configUrl: \`http://localhost:8080/config/\${platform}\`,
+    downloadUrl: \`http://localhost:8080/download/\${platform}\`
+  };
+
+  switch (platform) {
+    case 'windows':
+      return {
+        ...baseInstructions,
+        title: 'Windows Setup Instructions',
+        steps: [
+          'Ensure Docker Desktop is running with WSL2 backend',
+          'Start the Neural AI containers: docker-compose up -d',
+          'Download Claude Desktop configuration: curl -o claude-desktop-config.json http://localhost:8080/download/claude-desktop',
+          'Download Cursor configuration: curl -o cursor-config.json http://localhost:8080/download/cursor',
+          'Configure Claude Desktop with the downloaded JSON file',
+          'Configure Cursor with the downloaded JSON file',
+          'Test connectivity: curl http://localhost:3001/health'
+        ]
+      };
+
+    case 'wsl':
+      return {
+        ...baseInstructions,
+        title: 'WSL Setup Instructions',
+        steps: [
+          'Navigate to project directory in WSL',
+          'Start containers: docker-compose up -d',
+          'Download Claude CLI configuration: wget http://localhost:8080/download/claude-cli',
+          'Configure Claude CLI with MCP settings',
+          'Test connectivity: curl http://localhost:3001/health',
+          'Verify autonomous agents: curl http://localhost:3001/agents/status'
+        ]
+      };
+
+    case 'linux':
+      return {
+        ...baseInstructions,
+        title: 'Linux Setup Instructions',
+        steps: [
+          'Ensure Docker and Docker Compose are installed',
+          'Clone the repository and navigate to project directory',
+          'Start all services: docker-compose up -d',
+          'Wait for all containers to be healthy: docker-compose ps',
+          'Download appropriate configuration files from http://localhost:8080/configs',
+          'Configure your AI clients with the downloaded configurations',
+          'Monitor system: open http://localhost:3000 (Grafana dashboard)'
+        ]
+      };
+
+    case 'macos':
+      return {
+        ...baseInstructions,
+        title: 'macOS Setup Instructions',
+        steps: [
+          'Ensure Docker Desktop is installed and running',
+          'Start the Neural AI platform: docker-compose up -d',
+          'Download Claude Desktop config: curl -o ~/Downloads/claude-desktop-config.json http://localhost:8080/download/claude-desktop',
+          'Configure Claude Desktop with the downloaded file',
+          'Access the admin dashboard: http://localhost:3003',
+          'Monitor system health: http://localhost:3000'
+        ]
+      };
+
+    default:
+      return {
+        ...baseInstructions,
+        title: 'Generic Setup Instructions',
+        steps: [
+          'Ensure Docker is installed and running',
+          'Start services: docker-compose up -d',
+          'Download configuration: http://localhost:8080/configs',
+          'Configure your AI client',
+          'Test connectivity: curl http://localhost:3001/health'
+        ]
+      };
+  }
+}
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Configuration server error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(\`🔧 Neural AI Configuration Server running on port \${PORT}\`);
+  console.log(\`📡 Neural AI Server URL: \${NEURAL_AI_SERVER_URL}\`);
+  console.log(\`🔗 Configuration endpoints:\`);
+  console.log(\`   - /config/:client - Get configuration for specific client\`);
+  console.log(\`   - /download/:client - Download configuration file\`);
+  console.log(\`   - /setup/:platform - Get platform-specific setup instructions\`);
+  console.log(\`   - /configs - List all available configurations\`);
+});
+EOF
+
+# Create directories
+RUN mkdir -p /app/generated /app/config && \
+    chown -R appuser:nodejs /app
+
+# Switch to non-root user
+USER appuser
+
+# Environment variables
+ENV NODE_ENV=production \
+    PORT=8080
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+  CMD curl -f http://localhost:8080/health || exit 1
+
+# Start command
+CMD ["node", "config-server.js"]

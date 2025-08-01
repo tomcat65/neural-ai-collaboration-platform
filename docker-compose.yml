@@ -1,0 +1,411 @@
+services:
+  # Universal MCP Gateway - The One Gateway to Rule Them All
+  universal-mcp-gateway:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.universal-gateway
+    container_name: universal-mcp-gateway
+    ports:
+      - "5200:5200"    # Universal MCP Gateway HTTP API
+    environment:
+      - NODE_ENV=production
+      - GATEWAY_PORT=5200
+      - NEURAL_AI_URL=http://neural-ai-server:5174
+      - REDIS_URL=redis://:password@redis:6379
+      - NEO4J_URL=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=password
+      - WEAVIATE_URL=http://weaviate:8080
+    volumes:
+      - neural_ai_data:/app/data:rw
+      - neural_ai_logs:/app/logs:rw
+    depends_on:
+      - neural-ai-server
+      - redis
+      - neo4j
+      - weaviate
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5200/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Event-Driven Agent Orchestrator (NEW)
+  event-orchestrator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.event-orchestrator
+    container_name: event-orchestrator
+    ports:
+      - "3004:3004"    # HTTP webhook endpoints
+      - "3005:3005"    # WebSocket server
+    environment:
+      - NODE_ENV=production
+      - ORCHESTRATOR_PORT=3004
+      - WEBSOCKET_PORT=3005
+      - LOG_DIR=/app/data/logs
+      - PID_DIR=/app/data/pids
+      - REDIS_URL=redis://:password@redis:6379
+    volumes:
+      - neural_ai_data:/app/data:rw
+      - neural_ai_logs:/app/logs:rw
+    depends_on:
+      - redis
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3004/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Neural AI Collaboration Platform - Core MCP Server
+  neural-ai-server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.neural-ai-server
+    container_name: neural-ai-server
+    ports:
+      - "5174:5174"    # MCP HTTP API (actual port used by server)
+      - "4002:3002"    # WebSocket API
+      - "4003:3003"    # Admin Dashboard
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - WS_PORT=3002
+      - ADMIN_PORT=3003
+      - HOST=0.0.0.0
+      - CROSS_PLATFORM=true
+      - CONTAINER_MODE=true
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/neural_ai
+      - REDIS_URL=redis://:password@redis:6379
+      - WEAVIATE_URL=http://weaviate:8080
+      - NEO4J_URL=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=password
+    volumes:
+      - neural_ai_data:/app/data
+      - neural_ai_logs:/app/logs
+      - neural_ai_config:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock  # For container management
+    depends_on:
+      - postgres
+      - redis
+      - weaviate
+      - neo4j
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "health-check.cjs"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+  # Smart Event-Driven Agent - Claude Code CLI (Project Leader)
+  claude-code-agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.smart-agent
+    container_name: claude-code-agent
+    ports:
+      - "4100:4100"    # Agent webhook endpoint
+    environment:
+      - AGENT_ID=claude-code-cli
+      - AGENT_ROLE=project-leader
+      - MCP_SERVER_URL=http://neural-ai-server:3001
+      - ORCHESTRATOR_URL=ws://event-orchestrator:3005
+      - WEBHOOK_PORT=4100
+      - LOG_LEVEL=info
+      - TOKEN_BUDGET_DAILY=50000
+      - TOKEN_BUDGET_PER_TASK=1000
+    volumes:
+      - neural_ai_data:/app/data:rw
+      - neural_ai_logs:/app/logs:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - neural-ai-server
+      - event-orchestrator
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/app/health-check.sh"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+
+  # Smart Event-Driven Agent - Claude Desktop (Infrastructure Specialist)
+  claude-desktop-agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.smart-agent
+    container_name: claude-desktop-agent
+    ports:
+      - "4101:4101"    # Agent webhook endpoint
+    environment:
+      - AGENT_ID=claude-desktop-agent
+      - AGENT_ROLE=infrastructure-specialist
+      - MCP_SERVER_URL=http://neural-ai-server:3001
+      - ORCHESTRATOR_URL=ws://event-orchestrator:3005
+      - WEBHOOK_PORT=4101
+      - LOG_LEVEL=info
+      - TOKEN_BUDGET_DAILY=40000
+      - TOKEN_BUDGET_PER_TASK=800
+    volumes:
+      - neural_ai_data:/app/data:rw
+      - neural_ai_logs:/app/logs:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - neural-ai-server
+      - event-orchestrator
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/app/health-check.sh"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+
+  # Smart Event-Driven Agent - Cursor IDE (Development Specialist)
+  cursor-ide-agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.smart-agent
+    container_name: cursor-ide-agent
+    ports:
+      - "4102:4102"    # Agent webhook endpoint
+    environment:
+      - AGENT_ID=cursor-ide-agent
+      - AGENT_ROLE=development-specialist
+      - MCP_SERVER_URL=http://neural-ai-server:3001
+      - ORCHESTRATOR_URL=ws://event-orchestrator:3005
+      - WEBHOOK_PORT=4102
+      - LOG_LEVEL=info
+      - TOKEN_BUDGET_DAILY=60000
+      - TOKEN_BUDGET_PER_TASK=1200
+    volumes:
+      - neural_ai_data:/app/data:rw
+      - neural_ai_logs:/app/logs:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - neural-ai-server
+      - event-orchestrator
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/app/health-check.sh"]
+      interval: 60s
+      timeout: 15s
+      retries: 5
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: neural-ai-postgres
+    environment:
+      - POSTGRES_DB=neural_ai
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init-scripts:/docker-entrypoint-initdb.d
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d neural_ai"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Redis Cache & Message Queue
+  redis:
+    image: redis:7-alpine
+    container_name: neural-ai-redis
+    command: redis-server --appendonly yes --requirepass password
+    volumes:
+      - redis_data:/data
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Weaviate Vector Database
+  weaviate:
+    image: semitechnologies/weaviate:1.22.4
+    container_name: neural-ai-weaviate
+    environment:
+      - AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true
+      - PERSISTENCE_DATA_PATH=/var/lib/weaviate
+      - DEFAULT_VECTORIZER_MODULE=none
+      - ENABLE_MODULES=text2vec-openai,text2vec-cohere,text2vec-huggingface,ref2vec-centroid,generative-openai,qna-openai
+      - CLUSTER_HOSTNAME=node1
+    ports:
+      - "8080:8080"    # Weaviate API
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/v1/.well-known/ready || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Neo4j Graph Database
+  neo4j:
+    image: neo4j:5-community
+    container_name: neural-ai-neo4j
+    environment:
+      - NEO4J_AUTH=neo4j/password
+      - NEO4J_PLUGINS=["apoc", "graph-data-science"]
+      - NEO4J_dbms_default__database=neural-ai
+      - NEO4J_dbms_memory_heap_initial__size=512m
+      - NEO4J_dbms_memory_heap_max__size=2G
+      - NEO4J_dbms_memory_pagecache_size=1G
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/var/lib/neo4j/import
+      - neo4j_plugins:/plugins
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "password", "RETURN 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Nginx Reverse Proxy & Load Balancer
+  nginx:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.nginx
+    container_name: neural-ai-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d:ro
+      - nginx_logs:/var/log/nginx
+      - letsencrypt_certs:/etc/letsencrypt
+    depends_on:
+      - neural-ai-server
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Monitoring & Analytics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: neural-ai-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+
+  # Grafana Dashboard
+  grafana:
+    image: grafana/grafana:latest
+    container_name: neural-ai-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning
+    ports:
+      - "3000:3000"
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+  # File Server for Configuration Distribution
+  config-server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.config-server
+    container_name: neural-ai-config-server
+    ports:
+      - "8081:8080"
+    environment:
+      - PORT=8080
+      - NEURAL_AI_SERVER_URL=http://neural-ai-server:3001
+      - CROSS_PLATFORM=true
+    volumes:
+      - neural_ai_config:/app/config:ro
+      - ./generated-configs:/app/generated:rw
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+    depends_on:
+      - neural-ai-server
+
+volumes:
+  neural_ai_data:
+    driver: local
+  neural_ai_logs:
+    driver: local
+  neural_ai_config:
+    driver: local
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  weaviate_data:
+    driver: local
+  neo4j_data:
+    driver: local
+  neo4j_logs:
+    driver: local
+  neo4j_import:
+    driver: local
+  neo4j_plugins:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  nginx_logs:
+    driver: local
+  letsencrypt_certs:
+    driver: local
+
+networks:
+  neural-ai-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

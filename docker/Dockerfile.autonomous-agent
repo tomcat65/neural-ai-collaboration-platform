@@ -1,0 +1,171 @@
+FROM node:20-alpine AS base
+
+# Install system dependencies
+RUN apk add --no-cache \
+    curl \
+    git \
+    python3 \
+    make \
+    g++ \
+    linux-headers \
+    libc6-compat
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY tsconfig.json ./
+
+# Install dependencies including dev dependencies for TypeScript compilation
+RUN npm ci && npm cache clean --force
+
+# Copy source code
+COPY src/ ./src/
+COPY autonomous-agent.js ./
+COPY *.json ./
+
+# Skip TypeScript build for containerized deployment - run directly with ts-node
+# RUN if [ -f "tsconfig.json" ]; then npm run build; fi
+
+# Create production stage
+FROM node:20-alpine AS production
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    curl \
+    git \
+    ca-certificates \
+    tzdata \
+    docker-cli
+
+# Create app user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S appuser -u 1001
+
+# Set working directory
+WORKDIR /app
+
+# Copy application
+COPY --from=base --chown=appuser:nodejs /app/node_modules ./node_modules
+COPY --from=base --chown=appuser:nodejs /app/package*.json ./
+COPY --from=base --chown=appuser:nodejs /app/autonomous-agent.js ./
+COPY --from=base --chown=appuser:nodejs /app/src ./src
+
+# Skip copying dist files since we're not building TypeScript
+# COPY --from=base --chown=appuser:nodejs /app/dist ./dist 2>/dev/null || true
+
+# Create directories with proper permissions
+RUN mkdir -p /app/logs /app/data /app/tmp && \
+    chown -R appuser:nodejs /app
+
+# Health check script for agents
+COPY --chown=appuser:nodejs <<EOF /app/health-check.js
+const fs = require('fs');
+const path = require('path');
+
+const agentId = process.env.AGENT_ID || 'unknown-agent';
+const logFile = path.join('/app/logs', \`\${agentId}-autonomous.log\`);
+
+try {
+  // Check if log file exists and has recent activity
+  const stats = fs.statSync(logFile);
+  const now = new Date();
+  const lastModified = new Date(stats.mtime);
+  const timeDiff = now - lastModified;
+  
+  // If log was modified within last 2 minutes, agent is healthy
+  if (timeDiff < 120000) {
+    console.log(\`Agent \${agentId} is healthy - last activity: \${Math.floor(timeDiff/1000)}s ago\`);
+    process.exit(0);
+  } else {
+    console.log(\`Agent \${agentId} appears inactive - last activity: \${Math.floor(timeDiff/1000)}s ago\`);
+    process.exit(1);
+  }
+} catch (error) {
+  console.log(\`Agent \${agentId} health check failed: \${error.message}\`);
+  process.exit(1);
+}
+EOF
+
+# Agent startup script
+COPY --chown=appuser:nodejs <<EOF /app/start-agent.js
+const { spawn } = require('child_process');
+const fs = require('fs');
+
+const agentId = process.env.AGENT_ID;
+const logLevel = process.env.LOG_LEVEL || 'info';
+
+if (!agentId) {
+  console.error('AGENT_ID environment variable is required');
+  process.exit(1);
+}
+
+console.log(\`🤖 Starting autonomous agent: \${agentId}\`);
+console.log(\`📊 Configuration:\`);
+console.log(\`   - Agent ID: \${agentId}\`);
+console.log(\`   - Role: \${process.env.AGENT_ROLE}\`);
+console.log(\`   - MCP Server: \${process.env.MCP_SERVER_URL}\`);
+console.log(\`   - Poll Interval: \${process.env.MESSAGE_POLL_INTERVAL}ms\`);
+console.log(\`   - Work Interval: \${process.env.WORK_INTERVAL}ms\`);
+
+// Ensure log directory exists
+const logDir = '/app/logs';
+if (!fs.existsSync(logDir)) {
+  fs.mkdirSync(logDir, { recursive: true });
+}
+
+// Start the autonomous agent
+const agent = spawn('node', ['autonomous-agent.js', agentId], {
+  stdio: ['ignore', 'pipe', 'pipe'],
+  env: {
+    ...process.env,
+    NODE_ENV: 'production'
+  }
+});
+
+// Forward output to container logs
+agent.stdout.on('data', (data) => {
+  process.stdout.write(data);
+});
+
+agent.stderr.on('data', (data) => {
+  process.stderr.write(data);
+});
+
+// Handle process termination
+agent.on('close', (code) => {
+  console.log(\`💀 Agent \${agentId} exited with code \${code}\`);
+  process.exit(code);
+});
+
+// Handle signals for graceful shutdown
+process.on('SIGTERM', () => {
+  console.log(\`🛑 Received SIGTERM, shutting down agent \${agentId}\`);
+  agent.kill('SIGTERM');
+});
+
+process.on('SIGINT', () => {
+  console.log(\`🛑 Received SIGINT, shutting down agent \${agentId}\`);
+  agent.kill('SIGINT');
+});
+
+console.log(\`✅ Agent \${agentId} started successfully (PID: \${agent.pid})\`);
+EOF
+
+# Switch to non-root user
+USER appuser
+
+# Environment variables
+ENV NODE_ENV=production \
+    AUTONOMOUS_MODE=true \
+    MESSAGE_POLL_INTERVAL=15000 \
+    WORK_INTERVAL=30000 \
+    LOG_LEVEL=info
+
+# Health check
+HEALTHCHECK --interval=60s --timeout=15s --start-period=30s --retries=5 \
+  CMD node health-check.js
+
+# Start command
+CMD ["node", "start-agent.js"]

@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "neural-ai-collaboration": {
+      "url": "http://localhost:6174/mcp"
+    }
+  }
+}

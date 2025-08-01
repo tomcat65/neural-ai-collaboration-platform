@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "neural-ai-collaboration": {
+      "command": "docker",
+      "args": [
+        "exec",
+        "-i",
+        "neural-mcp-unified",
+        "node",
+        "dist/unified-neural-mcp-server.js",
+        "--stdio"
+      ]
+    }
+  }
+}

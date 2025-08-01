@@ -1,0 +1,25 @@
+FROM nginx:alpine
+
+# Copy custom configuration
+COPY docker/nginx/nginx.conf /etc/nginx/nginx.conf
+COPY docker/nginx/conf.d /etc/nginx/conf.d
+
+# Add health check
+RUN apk add --no-cache curl
+
+# Use existing nginx user from base image
+
+# Set proper permissions
+RUN mkdir -p /var/cache/nginx && \
+    touch /var/run/nginx.pid && \
+    chown -R nginx:nginx /var/cache/nginx /var/log/nginx /var/run/nginx.pid
+
+# Note: nginx alpine image already has user setup
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+  CMD curl -f http://localhost/health || exit 1
+
+EXPOSE 80
+
+CMD ["nginx", "-g", "daemon off;"]

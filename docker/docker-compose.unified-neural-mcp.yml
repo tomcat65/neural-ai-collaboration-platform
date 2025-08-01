@@ -1,0 +1,91 @@
+version: '3.8'
+
+services:
+  unified-neural-mcp:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.unified-neural-mcp
+    ports:
+      - "6174:6174"  # Unified Neural MCP Server
+      - "3003:3003"  # Message Hub WebSocket
+    environment:
+      - NEURAL_MCP_PORT=6174
+      - MESSAGE_HUB_PORT=3003
+      - NODE_ENV=production
+      - ENABLE_ADVANCED_MEMORY=true
+      - ENABLE_MULTI_PROVIDER_AI=true
+      - ENABLE_AUTONOMOUS_AGENTS=true
+      - ENABLE_CROSS_PLATFORM=true
+      - ENABLE_CONSENSUS=true
+      - ENABLE_ML_INTEGRATION=true
+    volumes:
+      - unified_neural_data:/app/data
+      - ../logs:/app/logs
+    networks:
+      - neural_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6174/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.neural-mcp.rule=Host(`neural-mcp.localhost`)"
+      - "traefik.http.services.neural-mcp.loadbalancer.server.port=6174"
+
+  # Optional: Include Redis for advanced caching (if not using external Redis)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - neural_network
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Optional: Include Neo4j for graph database (if not using external Neo4j)
+  neo4j:
+    image: neo4j:5-community
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/neural-ai-password
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_apoc_export_file_enabled=true
+      - NEO4J_apoc_import_file_enabled=true
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    networks:
+      - neural_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7474/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  unified_neural_data:
+    driver: local
+  redis_data:
+    driver: local
+  neo4j_data:
+    driver: local
+  neo4j_logs:
+    driver: local
+
+networks:
+  neural_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

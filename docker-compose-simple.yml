@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  neural-mcp:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.unified-neural-mcp
+    container_name: neural-mcp-server
+    ports:
+      - "6174:6174"  # Neural MCP Server
+      - "3003:3003"  # Message Hub WebSocket
+    environment:
+      - NEURAL_MCP_PORT=6174
+      - MESSAGE_HUB_PORT=3003
+      - NODE_ENV=production
+    volumes:
+      - neural_data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6174/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - default
+
+  # Optional Redis for advanced caching
+  redis:
+    image: redis:7-alpine
+    container_name: neural-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - default
+
+volumes:
+  neural_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  default:
+    driver: bridge

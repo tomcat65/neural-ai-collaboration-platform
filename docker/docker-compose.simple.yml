@@ -1,4 +1,33 @@
 services:
+  # Universal MCP Gateway - The One Gateway to Rule Them All
+  universal-gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.universal-gateway
+    container_name: universal-mcp-gateway
+    ports:
+      - "5200:5200"
+    environment:
+      - NODE_ENV=production
+      - GATEWAY_PORT=5200
+      - NEURAL_AI_URL=http://neural-ai:5174
+      - REDIS_URL=redis://redis:6379
+      - NEO4J_URL=bolt://neo4j:7687
+      - WEAVIATE_URL=http://weaviate:8080
+      - POSTGRES_URL=postgresql://postgres:postgres@postgres:5432/unified_platform
+    depends_on:
+      - postgres
+      - redis
+      - neo4j
+      - weaviate
+    networks:
+      - neural-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5200/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
   # Vector Database - Weaviate
   weaviate:
     image: semitechnologies/weaviate:1.22.4
@@ -55,6 +84,24 @@ services:
       retries: 5
       start_period: 30s
 
+  # PostgreSQL Database (External - uses existing container)
+  postgres:
+    image: postgres:15-alpine
+    container_name: neural-ai-postgres-simple
+    environment:
+      - POSTGRES_DB=neural_ai
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - neural-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d neural_ai"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
   # Neural AI Platform Server
   neural-ai-platform:
     build:
@@ -107,6 +154,10 @@ services:
       retries: 5
       start_period: 60s
 
+networks:
+  neural-network:
+    driver: bridge
+
 volumes:
   weaviate_data:
   neo4j_data:
@@ -114,4 +165,5 @@ volumes:
   neo4j_import:
   neo4j_plugins:
   redis_data:
+  postgres_data:
   unified_data:
