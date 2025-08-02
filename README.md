@@ -75,17 +75,48 @@ The platform operates across **four specialized databases** for comprehensive AI
 
 ## 🐳 Docker Deployment
 
-### **Quick Start**
+### **🚀 Interactive Quick Start** (Recommended)
 ```bash
-# Start the complete platform
+# Navigate to project directory
 cd /home/tomcat65/projects/shared-memory-mcp
-docker-compose -f docker/docker-compose.simple.yml up -d
 
-# Verify all services are healthy
-docker ps
+# Interactive startup - choose continue existing project or start fresh
+./interactive-startup.sh
 
-# Check system status
-curl http://localhost:5174/system/status | python3 -m json.tool
+# Safe shutdown with automatic backup
+./safe-shutdown.sh
+```
+
+### **Advanced System Control**
+```bash
+# Manual control script (original method)
+./neural-ai-control.sh start
+./neural-ai-control.sh stop
+./neural-ai-control.sh status
+
+# Direct startup options
+./interactive-startup.sh --fresh      # Start fresh without prompts
+./interactive-startup.sh --restore    # Go directly to restore menu
+./interactive-startup.sh --list       # List available backups
+
+# Shutdown options
+./safe-shutdown.sh --force           # No confirmations
+./safe-shutdown.sh --no-backup       # Skip backup creation
+```
+
+### **Project Management Workflow**
+```bash
+# 1. Start working (automatically detects and lists available projects)
+./interactive-startup.sh
+
+# 2. Work on your project (system running with full multi-database support)
+
+# 3. Safe shutdown (automatically creates timestamped backup)
+./safe-shutdown.sh
+
+# 4. Resume later (restore from any backup)
+./interactive-startup.sh
+# Select "Continue Existing Project" → Choose your backup
 ```
 
 ### **Production Services**
@@ -159,44 +190,50 @@ curl http://localhost:5174/system/status | python3 -m json.tool
 
 ### **Available MCP Tools (27 Total)**
 
-#### **Core Collaboration Tools**
-- **`create_entities`** - Store knowledge in multi-database system
-- **`send_ai_message`** - Direct AI-to-AI communication
-- **`get_ai_messages`** - Retrieve agent message history
-- **`search_entities`** - Advanced federated search across memory systems
+For complete documentation with parameters, examples, and usage, see [COMPLETE_TOOL_REFERENCE.md](COMPLETE_TOOL_REFERENCE.md).
+
+#### **Memory & Knowledge Management (5 tools)**
+- **`create_entities`** - Store knowledge in multi-database system (Neo4j, Weaviate, Redis, SQLite)
+- **`search_entities`** - Advanced federated search across all memory systems  
 - **`add_observations`** - Add new observations to existing entities
-- **`create_relations`** - Create relationships between entities
-- **`read_graph`** - Read entire knowledge graph with analysis
+- **`create_relations`** - Create relationships between entities in graph database
+- **`read_graph`** - Read entire knowledge graph with comprehensive analysis
 
-#### **AI Provider Integration**
-- **`execute_ai_request`** - Multi-provider AI execution with routing
+#### **AI Agent Communication (4 tools)**
+- **`send_ai_message`** - Direct AI-to-AI communication with persistent queuing
+- **`get_ai_messages`** - Retrieve agent message history with filtering
+- **`broadcast_message`** - Send messages to multiple agents simultaneously
+- **`get_message_stats`** - Analytics on message patterns and agent activity
+
+#### **Multi-Provider AI Access (4 tools)**
+- **`execute_ai_request`** - Multi-provider AI execution with intelligent routing
 - **`stream_ai_response`** - Real-time streaming AI responses
-- **`get_provider_status`** - AI provider health and performance
-- **`configure_providers`** - Dynamic provider configuration
+- **`get_provider_status`** - AI provider health monitoring and performance metrics
+- **`configure_providers`** - Dynamic AI provider configuration and management
 
-#### **Autonomous Agent Management**
-- **`start_autonomous_mode`** - Enable autonomous agent operation
-- **`configure_agent_behavior`** - Set agent behavior patterns
-- **`set_token_budget`** - Manage token budgets and costs
-- **`trigger_agent_action`** - Manual agent action triggering
-- **`register_agent`** - Register new AI agents
-- **`get_agent_status`** - Agent health and status monitoring
+#### **Autonomous Operations (4 tools)**
+- **`start_autonomous_mode`** - Enable autonomous agent operation with event triggers
+- **`configure_agent_behavior`** - Set agent behavior patterns and triggers
+- **`set_token_budget`** - Manage token budgets and cost controls
+- **`trigger_agent_action`** - Manual agent action triggering with context
 
-#### **Cross-Platform Tools**
-- **`translate_path`** - Cross-platform path translation
-- **`test_connectivity`** - Platform connectivity testing
-- **`generate_configs`** - Generate platform-specific configs
-- **`sync_platforms`** - Data synchronization across platforms
+#### **Cross-Platform Support (4 tools)**
+- **`translate_path`** - Cross-platform path translation (Windows/WSL/Linux)
+- **`test_connectivity`** - Platform connectivity testing and diagnostics
+- **`generate_configs`** - Generate platform-specific MCP configurations
+- **`sync_platforms`** - Data synchronization across development platforms
 
-#### **Consensus & Coordination**
-- **`submit_consensus_vote`** - Distributed consensus voting
-- **`get_consensus_status`** - Consensus decision status
-- **`coordinate_agents`** - Multi-agent task coordination
-- **`resolve_conflicts`** - Agent conflict resolution
+#### **Consensus & Coordination (4 tools)**
+- **`submit_consensus_vote`** - Distributed consensus voting system
+- **`get_consensus_status`** - Check consensus decision status and progress
+- **`coordinate_agents`** - Multi-agent task coordination and scheduling
+- **`resolve_conflicts`** - Agent conflict resolution with priority systems
 
-#### **System Management**
-- **`get_system_status`** - Comprehensive system monitoring
+#### **System Monitoring & Control (2 tools)**
+- **`get_system_status`** - Comprehensive system monitoring and health checks
 - **`configure_system`** - System-wide configuration management
+
+**📖 Quick Tool Access**: Use `curl http://localhost:6174/api/tools` to see all available tools or check [COMPLETE_TOOL_REFERENCE.md](COMPLETE_TOOL_REFERENCE.md) for detailed usage examples.
 
 ## 🌐 HTTP API Usage
 
@@ -449,27 +486,74 @@ await send_ai_message({
 
 ## 🎉 Getting Started
 
-1. **Clone and Start**:
+### **🚀 Recommended: Interactive Startup**
+
+1. **Navigate to Project**:
    ```bash
-   git clone [repository-url]
-   cd shared-memory-mcp
-   docker-compose -f docker/docker-compose.simple.yml up -d
+   cd /home/tomcat65/projects/shared-memory-mcp
    ```
 
-2. **Verify System**:
+2. **Interactive Startup** (Choose your workflow):
    ```bash
+   ./interactive-startup.sh
+   ```
+   
+   **Options Available:**
+   - **🆕 Start Fresh**: New project with clean databases  
+   - **🔄 Continue Existing**: Restore from any available backup
+   - **📊 View Backups**: Browse all available project backups
+   
+   **Available Backups Detected:**
+   - `neural-ai-backup-20250731_232637` (Your recent backup)
+   - All backups in `$HOME/neural-ai-backup-*`
+   - Project backups in `./backups/`
+
+3. **Configure Claude Code MCP** (Already configured):
+   ```bash
+   # Check current configuration
+   claude mcp list
+   # Should show: neural-ai-collaboration
+   ```
+
+4. **Verify System & Test Tools**:
+   ```bash
+   # Check system health
    curl http://localhost:5174/system/status
+   
+   # Test MCP tools in Claude Code
+   # Available: create_entities, send_ai_message, get_ai_messages, search_entities
    ```
 
-3. **Configure Claude Code**:
-   - Add MCP configuration to your Claude settings
-   - Restart Claude Code CLI
-   - Test with: `create_entities`, `send_ai_message`, `get_ai_messages`
-
-4. **Access Dashboard**:
+5. **Access Dashboard**:
    ```bash
-   open http://localhost:5176
+   open http://localhost:5176  # Vue Dashboard
+   open http://localhost:5174  # Neural AI Platform  
+   open http://localhost:7474  # Neo4j Browser (neo4j/password)
    ```
+
+6. **Safe Shutdown When Done**:
+   ```bash
+   # Automatic backup + graceful shutdown
+   ./safe-shutdown.sh
+   
+   # Creates: /home/tomcat65/neural-ai-backup-YYYYMMDD_HHMMSS
+   ```
+
+### **🔧 Advanced Getting Started**
+
+For manual control or automation:
+
+```bash
+# Manual startup (original method)
+./neural-ai-control.sh start
+
+# Direct options
+./interactive-startup.sh --fresh      # Skip menus, start fresh
+./interactive-startup.sh --restore    # Go directly to restore menu
+
+# Restore specific backup directly
+./complete-restore.sh /home/tomcat65/neural-ai-backup-20250731_232637
+```
 
 ## 📚 Documentation
 

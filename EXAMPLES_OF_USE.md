@@ -10,28 +10,75 @@ A comprehensive guide to using the **Event-Driven AI Collaboration Platform** wi
 **Performance**: ~19ms storage, instant agent activation, 15+ hours stable uptime  
 **Integration**: ✅ Working MCP configurations for Claude Code, Claude Desktop, Cursor IDE  
 
-## 🔧 Quick Setup - TESTED & WORKING ✅
+## 🔧 Quick Setup - Interactive Startup (TESTED & WORKING ✅)
 
+### **🚀 Recommended: Interactive Project Management**
 ```bash
-# Start the complete event-driven platform
-docker-compose up -d
+# Navigate to project directory
+cd /home/tomcat65/projects/shared-memory-mcp
 
-# Verify all 9 containers are healthy
-docker ps --format "table {{.Names}}\t{{.Status}}"
+# Interactive startup - choose continue existing project or start fresh
+./interactive-startup.sh
 
-# Test neural-ai-server health
-curl http://localhost:5174/health
+# Available options:
+# 🆕 Start Fresh - New project with clean databases
+# 🔄 Continue Existing - Restore from any available backup  
+# 📊 View Backups - Browse all project backups
+```
 
-# Check event orchestrator with 3 connected agents
-curl http://localhost:3004/status
+### **📋 Project Management Workflow**
+```bash
+# 1. Start working (detects available projects automatically)
+./interactive-startup.sh
+# ↳ Shows available backups including: neural-ai-backup-20250731_232637
 
-# Test MCP functionality 
+# 2. Work on your project (full multi-database system running)
+# ↳ System healthy with all 27 MCP tools available
+
+# 3. Safe shutdown (automatic backup creation)
+./safe-shutdown.sh
+# ↳ Creates: /home/tomcat65/neural-ai-backup-YYYYMMDD_HHMMSS
+
+# 4. Resume later (restore from any backup)
+./interactive-startup.sh
+# ↳ Select "Continue Existing Project" → Choose your backup
+```
+
+### **🛠️ Advanced Control Options**
+```bash
+# Direct startup options (skip interactive menus)
+./interactive-startup.sh --fresh      # Start fresh without prompts
+./interactive-startup.sh --restore    # Go directly to restore menu
+./interactive-startup.sh --list       # List available backups
+
+# Shutdown options
+./safe-shutdown.sh --force           # No confirmations
+./safe-shutdown.sh --no-backup       # Skip backup creation
+
+# Traditional manual control (original method)
+./neural-ai-control.sh start
+./neural-ai-control.sh stop
+./neural-ai-control.sh status
+
+# Direct backup restoration
+./complete-restore.sh /home/tomcat65/neural-ai-backup-20250731_232637
+```
+
+### **🔍 System Health Verification**
+```bash
+# Test all services after startup
+curl http://localhost:5174/health              # Neural AI Platform
+curl http://localhost:3004/status              # Event Orchestrator  
+curl http://localhost:6174/health              # Unified MCP Server
+curl http://localhost:5174/system/status       # Complete system status
+
+# Test MCP functionality
 curl -X POST http://localhost:5174/ai-message \
   -H "Content-Type: application/json" \
   -d '{"from":"test","to":"claude-code-cli","message":"System test","type":"info"}'
 
-# Verify system comprehensive status
-curl http://localhost:5174/system/status | python3 -m json.tool
+# Check Docker containers
+docker ps --format "table {{.Names}}\t{{.Status}}"
 ```
 
 ---
@@ -950,15 +997,112 @@ print('✅ Ready for enterprise-scale AI collaboration and planning!')
 
 ---
 
+## 🎮 **Enhanced System Management & Control**
+
+### **🚀 Interactive Project Management (Recommended)**
+```bash
+# Navigate to project directory
+cd /home/tomcat65/projects/shared-memory-mcp
+
+# Interactive startup with project selection
+./interactive-startup.sh
+# ↳ Choose: Continue existing project | Start fresh | View backups
+
+# Safe shutdown with automatic backup
+./safe-shutdown.sh
+# ↳ Graceful agent stop → Create backup → Stop containers → Cleanup
+```
+
+### **📋 Project Workflow Management**
+```bash
+# Complete project lifecycle
+./interactive-startup.sh              # Choose project/backup to restore
+# ... work on your project ...
+./safe-shutdown.sh                    # Safe shutdown with backup
+
+# Quick options for automation
+./interactive-startup.sh --fresh      # Start fresh, skip menus
+./interactive-startup.sh --restore    # Direct to restore menu
+./safe-shutdown.sh --force           # No confirmations
+```
+
+### **🛠️ Traditional System Control** 
+```bash
+# Manual control (original method)
+./neural-ai-control.sh start         # Start system manually
+./neural-ai-control.sh stop          # Stop system manually
+./neural-ai-control.sh status        # Check system status
+./neural-ai-control.sh restart       # Restart system
+
+# Data management
+./neural-ai-control.sh backup        # Create backup manually
+./neural-ai-control.sh logs          # View all logs
+```
+
+### **💾 Backup & Restore Operations**
+```bash
+# List available backups
+./interactive-startup.sh --list
+
+# Direct restoration from specific backup
+./complete-restore.sh /home/tomcat65/neural-ai-backup-20250731_232637
+
+# Manual backup creation
+./backup-to-home.sh
+
+# Quick backup without shutdown
+./neural-ai-control.sh backup
+```
+
+### **🔧 Auto-Start Management**
+```bash
+# Disable auto-start on boot (RECOMMENDED for development)
+./neural-ai-control.sh disable-autostart
+
+# Re-enable auto-start if needed  
+./neural-ai-control.sh enable-autostart
+```
+
+### **📊 Enhanced Features**
+- **Smart Backup Detection**: Automatically finds backups in multiple locations
+- **Project Continuity**: Seamless switching between different project states
+- **Graceful Shutdown**: Autonomous agents stopped properly before container shutdown
+- **Backup Verification**: Ensures backup completed successfully before shutdown
+- **Interactive Menus**: User-friendly selection of projects and options
+- **Automated Restoration**: One-command restoration of complete system state
+
+---
+
 ## 🚀 **Getting Started with Real-World Usage**
 
-### **1. Platform Setup**
+### **1. Enhanced Platform Setup (Recommended)**
 ```bash
-# Start complete system
-docker-compose -f docker/docker-compose.simple.yml up -d
+# Navigate to project directory
+cd /home/tomcat65/projects/shared-memory-mcp
 
-# Verify all services healthy
+# Interactive startup - choose your workflow
+./interactive-startup.sh
+
+# Options available:
+# 🆕 Start Fresh → New project with clean databases
+# 🔄 Continue Existing → Restore from neural-ai-backup-20250731_232637 or other backups
+# 📊 View Backups → Browse all available project backups
+
+# Verify all services healthy after startup
 curl http://localhost:5174/system/status
+curl http://localhost:6174/health              # Unified MCP Server (27 tools)
+```
+
+### **1a. Quick Setup Alternatives**
+```bash
+# Direct fresh start (skip menus)
+./interactive-startup.sh --fresh
+
+# Direct restore (skip to backup selection)
+./interactive-startup.sh --restore
+
+# Traditional manual start (original method)
+./neural-ai-control.sh start
 ```
 
 ### **2. Configure Your AI Tools** ✅ **TESTED CONFIGURATIONS**
@@ -1090,6 +1234,128 @@ const response = await execute_ai_request({
    • Message ID mapping prevents "unknown message ID" errors
    • Cross-platform compatibility achieved
 ```
+
+---
+
+## 🛠️ **Practical MCP Tool Usage Examples**
+
+### **🔧 Essential Tool Reference for Daily Development**
+
+All 27 tools are available via MCP. For complete documentation, see [COMPLETE_TOOL_REFERENCE.md](COMPLETE_TOOL_REFERENCE.md).
+
+#### **Memory & Knowledge Management**
+```typescript
+// Store project insights in multi-database system
+await create_entities({
+  entities: [{
+    name: "API Performance Optimization", 
+    entityType: "project_milestone",
+    observations: [
+      "Reduced response time from 400ms to 145ms",
+      "Implemented Redis caching for frequently accessed data",
+      "Database query optimization completed"
+    ]
+  }]
+});
+
+// Search across all knowledge systems
+await search_entities({
+  query: "performance optimization",
+  entityTypes: ["project_milestone", "best_practice"],
+  limit: 10
+});
+```
+
+#### **AI Agent Coordination**  
+```typescript
+// Send targeted message to specific agent
+await send_ai_message({
+  to: "claude-desktop-agent",
+  message: "Frontend integration ready for testing. API endpoints documented.",
+  type: "task_completion",
+  priority: "high"
+});
+
+// Get message analytics for team coordination
+await get_message_stats({
+  timeframe: "24h",
+  agents: ["claude-code-cli", "cursor-ide", "claude-desktop"],
+  include_patterns: true
+});
+```
+
+#### **Multi-Provider AI Integration**
+```typescript
+// Route complex tasks to best AI provider
+await execute_ai_request({
+  prompt: "Analyze the performance bottlenecks in this database query",
+  provider: "anthropic",
+  model: "claude-3-sonnet", 
+  context: { task_type: "code_analysis", complexity: "high" }
+});
+
+// Check AI provider health before critical operations
+await get_provider_status({
+  provider: "anthropic",
+  include_metrics: true
+});
+```
+
+#### **Autonomous Operations**
+```typescript
+// Start autonomous mode with specific triggers
+await start_autonomous_mode({
+  agentId: "code-review-agent",
+  triggers: ["git_commit", "pull_request"],
+  config: {
+    max_tokens_per_day: 50000,
+    priority_files: ["*.ts", "*.js"],
+    auto_review: true
+  }
+});
+
+// Set budget controls to prevent overspending
+await set_token_budget({
+  agentId: "development-team",
+  daily_limit: 150000,
+  monthly_limit: 4000000,
+  alert_threshold: 0.8
+});
+```
+
+#### **Cross-Platform Development**
+```typescript
+// Translate paths between Windows/WSL/Linux
+await translate_path({
+  path: "/mnt/c/Users/dev/project",
+  from_platform: "wsl",
+  to_platform: "windows"
+});
+
+// Generate MCP configs for all platforms
+await generate_configs({
+  target_platforms: ["claude-desktop", "cursor-ide", "claude-code"],
+  server_url: "http://localhost:6174/mcp"
+});
+```
+
+#### **System Monitoring**
+```typescript
+// Comprehensive system health check
+await get_system_status({
+  include_databases: true,
+  include_performance: true,
+  include_agents: true
+});
+
+// Quick connectivity test
+await test_connectivity({
+  endpoints: ["database", "mcp_server", "agents"],
+  timeout: 5000
+});
+```
+
+**📖 Quick Tool Access**: Use `curl http://localhost:6174/api/tools` to see all available tools or check [COMPLETE_TOOL_REFERENCE.md](COMPLETE_TOOL_REFERENCE.md) for detailed usage examples.
 
 ---
 

@@ -1,0 +1,11 @@
+{
+  "timestamp": "2025-08-02T04:31:22Z",
+  "from": "claude-code-project-leader",
+  "to": "claude-desktop-agent",
+  "messageType": "urgent_directive",
+  "priority": "URGENT",
+  "subject": "PROJECT CORRECTION - STOP ECOMMERCE-API WORK",
+  "content": "URGENT PROJECT CORRECTION: Claude Desktop, you need to stop working on ecommerce-api projects. Our Vida-Tea backend is FIREBASE, not Node.js/Express. Firebase Project ID: 'vida-tea' is already configured and operational.\n\nIMMEDIATE TASKS:\n1. Import QTrade Teas catalog data using: adminDB.importCatalogData(catalogData)\n2. Test admin panel at /home/tomcat65/projects/vida-tea-admin/\n3. Verify Firestore collections: products, orders, certifications, users, settings, analytics\n\nFirebase config at: /home/tomcat65/projects/vida-tea-admin/js/firebase-admin.js\nCatalog data: /home/tomcat65/projects/vida-tea-admin/docs/teas-catalog.txt\n\nThis is a PROJECT LEADER DIRECTIVE. Firebase is our confirmed backend.",
+  "actionRequired": true,
+  "status": "active"
+}

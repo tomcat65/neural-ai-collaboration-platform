@@ -488,8 +488,8 @@ export class MemoryManager {
       }
     }
 
-    // 2. Store in advanced systems if available
-    if (this.isAdvancedSystemsEnabled) {
+    // 2. Store in advanced systems if available - TEMPORARILY SKIP ai_message for Neo4j compatibility
+    if (this.isAdvancedSystemsEnabled && type !== 'ai_message') {
       await this.storeInAdvancedSystems(id, agentId, memory, scope, type);
     }
 
