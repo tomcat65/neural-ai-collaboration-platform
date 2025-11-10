@@ -434,15 +434,24 @@ const fullGraph = await read_graph({
 ## AI Agent Communication (4 tools)
 
 ### 6. `send_ai_message`
-**Send direct messages to other AI agents with real-time delivery**
+**Send messages to other AI agents with direct, capability-based, or broadcast targeting**
 
 #### Parameters
 ```typescript
 {
-  agentId: string,                                        // Target agent ID (required)
-  content: string,                                        // Message content (required)
-  messageType?: 'info' | 'task' | 'query' | 'response' | 'collaboration', // Default: 'info'
-  priority?: 'low' | 'normal' | 'high' | 'urgent'       // Default: 'normal'
+  // Recipients
+  to?: string;                 // Direct target (alias: agentId). Use "*" for broadcast
+  agentId?: string;            // DEPRECATED alias for `to`
+  toCapabilities?: string[];   // Select agents whose registered capabilities include ALL provided
+  capabilities?: string[];     // Alias for `toCapabilities`
+  broadcast?: boolean;         // Send to all registered agents (except self by default)
+  excludeSelf?: boolean;       // When broadcasting/cap-selecting, exclude sender (default: true)
+
+  // Message
+  from?: string;               // Sender agent ID (defaults to server/bridge identity)
+  content: string;             // Message content (required)
+  messageType?: 'info' | 'task' | 'query' | 'response' | 'collaboration'; // Default: 'info'
+  priority?: 'low' | 'normal' | 'high' | 'urgent';      // Default: 'normal'
 }
 ```
 
@@ -450,14 +459,14 @@ const fullGraph = await read_graph({
 ```typescript
 // Basic message
 await send_ai_message({
-  agentId: "claude-desktop-agent",
+  to: "claude-desktop-agent",
   content: "Project Alpha backend API is ready for frontend integration",
   messageType: "info"
 });
 
 // High-priority task assignment
 await send_ai_message({
-  agentId: "cursor-ide-agent", 
+  to: "cursor-ide-agent", 
   content: "Critical bug found in authentication module. Please review /src/auth/jwt.ts immediately.",
   messageType: "task",
   priority: "urgent"
@@ -465,7 +474,7 @@ await send_ai_message({
 
 // Collaboration request
 await send_ai_message({
-  agentId: "devops-agent",
+  to: "devops-agent",
   content: "Ready for deployment. Need infrastructure team to review deployment config and approve production push.",
   messageType: "collaboration",
   priority: "high"
@@ -473,23 +482,47 @@ await send_ai_message({
 
 // Query for information
 await send_ai_message({
-  agentId: "qa-testing-agent",
+  to: "qa-testing-agent",
   content: "What's the current status of user acceptance testing for the new authentication flow?",
   messageType: "query"
+});
+
+// Capability selector: matches agents with both capabilities
+await send_ai_message({
+  toCapabilities: ["bridge", "ai-to-ai-messaging"],
+  content: "Sync latest architecture doc and confirm receipt.",
+  messageType: "info"
+});
+
+// Broadcast (exclude self by default)
+await send_ai_message({
+  broadcast: true,
+  content: "System will restart in 5 minutes. Save state.",
+  messageType: "info"
 });
 ```
 
 #### Return Value
 ```json
 {
-  "messageId": "msg-abc123",
   "status": "sent",
+  "recipients": ["claude-code-agent", "cursor-ide-agent"],
+  "sentCount": 2,
+  "messageIds": [
+    { "to": "claude-code-agent", "messageId": "msg-1" },
+    { "to": "cursor-ide-agent", "messageId": "msg-2" }
+  ],
   "deliveryTime": "<100ms",
+  "selection": {
+    "mode": "capabilities", // or "direct" | "broadcast"
+    "capabilities": ["bridge", "ai-to-ai-messaging"],
+    "excludeSelf": true
+  },
   "features": {
     "realTimeDelivery": "websocket",
     "persistentStorage": "enabled",
     "crossPlatformSync": "active",
-    "priorityQueue": "high"
+    "priorityQueue": "normal"
   }
 }
 ```
@@ -681,6 +714,32 @@ const allAgentsStatus = await get_agent_status();
 ```
 
 ---
+
+### Agent Discovery (No Pre‑Named IDs)
+Use `get_agent_status` without arguments to discover agents and their capabilities. Then target by `to` or select by `toCapabilities`.
+
+```bash
+# List all registered agents
+curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
+  http://localhost:6174/mcp \
+  -d '{
+    "jsonrpc":"2.0","id":301,
+    "method":"tools/call",
+    "params":{"name":"get_agent_status","arguments":{}}
+  }' | jq
+```
+
+```typescript
+// Example selection from a list result
+const all = await get_agent_status();
+const bridgePeer = all.agents?.find(a => (a.name||'').startsWith('stdio-bridge-'));
+if (bridgePeer?.agentId) {
+  await send_ai_message({ to: bridgePeer.agentId, content: 'Hello from discovery!' });
+}
+
+// Or route by capability, no IDs needed
+await send_ai_message({ toCapabilities: ['bridge','ai-to-ai-messaging'], content: 'Sync latest doc.' });
+```
 
 ## Multi-Provider AI Access (4 tools)
 

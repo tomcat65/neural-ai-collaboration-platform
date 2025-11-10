@@ -20,6 +20,13 @@ export class MessageHubIntegration {
   }
 
   /**
+   * Expose the WebSocket integration port for logging/diagnostics
+   */
+  public getPort(): number {
+    return this.integrationPort;
+  }
+
+  /**
    * Notify specific agent of a new message
    * This is what simulateRealTimeDelivery needs to call
    */

@@ -9,7 +9,7 @@ Claude Desktop on Windows cannot directly connect to MCP servers running in WSL2
 ## Solution: Node.js STDIO Bridge
 
 ### 1. Create Bridge Script
-Create `claude-desktop-mcp-bridge.cjs` in your project directory:
+Create `mcp-stdio-http-bridge.cjs` in your project directory:
 
 ```javascript
 // Bridge script to connect Claude Desktop to WSL2 MCP server
@@ -47,7 +47,7 @@ Update your Claude Desktop MCP configuration:
     "neural-ai-collaboration": {
       "command": "node",
       "args": [
-        "\\\\wsl.localhost\\Ubuntu\\home\\tomcat65\\projects\\shared-memory-mcp\\claude-desktop-mcp-bridge.cjs"
+        "\\\\wsl.localhost\\Ubuntu\\home\\tomcat65\\projects\\shared-memory-mcp\\mcp-stdio-http-bridge.cjs"
       ]
     }
   }

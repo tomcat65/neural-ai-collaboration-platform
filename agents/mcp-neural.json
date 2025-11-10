@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "neural": {
+      "command": "node",
+      "args": [
+        "/home/tomcat65/projects/shared-memory-mcp/mcp-stdio-http-bridge.cjs"
+      ],
+      "env": {
+        "MCP_HOST": "localhost",
+        "MCP_PORT": "6174",
+        "API_KEY": "REPLACE_WITH_YOUR_API_KEY"
+      }
+    }
+  }
+}
+

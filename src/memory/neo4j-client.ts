@@ -44,6 +44,27 @@ export class Neo4jMemoryClient {
     }
   }
 
+  // Ensure property values conform to Neo4j primitives (or arrays of primitives)
+  private toNeoProp(value: any): any {
+    if (value === null || value === undefined) return null;
+    const t = typeof value;
+    if (t === 'string' || t === 'number' || t === 'boolean') return value;
+    if (Array.isArray(value)) {
+      // If array contains only primitives, return as-is; otherwise stringify whole array
+      const allPrimitive = value.every((v) => {
+        const tv = typeof v;
+        return v === null || tv === 'string' || tv === 'number' || tv === 'boolean';
+      });
+      return allPrimitive ? value : JSON.stringify(value);
+    }
+    // Fallback: store complex objects as JSON string
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
   async storeMemory(memory: MemoryItem): Promise<void> {
     const session = this.driver.session();
     try {
@@ -60,11 +81,11 @@ export class Neo4jMemoryClient {
       `, {
         id: memory.id,
         type: memory.type,
-        content: memory.content,
+        content: this.toNeoProp(memory.content),
         agentId: memory.agentId,
         timestamp: new Date(memory.timestamp).toISOString(),
-        tags: memory.tags || [],
-        metadata: memory.metadata || {},
+        tags: Array.isArray(memory.tags) ? memory.tags : [],
+        metadata: this.toNeoProp(memory.metadata || {}),
       });
     } catch (error) {
       console.error('❌ Error storing memory in Neo4j:', error);
@@ -190,10 +211,10 @@ export class Neo4jMemoryClient {
       `, {
         id: pattern.id,
         type: pattern.type,
-        pattern: pattern.pattern,
+        pattern: this.toNeoProp(pattern.pattern),
         confidence: pattern.confidence,
-        associatedMemoryIds: pattern.associatedMemoryIds,
-        metadata: pattern.metadata,
+        associatedMemoryIds: this.toNeoProp(pattern.associatedMemoryIds),
+        metadata: this.toNeoProp(pattern.metadata),
       });
     } catch (error) {
       console.error('❌ Error storing neural pattern in Neo4j:', error);
@@ -220,12 +241,12 @@ export class Neo4jMemoryClient {
       `, {
         id: pattern.id,
         type: pattern.type,
-        featureVector: pattern.featureVector,
+        featureVector: this.toNeoProp(pattern.featureVector),
         confidence: pattern.confidence,
         occurrenceCount: pattern.occurrenceCount,
         lastSeen: pattern.lastSeen,
-        associatedMemoryIds: pattern.associatedMemoryIds,
-        metadata: pattern.metadata,
+        associatedMemoryIds: this.toNeoProp(pattern.associatedMemoryIds),
+        metadata: this.toNeoProp(pattern.metadata),
       });
     } catch (error) {
       console.error('❌ Error storing learning pattern in Neo4j:', error);
@@ -319,7 +340,10 @@ export class Neo4jMemoryClient {
           createdAt: $createdAt,
           metadata: $metadata
         })
-      `, collaboration);
+      `, {
+        ...collaboration,
+        metadata: this.toNeoProp(collaboration?.metadata)
+      });
     } catch (error) {
       console.error('❌ Error creating collaboration in Neo4j:', error);
       throw error;
@@ -371,7 +395,11 @@ export class Neo4jMemoryClient {
           timestamp: $timestamp,
           metadata: $metadata
         })
-      `, memory);
+      `, {
+        ...memory,
+        content: this.toNeoProp(memory?.content),
+        metadata: this.toNeoProp(memory?.metadata)
+      });
     } catch (error) {
       console.error('❌ Error storing shared memory in Neo4j:', error);
       throw error;

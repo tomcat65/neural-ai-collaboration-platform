@@ -6,15 +6,16 @@ export class WeaviateClient {
   private readonly className = 'AIMemory';
 
   constructor() {
-    this.client = weaviate.client({
-      scheme: 'http',
-      host: 'weaviate:8080',
-    });
+    // Allow overriding via env WEAVIATE_URL=http://host:port
+    const url = process.env.WEAVIATE_URL || 'http://weaviate:8080';
+    const u = new URL(url);
+    this.client = weaviate.client({ scheme: u.protocol.replace(':', ''), host: u.host });
   }
 
   async initialize(): Promise<void> {
     try {
       // Create schema for AI memory
+      const vectorizer = process.env.WEAVIATE_VECTORIZER || 'text2vec-transformers';
       const schema = {
         class: this.className,
         description: 'AI agent memory storage with semantic search',
@@ -61,7 +62,8 @@ export class WeaviateClient {
             indexInverted: true,
           },
         ],
-        vectorizer: 'none', // Disable automatic vectorization for now
+        vectorizer,
+        moduleConfig: vectorizer ? { [vectorizer]: { vectorizeClassName: false } } : undefined,
       };
 
       await this.client.schema.classCreator().withClass(schema).do();
@@ -137,25 +139,27 @@ export class WeaviateClient {
         }
       }
 
-      const searchQuery = {
-        class: this.className,
-        properties: ['agentId', 'memoryType', 'content', 'timestamp', 'tags', 'priority', 'relationships'],
-        where: Object.keys(whereFilter).length > 0 ? whereFilter : undefined,
-        limit: searchLimit,
-      };
-
-      // Use text-based search instead of vector search since vectorizer is disabled
-      const result = await this.client.graphql
-        .get()
-        .withClassName(this.className)
-        .withFields('agentId memoryType content timestamp tags priority relationships _additional { id }')
-        .withWhere({
-          path: ['content'],
-          operator: 'Like',
-          valueText: `*${query}*`
-        })
-        .withLimit(searchLimit)
-        .do();
+      let result: any;
+      try {
+        // Preferred: vector semantic search
+        result = await this.client.graphql
+          .get()
+          .withClassName(this.className)
+          .withFields('agentId memoryType content timestamp tags priority relationships _additional { id score }')
+          // @ts-ignore types for nearText depend on module
+          .withNearText({ concepts: [query] })
+          .withLimit(searchLimit)
+          .do();
+      } catch (e) {
+        // Fallback: LIKE text search if vectorizer/module not available
+        result = await this.client.graphql
+          .get()
+          .withClassName(this.className)
+          .withFields('agentId memoryType content timestamp tags priority relationships _additional { id }')
+          .withWhere({ path: ['content'], operator: 'Like', valueText: `*${query}*` })
+          .withLimit(searchLimit)
+          .do();
+      }
 
       return result.data.Get[this.className].map((item: any) => ({
         id: item._additional.id,

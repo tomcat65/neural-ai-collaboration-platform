@@ -1,6 +1,30 @@
 version: '3.8'
 
 services:
+  unified-server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.unified-server
+    container_name: unified-server
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - WS_PORT=3001
+    volumes:
+      - unified_server_data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - neural-network
   # Unified Neural MCP Server - Latest Code
   neural-mcp-unified:
     build:
@@ -13,6 +37,7 @@ services:
     environment:
       - NEURAL_MCP_PORT=6174
       - MESSAGE_HUB_PORT=3003
+      - UNIFIED_SERVER_URL=http://unified-server:3000
       - NODE_ENV=production
       - REDIS_URL=redis://redis:6379
       - NEO4J_URL=bolt://neo4j:7687
@@ -24,6 +49,8 @@ services:
       - neural_unified_data:/app/data
       - ./logs:/app/logs
     depends_on:
+      unified-server:
+        condition: service_healthy
       redis:
         condition: service_healthy
       neo4j:
@@ -128,6 +155,8 @@ services:
       - neural-network
 
 volumes:
+  unified_server_data:
+    driver: local
   neural_unified_data:
     driver: local
   redis_unified_data:

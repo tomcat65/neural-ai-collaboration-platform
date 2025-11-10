@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "neural": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "--header",
+        "x-api-key:REPLACE_WITH_YOUR_API_KEY",
+        "http://localhost:6174/mcp"
+      ]
+    }
+  }
+}
+

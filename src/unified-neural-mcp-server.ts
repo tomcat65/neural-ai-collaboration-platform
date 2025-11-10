@@ -8,6 +8,7 @@ import express from 'express';
 import cors from 'cors';
 import { MemoryManager } from './unified-server/memory/index.js';
 import { MessageHubIntegration } from './message-hub/hub-integration.js';
+import { UnifiedToolSchemas } from './shared/toolSchemas.js';
 
 // Unified Neural AI Collaboration MCP Server
 // Exposes ALL system capabilities through a single MCP interface
@@ -46,11 +47,12 @@ export class UnifiedNeuralMCPServer {
 
   private async initializeMessageHub() {
     try {
-      this.messageHub = new MessageHubIntegration(3003, this.port);
+      const hubPort = parseInt(process.env.MESSAGE_HUB_PORT || '3003', 10);
+      this.messageHub = new MessageHubIntegration(hubPort, this.port);
       // Note: MessageHub integration may need NetworkMCPServer interface
       // For now, we'll initialize without tight coupling
       
-      console.log('🔗 Message Hub integration initialized');
+      console.log(`🔗 Message Hub integration initialized on port ${hubPort}`);
     } catch (error) {
       console.error('❌ Failed to initialize Message Hub:', error);
     }
@@ -59,9 +61,20 @@ export class UnifiedNeuralMCPServer {
   private setupExpressServer() {
     this.app = express();
     this.app.use(cors());
-    
+
     this.app.use('/ai-message', express.raw({ type: '*/*', limit: '10mb' }));
     
+    // API key middleware (enabled when API_KEY is set)
+    this.app.use((req: any, res: any, next: any) => {
+      const open = new Set<string>(['/health']);
+      if (!process.env.API_KEY || open.has(req.path)) return next();
+      const headerKey = (req.headers['x-api-key'] as string) || (req.headers['X-API-Key'] as string);
+      const queryKey = (req.query && (req.query.api_key as string)) || undefined;
+      const provided = headerKey || queryKey;
+      if (provided === process.env.API_KEY) return next();
+      return res.status(401).json({ error: 'Unauthorized' });
+    });
+
     this.app.use((req, res, next) => {
       if (req.path === '/ai-message') {
         return next();
@@ -121,15 +134,19 @@ export class UnifiedNeuralMCPServer {
         console.log('🔗 Unified Neural MCP Request received:', req.body);
         
         const { jsonrpc = '2.0', id, method, params = {} } = req.body || {};
+        const defaultProtocolVersion = '2024-11-05';
+        const requestedProtocolVersion = (params && typeof params === 'object' ? (params as any)?.protocolVersion : undefined)
+          ?? (req.body?.protocolVersion)
+          ?? defaultProtocolVersion;
         let result;
         
         if (!method) {
           console.log('🤝 MCP Initialization handshake');
           return res.json({
             jsonrpc: '2.0',
-            id: id || 1,
+            id: id ?? 1,
             result: {
-              protocolVersion: '2024-11-05',
+              protocolVersion: requestedProtocolVersion,
               capabilities: {
                 tools: {},
                 prompts: {},
@@ -146,7 +163,7 @@ export class UnifiedNeuralMCPServer {
         switch (method) {
           case 'initialize':
             result = {
-              protocolVersion: '2024-11-05',
+              protocolVersion: requestedProtocolVersion,
               capabilities: {
                 tools: {},
                 prompts: {},
@@ -170,7 +187,7 @@ export class UnifiedNeuralMCPServer {
           default:
             return res.json({
               jsonrpc: '2.0',
-              id: id || 1,
+              id: id ?? 1,
               error: {
                 code: -32601,
                 message: `Method not found: ${method}`
@@ -181,7 +198,7 @@ export class UnifiedNeuralMCPServer {
         console.log('✅ Unified Neural MCP request processed');
         return res.json({
           jsonrpc: '2.0',
-          id: id || 1,
+          id: id ?? 1,
           result
         });
         
@@ -270,19 +287,36 @@ export class UnifiedNeuralMCPServer {
       }
     });
 
-    // Get messages for an AI agent
+    // Get messages for an AI agent (with optional filtering via query)
     this.app.get('/ai-messages/:agentId', async (req, res) => {
       try {
         const { agentId } = req.params;
+        const { since, messageType, limit } = req.query as { since?: string; messageType?: string; limit?: string };
         
         const toSearchResults = await this.memoryManager.search(`"to":"${agentId}"`, { shared: true });
         const targetSearchResults = await this.memoryManager.search(`"target":"${agentId}"`, { shared: true });
         const sentMessages = await this.memoryManager.search(agentId, { shared: true });
         
         const allResults = [...toSearchResults, ...targetSearchResults, ...sentMessages];
-        const messageResults = allResults.filter(result => {
+        let messageResults = allResults.filter(result => {
           return result.content && (result.content.message || result.content.to || result.content.target);
         });
+        if (messageType) {
+          const wanted = String(messageType).toLowerCase();
+          messageResults = messageResults.filter(r => {
+            const t = (r.content?.messageType || r.content?.type || '').toString().toLowerCase();
+            return t === wanted;
+          });
+        }
+        if (since) {
+          const sinceDate = new Date(since);
+          if (!isNaN(sinceDate.getTime())) {
+            messageResults = messageResults.filter(r => {
+              const ts = new Date(r.timestamp || r.content?.timestamp);
+              return !isNaN(ts.getTime()) && ts >= sinceDate;
+            });
+          }
+        }
         
         const uniqueMessages = new Map();
         messageResults.forEach(result => {
@@ -296,10 +330,9 @@ export class UnifiedNeuralMCPServer {
           }
         });
         
-        res.json({
-          agentId,
-          messages: Array.from(uniqueMessages.values())
-        });
+        const list = Array.from(uniqueMessages.values());
+        const max = limit ? Math.max(0, Math.min(parseInt(String(limit), 10) || 50, list.length)) : list.length;
+        res.json({ agentId, messages: list.slice(0, max) });
 
       } catch (error) {
         console.error('❌ Get messages error:', error);
@@ -390,7 +423,12 @@ export class UnifiedNeuralMCPServer {
 
   private async registerWithUnifiedServer() {
     try {
-      const response = await fetch('http://localhost:3000/api/agents/register', {
+      const baseUrl = process.env.UNIFIED_SERVER_URL;
+      if (!baseUrl) {
+        console.debug('Unified server URL not set; skipping registration');
+        return;
+      }
+      const response = await fetch(`${baseUrl}/api/agents/register`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -425,7 +463,9 @@ export class UnifiedNeuralMCPServer {
 
   private async publishEventToUnified(type: string, payload: any) {
     try {
-      await fetch('http://localhost:3000/api/events', {
+      const baseUrl = process.env.UNIFIED_SERVER_URL;
+      if (!baseUrl) return; // Silently skip when not configured
+      await fetch(`${baseUrl}/api/events`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -460,260 +500,73 @@ export class UnifiedNeuralMCPServer {
       tools: [
         // === MEMORY & KNOWLEDGE MANAGEMENT ===
         {
-          name: 'create_entities',
-          description: 'Create multiple new entities in the advanced knowledge graph system (Neo4j, Weaviate, Redis)',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              entities: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    name: { type: 'string', description: 'The name of the entity' },
-                    entityType: { type: 'string', description: 'The type of the entity' },
-                    observations: {
-                      type: 'array',
-                      items: { type: 'string' },
-                      description: 'An array of observation contents associated with the entity',
-                    },
-                  },
-                  required: ['name', 'entityType', 'observations'],
-                },
-              },
-            },
-            required: ['entities'],
-          },
+          name: UnifiedToolSchemas.create_entities.name,
+          description: UnifiedToolSchemas.create_entities.description,
+          inputSchema: UnifiedToolSchemas.create_entities.inputSchema,
         },
         {
-          name: 'search_entities',
-          description: 'Advanced federated search across all memory systems (Neo4j graph, Weaviate vectors, Redis cache)',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              query: { type: 'string', description: 'The search query to match against entity names, types, and observation content' },
-              searchType: { 
-                type: 'string', 
-                enum: ['semantic', 'exact', 'graph', 'hybrid'], 
-                description: 'Type of search to perform',
-                default: 'hybrid'
-              },
-              limit: { type: 'number', description: 'Maximum number of results', default: 50 }
-            },
-            required: ['query']
-          }
+          name: UnifiedToolSchemas.search_entities.name,
+          description: UnifiedToolSchemas.search_entities.description,
+          inputSchema: UnifiedToolSchemas.search_entities.inputSchema
         },
         {
-          name: 'add_observations',
-          description: 'Add new observations to existing entities with automatic vector embedding and graph updates',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              observations: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    entityName: { type: 'string', description: 'The name of the entity to add the observations to' },
-                    contents: { 
-                      type: 'array', 
-                      items: { type: 'string' },
-                      description: 'An array of observation contents to add' 
-                    }
-                  },
-                  required: ['entityName', 'contents']
-                }
-              }
-            },
-            required: ['observations']
-          }
+          name: UnifiedToolSchemas.add_observations.name,
+          description: UnifiedToolSchemas.add_observations.description,
+          inputSchema: UnifiedToolSchemas.add_observations.inputSchema,
         },
         {
-          name: 'create_relations',
-          description: 'Create multiple new relations between entities in Neo4j graph database',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              relations: {
-                type: 'array',
-                items: {
-                  type: 'object',
-                  properties: {
-                    from: { type: 'string', description: 'The name of the entity where the relation starts' },
-                    to: { type: 'string', description: 'The name of the entity where the relation ends' },
-                    relationType: { type: 'string', description: 'The type of the relation' },
-                    properties: { type: 'object', description: 'Optional relation properties' }
-                  },
-                  required: ['from', 'to', 'relationType']
-                }
-              }
-            },
-            required: ['relations']
-          }
+          name: UnifiedToolSchemas.create_relations.name,
+          description: UnifiedToolSchemas.create_relations.description,
+          inputSchema: UnifiedToolSchemas.create_relations.inputSchema,
         },
         {
-          name: 'read_graph',
-          description: 'Read the entire knowledge graph with advanced filtering and analysis capabilities',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              includeVectors: { type: 'boolean', description: 'Include vector embeddings', default: false },
-              includeCache: { type: 'boolean', description: 'Include Redis cache data', default: false },
-              analysisLevel: { 
-                type: 'string', 
-                enum: ['basic', 'detailed', 'comprehensive'], 
-                description: 'Level of analysis to include',
-                default: 'basic'
-              }
-            }
-          }
+          name: UnifiedToolSchemas.read_graph.name,
+          description: UnifiedToolSchemas.read_graph.description,
+          inputSchema: UnifiedToolSchemas.read_graph.inputSchema,
         },
 
         // === AI AGENT COMMUNICATION ===
         {
-          name: 'send_ai_message',
-          description: 'Send a direct message to another AI agent with real-time delivery and persistence',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              agentId: { type: 'string', description: 'Target AI agent ID' },
-              content: { type: 'string', description: 'Message content' },
-              messageType: { 
-                type: 'string', 
-                enum: ['info', 'task', 'query', 'response', 'collaboration'],
-                description: 'Type of message',
-                default: 'info'
-              },
-              priority: {
-                type: 'string',
-                enum: ['low', 'normal', 'high', 'urgent'],
-                description: 'Message priority',
-                default: 'normal'
-              }
-            },
-            required: ['agentId', 'content']
-          }
+          name: UnifiedToolSchemas.send_ai_message.name,
+          description: UnifiedToolSchemas.send_ai_message.description,
+          inputSchema: UnifiedToolSchemas.send_ai_message.inputSchema
         },
         {
-          name: 'get_ai_messages',
-          description: 'Retrieve messages for an AI agent with filtering and pagination',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              agentId: { type: 'string', description: 'AI agent ID to get messages for' },
-              limit: { type: 'number', description: 'Maximum number of messages', default: 50 },
-              messageType: { 
-                type: 'string', 
-                enum: ['info', 'task', 'query', 'response', 'collaboration'],
-                description: 'Filter by message type'
-              },
-              since: { type: 'string', description: 'ISO timestamp to get messages since' }
-            },
-            required: ['agentId']
-          }
+          name: UnifiedToolSchemas.get_ai_messages.name,
+          description: UnifiedToolSchemas.get_ai_messages.description,
+          inputSchema: UnifiedToolSchemas.get_ai_messages.inputSchema
         },
         {
-          name: 'register_agent',
-          description: 'Register a new AI agent in the collaboration system',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              agentId: { type: 'string', description: 'Unique agent identifier' },
-              name: { type: 'string', description: 'Human-readable agent name' },
-              capabilities: { 
-                type: 'array', 
-                items: { type: 'string' },
-                description: 'List of agent capabilities'
-              },
-              endpoint: { type: 'string', description: 'Agent communication endpoint' },
-              metadata: { type: 'object', description: 'Additional agent metadata' }
-            },
-            required: ['agentId', 'name', 'capabilities']
-          }
+          name: UnifiedToolSchemas.register_agent.name,
+          description: UnifiedToolSchemas.register_agent.description,
+          inputSchema: UnifiedToolSchemas.register_agent.inputSchema
         },
         {
-          name: 'get_agent_status',
-          description: 'Get comprehensive status and health information for AI agents',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              agentId: { type: 'string', description: 'Specific agent ID, or omit for all agents' }
-            }
-          }
+          name: UnifiedToolSchemas.get_agent_status.name,
+          description: UnifiedToolSchemas.get_agent_status.description,
+          inputSchema: UnifiedToolSchemas.get_agent_status.inputSchema
         },
 
         // === MULTI-PROVIDER AI ACCESS ===
         {
-          name: 'execute_ai_request',
-          description: 'Execute AI requests with intelligent provider routing, fallback, and optimization',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              prompt: { type: 'string', description: 'The AI prompt to execute' },
-              provider: { 
-                type: 'string', 
-                enum: ['openai', 'anthropic', 'google', 'auto'],
-                description: 'Preferred AI provider, or auto for intelligent selection',
-                default: 'auto'
-              },
-              model: { type: 'string', description: 'Specific model to use' },
-              maxTokens: { type: 'number', description: 'Maximum tokens for response' },
-              temperature: { type: 'number', description: 'Response creativity (0-1)' },
-              systemPrompt: { type: 'string', description: 'System/instruction prompt' }
-            },
-            required: ['prompt']
-          }
+          name: UnifiedToolSchemas.execute_ai_request.name,
+          description: UnifiedToolSchemas.execute_ai_request.description,
+          inputSchema: UnifiedToolSchemas.execute_ai_request.inputSchema
         },
         {
-          name: 'stream_ai_response',
-          description: 'Stream AI responses in real-time with WebSocket delivery',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              prompt: { type: 'string', description: 'The AI prompt to execute' },
-              provider: { 
-                type: 'string', 
-                enum: ['openai', 'anthropic', 'google', 'auto'],
-                description: 'Preferred AI provider',
-                default: 'auto'
-              },
-              streamId: { type: 'string', description: 'Unique stream identifier' }
-            },
-            required: ['prompt']
-          }
+          name: UnifiedToolSchemas.stream_ai_response.name,
+          description: UnifiedToolSchemas.stream_ai_response.description,
+          inputSchema: UnifiedToolSchemas.stream_ai_response.inputSchema
         },
         {
-          name: 'get_provider_status',
-          description: 'Get health, performance, and cost information for all AI providers',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              provider: { 
-                type: 'string', 
-                enum: ['openai', 'anthropic', 'google'],
-                description: 'Specific provider, or omit for all providers'
-              }
-            }
-          }
+          name: UnifiedToolSchemas.get_provider_status.name,
+          description: UnifiedToolSchemas.get_provider_status.description,
+          inputSchema: UnifiedToolSchemas.get_provider_status.inputSchema
         },
         {
-          name: 'configure_providers',
-          description: 'Dynamically configure AI provider settings, API keys, and routing rules',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              provider: { 
-                type: 'string', 
-                enum: ['openai', 'anthropic', 'google'],
-                description: 'Provider to configure'
-              },
-              configuration: { 
-                type: 'object',
-                description: 'Provider-specific configuration object'
-              }
-            },
-            required: ['provider', 'configuration']
-          }
+          name: UnifiedToolSchemas.configure_providers.name,
+          description: UnifiedToolSchemas.configure_providers.description,
+          inputSchema: UnifiedToolSchemas.configure_providers.inputSchema
         },
 
         // === AUTONOMOUS OPERATIONS ===
@@ -980,6 +833,43 @@ export class UnifiedNeuralMCPServer {
             },
             required: ['configSection', 'settings']
           }
+        },
+        // === INDIVIDUAL MEMORY ===
+        {
+          name: 'record_learning',
+          description: 'Record a learning entry into an agent\'s individual memory',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              agentId: { type: 'string', description: 'Target agent ID (defaults to caller)' },
+              context: { type: 'string', description: 'Context where the learning occurred' },
+              lesson: { type: 'string', description: 'What was learned' },
+              confidence: { type: 'number', description: 'Confidence level 0-1', default: 0.8 }
+            },
+            required: ['context', 'lesson']
+          }
+        },
+        {
+          name: 'set_preferences',
+          description: 'Update agent preferences in individual memory',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              agentId: { type: 'string', description: 'Target agent ID (defaults to caller)' },
+              preferences: { type: 'object', description: 'Partial preferences object to merge' }
+            },
+            required: ['preferences']
+          }
+        },
+        {
+          name: 'get_individual_memory',
+          description: 'Retrieve an agent\'s individual memory snapshot',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              agentId: { type: 'string', description: 'Agent ID (defaults to caller)' }
+            }
+          }
         }
       ]
     };
@@ -1073,6 +963,63 @@ export class UnifiedNeuralMCPServer {
               },
             ],
           };
+        }
+
+        case 'search_nodes': {
+          // Legacy alias for graph-only search. Prefer `search_entities` with searchType:'graph'.
+          const { query, limit = 50 } = args;
+          const searchType = 'graph';
+          const searchResults = await this.memoryManager.search(query, { shared: true });
+          const enhancedResults = searchResults.slice(0, limit).map(result => ({
+            ...result,
+            searchScore: Math.random() * 0.5 + 0.5,
+            searchType,
+            memorySource: 'graph',
+            semanticSimilarity: null
+          }));
+
+          // One-time deprecation log
+          if (!(global as any)._deprecated_search_nodes_logged) {
+            console.warn('⚠️ `search_nodes` is deprecated. Use `search_entities` with { searchType: "graph" }');
+            (global as any)._deprecated_search_nodes_logged = true;
+          }
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  query,
+                  searchType,
+                  deprecated: true,
+                  totalResults: enhancedResults.length,
+                  results: enhancedResults,
+                }, null, 2),
+              },
+            ],
+          };
+        }
+
+        // === INDIVIDUAL MEMORY TOOLS ===
+        case 'record_learning': {
+          const { context, lesson, confidence = 0.8 } = args;
+          const targetAgent = args.agentId || agent;
+          await this.memoryManager.recordLearning(targetAgent, context, lesson, confidence);
+          await this.publishEventToUnified('agent.learning.recorded', { agent: targetAgent, context, lesson, confidence });
+          return { content: [{ type: 'text', text: JSON.stringify({ status: 'ok' }) }] };
+        }
+
+        case 'set_preferences': {
+          const targetAgent = args.agentId || agent;
+          const { preferences = {} } = args;
+          await this.memoryManager.updateAgentPreferences(targetAgent, preferences);
+          return { content: [{ type: 'text', text: JSON.stringify({ status: 'ok' }) }] };
+        }
+
+        case 'get_individual_memory': {
+          const targetAgent = args.agentId || agent;
+          const mem = this.memoryManager.getAgentMemory(targetAgent);
+          return { content: [{ type: 'text', text: JSON.stringify(mem, null, 2) }] };
         }
 
         case 'add_observations': {
@@ -1250,45 +1197,98 @@ export class UnifiedNeuralMCPServer {
 
         // === AI AGENT COMMUNICATION ===
         case 'send_ai_message': {
-          const { agentId: targetAgentId, content, messageType = 'info', priority = 'normal' } = args;
-          
-          const messageData = {
-            from: agent,
-            to: targetAgentId,
-            content: content,
-            messageType: messageType,
-            priority: priority,
-            timestamp: new Date().toISOString(),
-            deliveryStatus: 'pending',
-            metadata: {
-              realTimeDelivery: "true",
-              persistentStorage: "true", 
-              crossPlatform: "true"
-            }
-          };
+          // Avoid conflating sender and target: support `to`/`from` and aliases
+          const explicitTarget = args.to || args.agentId; // agentId kept for backward compatibility
+          const senderAgentId = args.from || this.agentId;
+          const content = args.content ?? args.message;
+          const messageType = args.messageType ?? 'info';
+          const priority = args.priority ?? 'normal';
+          const broadcast = args.broadcast === true || explicitTarget === '*';
+          const excludeSelf = args.excludeSelf !== false; // default true
+          const capSelector: string[] | undefined = args.toCapabilities || args.capabilities;
 
-          const messageId = await this.memoryManager.store(agent, messageData, 'shared', 'ai_message');
+          if (!content) {
+            throw new Error('Missing required field: `content` (or `message` alias)');
+          }
 
-          // Simulate real-time delivery
-          await this.simulateRealTimeDelivery(messageData, messageId);
+          // Resolve recipients
+          let recipients: string[] = [];
+          if (!broadcast && explicitTarget) {
+            recipients = [explicitTarget];
+          } else if (broadcast) {
+            const regs = await this.memoryManager.search('agent_registration', { shared: true });
+            recipients = regs
+              .map((r: any) => r?.content?.agentId)
+              .filter((id: any) => typeof id === 'string' && id.length > 0);
+            if (excludeSelf) recipients = recipients.filter(id => id !== senderAgentId);
+          } else if (capSelector && capSelector.length > 0) {
+            const want = capSelector.map((c: string) => String(c).toLowerCase());
+            const regs = await this.memoryManager.search('agent_registration', { shared: true });
+            recipients = regs
+              .filter((r: any) => Array.isArray(r?.content?.capabilities))
+              .filter((r: any) => {
+                const caps = r.content.capabilities.map((c: any) => String(c).toLowerCase());
+                return want.every(w => caps.includes(w));
+              })
+              .map((r: any) => r.content.agentId)
+              .filter((id: any) => typeof id === 'string' && id.length > 0);
+            if (excludeSelf) recipients = recipients.filter(id => id !== senderAgentId);
+          } else {
+            throw new Error('Missing recipient: provide `to`, `broadcast: true`, or `toCapabilities`.');
+          }
 
-          await this.publishEventToUnified('ai.message.sent', {
-            messageId,
-            from: agent,
-            to: targetAgentId,
-            messageType,
-            priority,
-            realTimeDelivered: true
-          });
+          // De-duplicate recipients
+          recipients = Array.from(new Set(recipients));
+
+          const results: { to: string; messageId: string }[] = [];
+
+          for (const targetAgentId of recipients) {
+            const messageData = {
+              from: senderAgentId,
+              to: targetAgentId,
+              content,
+              messageType,
+              priority,
+              timestamp: new Date().toISOString(),
+              deliveryStatus: 'pending',
+              metadata: {
+                realTimeDelivery: "true",
+                persistentStorage: "true", 
+                crossPlatform: "true"
+              }
+            };
+
+            const messageId = await this.memoryManager.store(senderAgentId, messageData, 'shared', 'ai_message');
+            results.push({ to: targetAgentId, messageId });
+
+            // Simulate real-time delivery per recipient
+            await this.simulateRealTimeDelivery(messageData, messageId);
+
+            await this.publishEventToUnified('ai.message.sent', {
+              messageId,
+              from: senderAgentId,
+              to: targetAgentId,
+              messageType,
+              priority,
+              realTimeDelivered: true
+            });
+          }
 
           return {
             content: [
               {
                 type: 'text',
                 text: JSON.stringify({
-                  messageId,
-                  status: 'sent',
+                  status: results.length > 0 ? 'sent' : 'no_recipients',
+                  recipients: recipients,
+                  sentCount: results.length,
+                  messageIds: results,
                   deliveryTime: '<100ms',
+                  selection: {
+                    mode: broadcast ? 'broadcast' : (capSelector?.length ? 'capabilities' : 'direct'),
+                    capabilities: capSelector || [],
+                    excludeSelf
+                  },
                   features: {
                     realTimeDelivery: 'websocket',
                     persistentStorage: 'enabled',
@@ -1398,6 +1398,74 @@ export class UnifiedNeuralMCPServer {
               },
             ],
           };
+        }
+
+        case 'set_agent_identity': {
+          const {
+            currentAgentId,
+            newAgentId,
+            newName,
+            capabilities = [],
+            metadata = {},
+            autoRegister = true
+          } = args;
+
+          if (!newAgentId || typeof newAgentId !== 'string' || newAgentId.trim().length === 0) {
+            throw new Error('Missing required field: `newAgentId`');
+          }
+
+          const updatedAgentId = newAgentId.trim();
+          const previousAgentId = (currentAgentId && String(currentAgentId).trim().length > 0)
+            ? String(currentAgentId).trim()
+            : updatedAgentId;
+
+          const identityRecord = {
+            previousAgentId,
+            updatedAgentId,
+            updatedName: newName || updatedAgentId,
+            capabilities,
+            metadata,
+            updatedBy: args.agentId || this.agentId,
+            timestamp: new Date().toISOString()
+          };
+
+          const identityId = await this.memoryManager.store(previousAgentId, identityRecord, 'shared', 'agent_identity');
+
+          console.log(`🪪 Agent identity update recorded: ${previousAgentId} → ${updatedAgentId}`);
+
+          const responsePayload = {
+            status: 'identity_updated',
+            recordId: identityId,
+            previousAgentId,
+            agentId: updatedAgentId,
+            name: newName || updatedAgentId,
+            capabilitiesApplied: capabilities.length,
+            autoRegister: autoRegister === true,
+            metadata
+          };
+
+          const response: any = {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(responsePayload, null, 2)
+              }
+            ]
+          };
+
+          if (autoRegister === true) {
+            response.bridgeCommand = {
+              type: 'update_identity',
+              agentId: updatedAgentId,
+              name: newName || updatedAgentId,
+              previousAgentId,
+              capabilities,
+              metadata,
+              autoRegister: true
+            };
+          }
+
+          return response;
         }
 
         case 'get_agent_status': {
@@ -2484,7 +2552,8 @@ export class UnifiedNeuralMCPServer {
         console.log(`🔧 System Status: http://localhost:${this.port}/system/status`);
         
         if (this.messageHub) {
-          console.log(`📡 Message Hub WebSocket: ws://localhost:3003`);
+          const hubPort = this.messageHub.getPort();
+          console.log(`📡 Message Hub WebSocket: ws://localhost:${hubPort}`);
           console.log('⚡ Real-time notifications: <100ms message discovery');
         }
         

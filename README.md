@@ -49,7 +49,7 @@ The platform operates across **four specialized databases** for comprehensive AI
 
 ## 🎯 Core Features
 
-### **✅ Claude Code Integration**
+### **✅ Client Integrations (MCP)**
 - **MCP Protocol Support**: Native integration with Claude Code CLI
 - **Multi-Platform**: Works with Claude Code, Claude Desktop, and Cursor IDE
 - **Cross-Platform**: Windows/WSL compatibility with PowerShell bridge
@@ -87,6 +87,11 @@ cd /home/tomcat65/projects/shared-memory-mcp
 ./safe-shutdown.sh
 ```
 
+Notes:
+- The interactive script now tracks an active project slug (`NEURAL_PROJECT`) stored in `.project-context`; choose "Change Active Project" to switch clients and keep memory/backups isolated.
+- "Start Fresh Project" prompts for the next project slug and wipes cached memory/volumes before launching the simple stack (REST/UI on 5174).
+- To use the full MCP JSON-RPC server with all tools, pick "Start Unified MCP" in the menu or run the unified compose file below.
+
 ### **Advanced System Control**
 ```bash
 # Manual control script (original method)
@@ -97,12 +102,36 @@ cd /home/tomcat65/projects/shared-memory-mcp
 # Direct startup options
 ./interactive-startup.sh --fresh      # Start fresh without prompts
 ./interactive-startup.sh --restore    # Go directly to restore menu
-./interactive-startup.sh --list       # List available backups
+./interactive-startup.sh --list       # List available backups grouped by project
 
 # Shutdown options
 ./safe-shutdown.sh --force           # No confirmations
 ./safe-shutdown.sh --no-backup       # Skip backup creation
 ```
+
+### **Global Usage (run from anywhere)**
+- Absolute path (no cd required):
+  - `/home/tomcat65/projects/shared-memory-mcp/interactive-startup.sh`
+  - `/home/tomcat65/projects/shared-memory-mcp/safe-shutdown.sh`
+- Wrapper scripts (in repo):
+  - `scripts/neural-interactive.sh` → interactive menu
+  - `scripts/neural-shutdown.sh` → safe shutdown with backup
+  - `scripts/neural-unified-up.sh` / `scripts/neural-unified-down.sh` → Unified MCP
+  - `scripts/neural-unified-status.sh` → show compose ps + health checks (6174/3004)
+  - Tip: add `~/bin` to PATH and symlink, e.g.: `ln -s /home/tomcat65/projects/shared-memory-mcp/scripts/neural-interactive.sh ~/bin/neural-interactive`
+  - Or add aliases to `~/.bashrc`:
+    - `alias neural-start='/home/tomcat65/projects/shared-memory-mcp/interactive-startup.sh'`
+    - `alias neural-stop='/home/tomcat65/projects/shared-memory-mcp/safe-shutdown.sh'`
+
+### **Environment & API Key Source**
+- The Unified MCP stack reads environment variables from the repo root `.env` at `shared-memory-mcp` because the launcher passes `--project-directory` to Docker Compose.
+- Ensure `.env` contains a strong `API_KEY` before exposing the server. After changing it, restart the Unified stack:
+  - `docker compose -f docker/docker-compose.unified-neural-mcp.yml up -d --build`
+- Temporary override per launch is supported via shell env (takes precedence over `.env`):
+  - `API_KEY=temporary-test-key neural-unified-up`
+- Clients must authenticate separately:
+  - HTTP clients (e.g., `mcp-remote`) include `--header "x-api-key:YOUR_KEY"`.
+  - STDIO bridge (`mcp-stdio-http-bridge.cjs`) injects `x-api-key` when `API_KEY` is present in its `env`.
 
 ### **Project Management Workflow**
 ```bash
@@ -117,6 +146,19 @@ cd /home/tomcat65/projects/shared-memory-mcp
 # 4. Resume later (restore from any backup)
 ./interactive-startup.sh
 # Select "Continue Existing Project" → Choose your backup
+```
+
+To start the Unified MCP server (JSON-RPC over HTTP, port 6174):
+- From the interactive menu, select "Start Unified MCP (JSON-RPC 6174)"; or
+- Use Docker Compose directly:
+```bash
+docker compose -f docker/docker-compose.unified-neural-mcp.yml up -d --build
+```
+Then list tools:
+```bash
+curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
+  http://localhost:6174/mcp \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | jq
 ```
 
 ### **Production Services**
@@ -136,9 +178,14 @@ cd /home/tomcat65/projects/shared-memory-mcp
 - **Savings**: 95%+ reduction = $855/month saved
 - **Response Time**: Instant vs 15-30 second delays
 
-## 🔧 Claude Code Integration
+## 🔧 Client Integrations (MCP)
 
-### **MCP Configuration** ✅ **TESTED & WORKING**
+### **Configurations** ✅ **TESTED & WORKING**
+
+Note:
+- Set `API_KEY` in your project `.env` and restart the Unified MCP stack so clients can authenticate.
+  - `docker compose -f docker/docker-compose.unified-neural-mcp.yml up -d --build`
+- Health remains public at `/health`; all MCP JSON‑RPC calls to `/mcp` require `x-api-key`.
 
 #### **For Claude Desktop (Windows)**
 ```json
@@ -149,6 +196,7 @@ cd /home/tomcat65/projects/shared-memory-mcp
       "args": [
         "-y",
         "mcp-remote",
+        "--header", "x-api-key:${API_KEY}",
         "http://localhost:6174/mcp"
       ]
     }
@@ -163,8 +211,9 @@ cd /home/tomcat65/projects/shared-memory-mcp
     "neural-ai-collaboration": {
       "command": "node",
       "args": [
-        "/home/tomcat65/projects/shared-memory-mcp/.cursor/mcp-stdio-final.cjs"
-      ]
+        "/home/tomcat65/projects/shared-memory-mcp/mcp-stdio-http-bridge.cjs"
+      ],
+      "env": { "MCP_HOST": "localhost", "MCP_PORT": "6174", "API_KEY": "${API_KEY}" }
     }
   }
 }
@@ -176,11 +225,42 @@ cd /home/tomcat65/projects/shared-memory-mcp
   "mcpServers": {
     "neural-ai-collaboration": {
       "command": "node",
-      "args": ["/home/tomcat65/projects/shared-memory-mcp/.cursor/mcp-stdio-final.cjs"]
+      "args": ["/home/tomcat65/projects/shared-memory-mcp/mcp-stdio-http-bridge.cjs"],
+      "env": { "MCP_HOST": "localhost", "MCP_PORT": "6174", "API_KEY": "${API_KEY}" }
     }
   }
 }
 ```
+
+#### **For Codex CLI (TOML)**
+```toml
+[mcp_servers.neural_ai_collaboration]
+command = "node"
+args = ["/home/tomcat65/projects/shared-memory-mcp/mcp-stdio-http-bridge.cjs"]
+env = { MCP_HOST = "localhost", MCP_PORT = "6174", API_KEY = "${API_KEY}" }
+```
+Tip: See `codex-cli.mcp.toml` in the repo for a ready-to-use file.
+
+### **Cross-CLI Messaging Quickstart**
+- In each CLI terminal, set a sender identity once (bridge autogenerates one if omitted):
+  - Codex CLI: `export FROM=codex-cli`
+  - Claude Code CLI: `export FROM=claude-code`
+- Register happens automatically via the stdio↔HTTP bridge. You can list agents:
+  - `curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \\
+     http://localhost:6174/mcp \\
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_agent_status","arguments":{}}}' | jq`
+- Send a direct message from one terminal to the other:
+  - `send_ai_message({ to: "claude-code", content: "Hello from codex-cli" })`
+- Read messages on the recipient side:
+  - `get_ai_messages({ agentId: "claude-code", limit: 10 })`
+- Tips:
+  - Prefer `to`/`from` over legacy `agentId`/`message` (still accepted as aliases).
+  - For discovery, always confirm exact `agentId` via `get_agent_status {}` before sending.
+
+### **Agent Pairing Helper**
+- Run a full registration/send/retrieve check without leaving your shell:
+  - `scripts/agent-pairing.sh codex-cli claude-code "Hello from pairing script"`
+- Honors `API_KEY`, `MCP_HOST`, `MCP_PORT` if set; defaults to `localhost:6174`.
 
 ### **Event-Driven Features**
 - **Automatic Agent Activation**: No manual triggering needed
@@ -358,7 +438,7 @@ curl "http://localhost:3000/api/memory/search?query=architecture&scope=shared"
 ### **WebSocket Integration** (Port 3003)
 ```typescript
 // Connect to real-time message hub
-const ws = new WebSocket('ws://localhost:3003');
+const ws = new WebSocket('ws://localhost:3004');
 
 ws.onmessage = (event) => {
   const message = JSON.parse(event.data);
@@ -408,11 +488,48 @@ NEO4J_URL=bolt://neo4j:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=password
 
+# Message Hub
+MESSAGE_HUB_PORT=3004
+
+# Security
+API_KEY=change-me
+
+# Weaviate Vectorizer
+WEAVIATE_VECTORIZER=text2vec-transformers
+# Optional if you still rely on hosted HuggingFace inference:
+# HUGGINGFACE_APIKEY=your-hf-key
+
 # Performance tuning
 MAX_CONNECTIONS=1000
 CACHE_TTL=3600
 SEARCH_CACHE_TTL=300
 MESSAGE_RETENTION=7d
+```
+
+### Unified Server URL (optional but recommended)
+- Set `UNIFIED_SERVER_URL` so the MCP server can register and publish events to the unified coordination server.
+- If unset, event publishing/registration is skipped silently, and core MCP/messaging continues to work.
+
+```bash
+# Recommended when running unified server (see compose below)
+UNIFIED_SERVER_URL=http://unified-server:3000
+```
+
+### Run with Unified Server (recommended)
+```bash
+# Build and start unified server + unified MCP
+docker compose -f docker-compose-unified.yml up -d --build unified-server neural-mcp-unified
+
+# Verify health
+curl -s http://localhost:3000/health | jq .   # unified server
+curl -s http://localhost:6174/health | jq .   # unified MCP
+
+# Send a test AI message and check events
+curl -sX POST http://localhost:6174/ai-message \
+  -H 'Content-Type: application/json' \
+  -d '{"from":"codex-cli","to":"claude-code-cli","message":"hello unified!"}'
+
+curl -s 'http://localhost:3000/api/events?type=ai.message.sent&limit=20' | jq .
 ```
 
 ## 📈 Scaling and High Availability
@@ -465,6 +582,20 @@ await send_ai_message({
   to: "claude-backend-agent", 
   message: "Frontend integration complete. Ready for testing.",
   type: "integration_ready"
+});
+
+// Capability-based routing (no hard-coded IDs)
+await send_ai_message({
+  toCapabilities: ["bridge", "ai-to-ai-messaging"],
+  content: "Sync latest architecture doc and confirm receipt.",
+  messageType: "info"
+});
+
+// Broadcast to all agents (excludes self by default)
+await send_ai_message({
+  broadcast: true,
+  content: "System maintenance window starts in 5 minutes. Save state.",
+  messageType: "info"
 });
 ```
 
@@ -557,9 +688,50 @@ For manual control or automation:
 
 ## 📚 Documentation
 
+- Unified tool schemas: `docs/TOOLS_SCHEMA.md` (auto‑generated; run `npm run docs:tools`)
+
 - **[PROJECT_UPDATE.md](docs/2025-07-27/PROJECT_UPDATE.md)**: Complete system documentation
 - **[EXAMPLES_OF_USE.md](EXAMPLES_OF_USE.md)**: Real-world usage scenarios
+- **[EXAMPLES_OF_USE_WITH_SUB_AGENTS.md](EXAMPLES_OF_USE_WITH_SUB_AGENTS.md)**: Claude Code + Codex sub‑agent collaboration with Shared‑Memory MCP
 - **[CLAUDE_CODE_INTEGRATION.md](CLAUDE_CODE_INTEGRATION.md)**: Claude Code setup guide
+
+## 🆕 New: Individual Memory, API Keys, Semantic Search
+
+- Individual Memory MCP Tools:
+  - `record_learning` — add a learning entry for an agent
+  - `set_preferences` — update agent preferences
+  - `get_individual_memory` — retrieve preferences/learnings/private context/capabilities
+  - Use via MCP JSON‑RPC at `http://localhost:6174/mcp`.
+
+- API Key Middleware (optional):
+  - Set `API_KEY` in the environment to require clients to provide `x-api-key: <key>` or `?api_key=<key>`.
+  - Health checks remain public.
+
+- Semantic Vector Search (Weaviate):
+  - Default vectorizer is `text2vec-transformers`. The system will try `nearText`; if unavailable, it falls back to LIKE search.
+  - Configure with `WEAVIATE_URL` and `WEAVIATE_VECTORIZER` if needed.
+
+- Message Hub Port:
+  - Now defaults to `3004`. Configure with `MESSAGE_HUB_PORT`.
+
+### Example Calls (with API key)
+
+```bash
+# Record learning
+curl -s -X POST http://localhost:6174/mcp \
+  -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"record_learning","arguments":{"context":"onboarding","lesson":"Claude Code connected","confidence":0.95}}}' | jq
+
+# Set preferences
+curl -s -X POST http://localhost:6174/mcp \
+  -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"set_preferences","arguments":{"preferences":{"workingStyle":"async","communicationStyle":"concise"}}}}' | jq
+
+# Get individual memory
+curl -s -X POST http://localhost:6174/mcp \
+  -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_individual_memory","arguments":{}}}' | jq
+```
 
 ## 🎯 Production Ready
 
@@ -587,3 +759,16 @@ This system has been **extensively tested and validated** for production use:
 
 **Neural AI Collaboration Platform** - Multi-Database AI Collaboration System  
 **Version**: 0.1.0 | **Status**: Production Ready | **License**: Enterprise Ready
+
+## Port Reference and Simple Stack Override
+
+- Unified MCP Server (JSON‑RPC): `http://localhost:6174/mcp`
+- Unified Server API (events/memory): `http://localhost:3000`
+- Simple Stack Neural AI Platform HTTP/WS default: `http://localhost:3000` and `ws://localhost:3001`
+- Simple Stack Override: if `docker/docker-compose.simple.override.yml` exists, the platform binds to:
+  - HTTP `http://localhost:5300`
+  - WebSocket `ws://localhost:5301`
+  - MCP HTTP `http://localhost:5175/mcp`
+
+Notes
+- Examples that use `http://localhost:3000` refer to the Unified Server. When using the Simple Stack with the override, use `5300` for the platform’s HTTP API instead of `3000`.

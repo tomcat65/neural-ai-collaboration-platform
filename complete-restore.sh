@@ -25,15 +25,54 @@ fi
 
 BACKUP_DIR="$1"
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_CONTEXT_HELPER="$PROJECT_DIR/scripts/project-context.sh"
+if [ -f "$PROJECT_CONTEXT_HELPER" ]; then
+    # shellcheck disable=SC1090
+    source "$PROJECT_CONTEXT_HELPER"
+else
+    sanitize_project_slug() {
+        local raw="${1:-}"
+        local lower
+        lower=$(echo "$raw" | tr '[:upper:]' '[:lower:]')
+        lower=$(echo "$lower" | sed -E 's/[^a-z0-9]+/-/g' | sed -E 's/^-+|-+$//g' | sed -E 's/-{2,}/-/g')
+        printf '%s' "$lower"
+    }
+    set_project_slug() {
+        local sanitized
+        sanitized=$(sanitize_project_slug "${1:-}")
+        if [ -n "$sanitized" ]; then
+            export NEURAL_PROJECT="$sanitized"
+            printf '%s' "$sanitized"
+        fi
+    }
+fi
 
 if [ ! -d "$BACKUP_DIR" ]; then
     print_error "Backup directory does not exist: $BACKUP_DIR"
     exit 1
 fi
 
+BACKUP_NAME=$(basename "$BACKUP_DIR")
+DETECTED_PROJECT=""
+if [[ $BACKUP_NAME =~ ^neural-ai-backup-([a-z0-9-]+)-([0-9]{8}[-_][0-9]{4,6})$ ]]; then
+    DETECTED_PROJECT="${BASH_REMATCH[1]}"
+elif [ -f "$BACKUP_DIR/backup-info.txt" ]; then
+    DETECTED_PROJECT=$(grep -E '^Active Project:' "$BACKUP_DIR/backup-info.txt" | head -n1 | awk -F': ' '{print $2}')
+    DETECTED_PROJECT=$(sanitize_project_slug "$DETECTED_PROJECT")
+fi
+if [ -n "$DETECTED_PROJECT" ]; then
+    set_project_slug "$DETECTED_PROJECT" >/dev/null 2>&1 || true
+    export NEURAL_PROJECT="$DETECTED_PROJECT"
+fi
+
 print_status "🔄 COMPLETE Neural AI System Restoration"
 print_status "Backup: $BACKUP_DIR"
 print_status "Project: $PROJECT_DIR"
+if [ -n "$DETECTED_PROJECT" ]; then
+    print_status "Active project context: $DETECTED_PROJECT"
+else
+    print_warning "Active project context could not be determined from backup."
+fi
 echo ""
 
 print_warning "📋 ANALYSIS RESULTS:"

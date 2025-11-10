@@ -3,19 +3,68 @@
 
 set -e  # Exit on any error
 
-echo "🏠 Neural AI Backup to Home Directory"
-echo "====================================="
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SCRIPT_SOURCE" ]; do
+  SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+  SCRIPT_SOURCE="$(readlink "$SCRIPT_SOURCE")"
+  [[ $SCRIPT_SOURCE != /* ]] && SCRIPT_SOURCE="$SCRIPT_DIR/$SCRIPT_SOURCE"
+done
+PROJECT_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
 
-# Create backup in home directory
-BACKUP_DATE=$(date +%Y%m%d_%H%M%S)
-BACKUP_DIR="$HOME/neural-ai-backup-$BACKUP_DATE"
+QUIET=0
+CUSTOM_NAME=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --quiet)
+      QUIET=1
+      shift
+      ;;
+    --name)
+      CUSTOM_NAME="${2:-}"
+      shift 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
-echo "📂 Creating backup at: $BACKUP_DIR" 
+say() {
+    if [ "$QUIET" -eq 0 ]; then
+        echo "$1"
+    fi
+}
+
+if [ -f "$PROJECT_DIR/scripts/project-context.sh" ]; then
+  # shellcheck disable=SC1090
+  source "$PROJECT_DIR/scripts/project-context.sh"
+fi
+
+PROJECT_SLUG=$(get_project_slug 2>/dev/null || true)
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+if [ -n "$CUSTOM_NAME" ]; then
+  BACKUP_DIR="$HOME/$CUSTOM_NAME"
+else
+  BACKUP_PREFIX=$(project_backup_prefix 2>/dev/null)
+  BACKUP_DIR="$HOME/${BACKUP_PREFIX}-${TIMESTAMP}"
+fi
+
+say "🏠 Neural AI Backup to Home Directory"
+say "====================================="
+
+if [ -n "$PROJECT_SLUG" ]; then
+  export NEURAL_PROJECT="$PROJECT_SLUG"
+  say "📛 Active project: $PROJECT_SLUG"
+else
+  say "⚠️  No project slug set; using generic backup name."
+fi
+
+say "📂 Creating backup at: $BACKUP_DIR"
 mkdir -p "$BACKUP_DIR"
 
 # Function to show progress
 show_progress() {
-    echo "⏳ $1..."
+    say "⏳ $1..."
 }
 
 # Backup Docker volumes (most critical)
@@ -45,7 +94,7 @@ done
 
 # Backup project source
 show_progress "Backing up project source code"
-cp -r "$(dirname "$0")" "$BACKUP_DIR/project-source"
+cp -r "$PROJECT_DIR" "$BACKUP_DIR/project-source"
 # Remove node_modules to save space
 rm -rf "$BACKUP_DIR/project-source/node_modules" 2>/dev/null || true
 
@@ -69,8 +118,8 @@ show_progress "Backing up configurations"
 mkdir -p "$BACKUP_DIR/configs"
 
 # Copy important config files
-cp -r "$(dirname "$0")/docker" "$BACKUP_DIR/configs/" 2>/dev/null || true
-cp -r "$(dirname "$0")/.cursor" "$BACKUP_DIR/configs/" 2>/dev/null || true
+cp -r "$PROJECT_DIR/docker" "$BACKUP_DIR/configs/" 2>/dev/null || true
+cp -r "$PROJECT_DIR/.cursor" "$BACKUP_DIR/configs/" 2>/dev/null || true
 cp ~/.cursor/mcp.json "$BACKUP_DIR/configs/global-cursor-mcp.json" 2>/dev/null || true
 
 # Create restoration script
@@ -155,6 +204,7 @@ Contents:
 - databases/: SQLite database files  
 - configs/: All configuration files
 - RESTORE.sh: Automated restoration script
+Active Project: ${PROJECT_SLUG:-unset}
 
 To Restore on New Machine:
 1. Copy this entire folder

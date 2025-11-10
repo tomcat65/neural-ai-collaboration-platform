@@ -12,9 +12,29 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve script path (supports symlinks) to get stable project dir
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+PROJECT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-BACKUP_NAME="neural-ai-backup-${TIMESTAMP}"
+
+PROJECT_CONTEXT_HELPER="$PROJECT_DIR/scripts/project-context.sh"
+if [ -f "$PROJECT_CONTEXT_HELPER" ]; then
+  # shellcheck disable=SC1090
+  source "$PROJECT_CONTEXT_HELPER"
+fi
+
+PROJECT_SLUG=$(get_project_slug 2>/dev/null || true)
+if [ -n "$PROJECT_SLUG" ]; then
+  BACKUP_NAME="neural-ai-backup-${PROJECT_SLUG}-${TIMESTAMP}"
+  export NEURAL_PROJECT="$PROJECT_SLUG"
+else
+  BACKUP_NAME="neural-ai-backup-${TIMESTAMP}"
+fi
 BACKUP_DIR="$HOME/$BACKUP_NAME"
 
 print_header() { echo -e "${BOLD}${CYAN}$1${NC}"; }
@@ -22,6 +42,12 @@ print_status() { echo -e "${BLUE}[INFO]${NC} $1"; }
 print_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+
+if [ -z "$PROJECT_SLUG" ]; then
+    print_warning "Active project slug not set; backup will use generic name. Run interactive-startup to set NEURAL_PROJECT."
+else
+    print_status "Active project: $PROJECT_SLUG"
+fi
 
 # Function to check if system is running
 check_if_running() {
@@ -91,6 +117,7 @@ This backup was created during system shutdown and contains:
 - Docker volume snapshots
 - Agent logs and autonomous operation data
 - Project source code and configurations
+Active Project: ${PROJECT_SLUG:-unset}
 
 Restore with: ./interactive-startup.sh --restore
 EOF

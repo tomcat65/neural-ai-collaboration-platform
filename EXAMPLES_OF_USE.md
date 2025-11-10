@@ -32,8 +32,8 @@ cd /home/tomcat65/projects/shared-memory-mcp
 ./interactive-startup.sh
 # ↳ Shows available backups including: neural-ai-backup-20250731_232637
 
-# 2. Work on your project (full multi-database system running)
-# ↳ System healthy with all 27 MCP tools available
+# 2. Work on your project (multi-database system running)
+# ↳ For all 27 MCP tools, start Unified MCP (menu option) or compose file
 
 # 3. Safe shutdown (automatic backup creation)
 ./safe-shutdown.sh
@@ -78,8 +78,88 @@ curl -X POST http://localhost:5174/ai-message \
   -d '{"from":"test","to":"claude-code-cli","message":"System test","type":"info"}'
 
 # Check Docker containers
-docker ps --format "table {{.Names}}\t{{.Status}}"
+
+## 👤 Individual Memory Examples (New)
+
+Record a learning for the current agent:
+
+```bash
+curl -s -X POST http://localhost:6174/mcp \
+  -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
+  -d '{
+    "jsonrpc":"2.0","id":101,
+    "method":"tools/call",
+    "params":{
+      "name":"record_learning",
+      "arguments":{ "context":"customer-support","lesson":"reduced retries improved stability","confidence":0.9 }
+    }
+  }'
 ```
+
+Update agent preferences:
+
+```bash
+curl -s -X POST http://localhost:6174/mcp \
+  -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
+  -d '{
+    "jsonrpc":"2.0","id":102,
+    "method":"tools/call",
+    "params":{
+      "name":"set_preferences",
+      "arguments":{ "preferences": {"workingStyle":"async","learningRate":0.7} }
+    }
+  }'
+```
+
+Read back your individual memory snapshot:
+
+```bash
+curl -s -X POST http://localhost:6174/mcp \
+  -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
+  -d '{
+    "jsonrpc":"2.0","id":103,
+    "method":"tools/call",
+    "params":{ "name":"get_individual_memory", "arguments":{} }
+  }' | jq
+```
+
+## 🔐 API Key Protection
+
+Set `API_KEY` in your environment (or compose) to require clients to submit `x-api-key: <key>` or `?api_key=<key>`. Health checks remain open.
+
+## 🔎 Semantic Search
+
+Weaviate is configured to use `text2vec-transformers` by default. The platform will attempt `nearText` searches; if the module is unavailable, it gracefully falls back to LIKE-based search.
+
+```bash
+# Semantic-only search (vectors)
+curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
+  http://localhost:6174/mcp \
+  -d '{
+    "jsonrpc":"2.0","id":1201,
+    "method":"tools/call",
+    "params":{ "name":"search_entities", "arguments": { "query":"PCI compliance checklist", "searchType":"semantic", "limit": 20 } }
+  }' | jq
+
+# Graph-only search (structure)
+curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
+  http://localhost:6174/mcp \
+  -d '{
+    "jsonrpc":"2.0","id":1202,
+    "method":"tools/call",
+    "params":{ "name":"search_entities", "arguments": { "query":"service topology", "searchType":"graph", "limit": 25 } }
+  }' | jq
+
+# Hybrid (federated) search (default)
+curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
+  http://localhost:6174/mcp \
+  -d '{
+    "jsonrpc":"2.0","id":1203,
+    "method":"tools/call",
+    "params":{ "name":"search_entities", "arguments": { "query":"payment 500" } }
+  }' | jq
+```
+
 
 ---
 
@@ -1116,6 +1196,7 @@ curl http://localhost:6174/health              # Unified MCP Server (27 tools)
       "args": [
         "-y",
         "mcp-remote",
+        "--header", "x-api-key:${API_KEY}",
         "http://localhost:6174/mcp"
       ]
     }
@@ -1123,15 +1204,16 @@ curl http://localhost:6174/health              # Unified MCP Server (27 tools)
 }
 ```
 
-#### **Cursor IDE (WSL2) - Custom STDIO Bridge**
+#### **Cursor IDE (WSL2) - Neutral STDIO→HTTP Bridge**
 ```json
 {
   "mcpServers": {
     "neural-ai-collaboration": {
       "command": "node",
       "args": [
-        "/home/tomcat65/projects/shared-memory-mcp/.cursor/mcp-stdio-final.cjs"
-      ]
+        "/home/tomcat65/projects/shared-memory-mcp/mcp-stdio-http-bridge.cjs"
+      ],
+      "env": { "MCP_HOST": "localhost", "MCP_PORT": "6174", "API_KEY": "${API_KEY}" }
     }
   }
 }
@@ -1143,7 +1225,8 @@ curl http://localhost:6174/health              # Unified MCP Server (27 tools)
   "mcpServers": {
     "neural-ai-collaboration": {
       "command": "node",
-      "args": ["/home/tomcat65/projects/shared-memory-mcp/.cursor/mcp-stdio-final.cjs"]
+      "args": ["/home/tomcat65/projects/shared-memory-mcp/mcp-stdio-http-bridge.cjs"],
+      "env": { "MCP_HOST": "localhost", "MCP_PORT": "6174", "API_KEY": "${API_KEY}" }
     }
   }
 }
@@ -1152,10 +1235,18 @@ curl http://localhost:6174/health              # Unified MCP Server (27 tools)
 #### **Setup Notes**
 - **Docker Container**: Must be running at `localhost:6174`
 - **Claude Desktop**: Uses `mcp-remote` to bridge HTTP to STDIO
-- **Cursor/Claude Code**: Uses custom bridge that properly handles MCP protocol
+- **Cursor/Claude Code**: Uses the neutral STDIO→HTTP bridge (`mcp-stdio-http-bridge.cjs`) that handles MCP protocol and injects `x-api-key` when `API_KEY` is set
 - **Windows-WSL2**: Docker ports bound to `0.0.0.0` for Windows accessibility
 
-### **3. Start Collaborating** ✅ **ALL 27 MCP TOOLS WORKING**
+#### **Codex CLI (TOML) - STDIO→HTTP Bridge**
+```toml
+[mcp_servers.neural_ai_collaboration]
+command = "node"
+args = ["/home/tomcat65/projects/shared-memory-mcp/mcp-stdio-http-bridge.cjs"]
+env = { MCP_HOST = "localhost", MCP_PORT = "6174", API_KEY = "${API_KEY}" }
+```
+
+### **3. Start Collaborating** ✅ **ALL 27 MCP TOOLS WORKING (Unified MCP running)**
 ```typescript
 // Store knowledge entities (TESTED ✅)
 await create_entities({
@@ -1206,7 +1297,7 @@ const response = await execute_ai_request({
 ✅ HTTP MCP Server: Serving 27 tools at localhost:6174/mcp
 ✅ Database connectivity: SQLite, Redis, Weaviate, Neo4j all connected
 ✅ Claude Desktop (Windows): Working with mcp-remote HTTP bridge
-✅ Cursor IDE (WSL2): Working with custom STDIO bridge (mcp-stdio-final.cjs)
+✅ Cursor IDE (WSL2): Working with neutral STDIO→HTTP bridge (mcp-stdio-http-bridge.cjs)
 ✅ Cross-platform integration: Windows-WSL2 networking solved
 ✅ All 27 MCP tools: Available and functional across all clients
 ✅ Protocol handling: Proper MCP initialization and message ID mapping
@@ -1220,12 +1311,12 @@ const response = await execute_ai_request({
 
 🖥️ Windows Claude Desktop:
    • Method: HTTP bridge via mcp-remote npm package
-   • Connection: npx mcp-remote http://localhost:6174/mcp
+   • Connection: npx mcp-remote --header "x-api-key:${API_KEY}" http://localhost:6174/mcp
    • Status: ✅ All 27 tools registered and working
 
 💻 Cursor IDE (WSL2):
-   • Method: Custom STDIO bridge with proper MCP protocol handling
-   • Bridge: mcp-stdio-final.cjs with message ID mapping
+   • Method: Neutral STDIO→HTTP bridge with proper MCP protocol handling
+   • Bridge: mcp-stdio-http-bridge.cjs with message ID mapping
    • Status: ✅ All 27 tools registered and working
 
 🔗 Technical Solution:
@@ -1257,6 +1348,43 @@ await create_entities({
     ]
   }]
 });
+
+// Agent Discovery (no pre‑named IDs required)
+// List registered agents with their capabilities
+/* JSON‑RPC over HTTP */
+/*
+curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
+  http://localhost:6174/mcp \
+  -d '{"jsonrpc":"2.0","id":201,"method":"tools/call","params":{"name":"get_agent_status","arguments":{}}}' | jq
+*/
+
+// Capability‑based routing
+/*
+curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
+  http://localhost:6174/mcp \
+  -d '{
+    "jsonrpc":"2.0","id":202,"method":"tools/call",
+    "params":{"name":"send_ai_message","arguments":{
+      "toCapabilities":["bridge","ai-to-ai-messaging"],
+      "content":"Sync latest architecture doc and confirm.",
+      "messageType":"info"
+    }}
+  }' | jq
+*/
+
+// Broadcast (excludes self by default)
+/*
+curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
+  http://localhost:6174/mcp \
+  -d '{
+    "jsonrpc":"2.0","id":203,"method":"tools/call",
+    "params":{"name":"send_ai_message","arguments":{
+      "broadcast":true,
+      "content":"System maintenance in 5 minutes. Save state.",
+      "messageType":"info"
+    }}
+  }' | jq
+*/
 
 // Search across all knowledge systems
 await search_entities({
@@ -1363,3 +1491,8 @@ await test_connectivity({
 
 **System Status**: ✅ **FULLY TESTED & VERIFIED** | **Performance**: **Enterprise-Grade** | **Integration**: **Universal MCP Support**  
 **Achievement**: **95% Token Efficiency** | **Savings**: **$855/Month** | **Uptime**: **Production-Ready**
+- Note on search tools: prefer `search_entities` for all searches.
+  - Graph-only: `{ query: "...", searchType: "graph" }`
+  - Semantic-only: `{ query: "...", searchType: "semantic" }`
+  - Hybrid (default): `{ query: "..." }`
+  - Legacy alias `search_nodes` remains available for a transitional period, is hidden from tool listings, and is planned for removal by Q4 2025.

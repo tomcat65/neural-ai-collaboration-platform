@@ -15,6 +15,7 @@ import {
   OpenNodesRequestSchema,
 } from './types.js';
 import { userTeamTools, getUserTeamToolHandler } from './tools/userTeamTools.js';
+import { UnifiedToolSchemas } from './shared/toolSchemas.js';
 import { MessageHubIntegration } from './message-hub/hub-integration.js';
 
 // Network-accessible MCP Server for AI-to-AI communication
@@ -55,13 +56,14 @@ export class NetworkMCPServer {
 
   private async initializeMessageHub() {
     try {
-      this.messageHub = new MessageHubIntegration(3003, this.port);
+      const hubPort = parseInt(process.env.MESSAGE_HUB_PORT || '3003', 10);
+      this.messageHub = new MessageHubIntegration(hubPort, this.port);
       this.messageHub.integrateWithMCPServer(this);
       
       // Add WebSocket notification middleware to existing routes
       this.app.use('/ai-message', this.messageHub.createNotificationMiddleware());
       
-      console.log('🔗 Message Hub integration initialized');
+      console.log(`🔗 Message Hub integration initialized on port ${hubPort}`);
     } catch (error) {
       console.error('❌ Failed to initialize Message Hub:', error);
     }
@@ -74,6 +76,17 @@ export class NetworkMCPServer {
     // Apply raw parser specifically to /ai-message route before any JSON parsing
     this.app.use('/ai-message', express.raw({ type: '*/*', limit: '10mb' }));
     
+    // API key middleware (enabled when API_KEY is set)
+    this.app.use((req: any, res: any, next: any) => {
+      const open = new Set<string>(['/health']);
+      if (!process.env.API_KEY || open.has(req.path)) return next();
+      const headerKey = (req.headers['x-api-key'] as string) || (req.headers['X-API-Key'] as string);
+      const queryKey = (req.query && (req.query.api_key as string)) || undefined;
+      const provided = headerKey || queryKey;
+      if (provided === process.env.API_KEY) return next();
+      return res.status(401).json({ error: 'Unauthorized' });
+    });
+
     // Apply JSON parser to all other routes
     this.app.use((req, res, next) => {
       if (req.path === '/ai-message') {
@@ -135,6 +148,10 @@ export class NetworkMCPServer {
         console.log('🔗 MCP Request received:', req.body);
         
         const { jsonrpc = '2.0', id, method, params = {} } = req.body || {};
+        const defaultProtocolVersion = '2024-11-05';
+        const requestedProtocolVersion = (params && typeof params === 'object' ? (params as any)?.protocolVersion : undefined)
+          ?? (req.body?.protocolVersion)
+          ?? defaultProtocolVersion;
         let result;
         
         // Handle empty requests (initialization handshake)
@@ -142,9 +159,9 @@ export class NetworkMCPServer {
           console.log('🤝 MCP Initialization handshake');
           return res.json({
             jsonrpc: '2.0',
-            id: id || 1,
+            id: id ?? 1,
             result: {
-              protocolVersion: '2024-11-05',
+              protocolVersion: requestedProtocolVersion,
               capabilities: {
                 tools: {},
                 prompts: {},
@@ -162,7 +179,7 @@ export class NetworkMCPServer {
         switch (method) {
           case 'initialize':
             result = {
-              protocolVersion: '2024-11-05',
+              protocolVersion: requestedProtocolVersion,
               capabilities: {
                 tools: {},
                 prompts: {},
@@ -186,7 +203,7 @@ export class NetworkMCPServer {
           default:
             return res.json({
               jsonrpc: '2.0',
-              id: id || 1,
+              id: id ?? 1,
               error: {
                 code: -32601,
                 message: `Method not found: ${method}`
@@ -197,7 +214,7 @@ export class NetworkMCPServer {
         console.log('✅ MCP request processed via HTTP');
         return res.json({
           jsonrpc: '2.0',
-          id: id || 1,
+          id: id ?? 1,
           result
         });
         
@@ -205,7 +222,7 @@ export class NetworkMCPServer {
         console.error('❌ MCP request error:', error);
         return res.json({
           jsonrpc: '2.0',
-          id: req.body?.id || 1,
+          id: (req.body?.id ?? 1),
           error: {
             code: -32603,
             message: error instanceof Error ? error.message : 'Internal error'
@@ -316,56 +333,107 @@ export class NetworkMCPServer {
         
         console.error('🔍 ULTRA DEBUG - Final parsed data:', JSON.stringify(parsedData, null, 2));
         
-        const { from, to, message, type, content } = parsedData;
-        
+        const from = parsedData.from || 'system';
+        const explicitTo = parsedData.to || parsedData.agentId;
+        const messageType = parsedData.messageType || parsedData.type || 'direct';
+        const priority = parsedData.priority || 'normal';
+        const content = parsedData.content || parsedData.message || parsedData.payload?.content || parsedData.payload?.message;
+        const broadcast = parsedData.broadcast === true || explicitTo === '*';
+        const excludeSelf = parsedData.excludeSelf !== false; // default true
+        const capSelector: string[] | undefined = parsedData.toCapabilities || parsedData.capabilities;
+
         console.error('🔍 ULTRA DEBUG - Extracted fields:');
         console.error('  from:', from);
-        console.error('  to:', to);
-        console.error('  message:', message);
+        console.error('  to:', explicitTo);
         console.error('  content:', content);
-        console.error('  type:', type);
-        console.error('  payload:', parsedData.payload);
+        console.error('  messageType:', messageType);
+        console.error('  broadcast:', broadcast);
+        console.error('  toCapabilities:', capSelector);
         
-        const actualMessage = message || content || parsedData.payload?.message || parsedData.payload?.content;
-        
-        console.error('🔍 ULTRA DEBUG - actualMessage result:', actualMessage);
-        console.log(`💬 AI Message: ${from} → ${to}: ${actualMessage}`);
-        
-        // Store message in memory system
-        const messageId = await this.memoryManager.store(from || 'system', {
-          id: `message-${Date.now()}`,
-          to,
-          target: to,  // Add target field for compatibility
-          message: actualMessage,
-          type: type || 'direct',
-          timestamp: new Date().toISOString()
-        }, 'shared', 'ai_message');
+        if (!content) {
+          return res.status(400).json({ error: 'Missing required field: content' });
+        }
 
-        // Send to unified server for routing
-        await this.publishEventToUnified('ai.message', {
-          from,
-          to,
-          message: actualMessage,
-          type: type || 'direct',
-          messageId: messageId
-        });
+        // Resolve recipients: direct, broadcast, or by capabilities
+        let recipients: string[] = [];
+        if (!broadcast && explicitTo) {
+          recipients = [explicitTo];
+        } else if (broadcast) {
+          const regs = await this.memoryManager.search('agent_registration', { shared: true });
+          recipients = regs
+            .map((r: any) => r?.content?.agentId)
+            .filter((id: any) => typeof id === 'string' && id.length > 0);
+          if (excludeSelf) recipients = recipients.filter(id => id !== from);
+        } else if (capSelector && capSelector.length > 0) {
+          const want = capSelector.map((c: string) => String(c).toLowerCase());
+          const regs = await this.memoryManager.search('agent_registration', { shared: true });
+          recipients = regs
+            .filter((r: any) => Array.isArray(r?.content?.capabilities))
+            .filter((r: any) => {
+              const caps = r.content.capabilities.map((c: any) => String(c).toLowerCase());
+              return want.every(w => caps.includes(w));
+            })
+            .map((r: any) => r.content.agentId)
+            .filter((id: any) => typeof id === 'string' && id.length > 0);
+          if (excludeSelf) recipients = recipients.filter(id => id !== from);
+        } else {
+          return res.status(400).json({ error: 'Missing recipient: provide `to`, `broadcast: true`, or `toCapabilities`' });
+        }
 
-        res.json({
-          status: 'delivered',
-          messageId: messageId,
+        // De-duplicate recipients
+        recipients = Array.from(new Set(recipients));
+
+        const results: { to: string; messageId: string }[] = [];
+        for (const to of recipients) {
+          console.log(`💬 AI Message: ${from} → ${to}: ${content}`);
+
+          const messageId = await this.memoryManager.store(from || 'system', {
+            id: `message-${Date.now()}`,
+            to,
+            target: to,
+            content,
+            message: content,
+            messageType,
+            priority,
+            timestamp: new Date().toISOString()
+          }, 'shared', 'ai_message');
+
+          await this.publishEventToUnified('ai.message', {
+            from,
+            to,
+            content,
+            messageType,
+            priority,
+            messageId
+          });
+
+          results.push({ to, messageId });
+        }
+
+        return res.json({
+          status: results.length > 0 ? 'delivered' : 'no_recipients',
+          recipients,
+          sentCount: results.length,
+          messageIds: results,
+          selection: {
+            mode: broadcast ? 'broadcast' : (capSelector?.length ? 'capabilities' : 'direct'),
+            capabilities: capSelector || [],
+            excludeSelf
+          },
           timestamp: new Date().toISOString()
         });
 
       } catch (error) {
         console.error('❌ AI message error:', error);
-        res.status(500).json({ error: 'Message delivery failed' });
+        return res.status(500).json({ error: 'Message delivery failed' });
       }
     });
 
-    // Get messages for an AI agent
+    // Get messages for an AI agent (supports optional filtering via query)
     this.app.get('/ai-messages/:agentId', async (req, res) => {
       try {
         const { agentId } = req.params;
+        const { since, messageType, limit } = req.query as { since?: string; messageType?: string; limit?: string };
         
         // Search for messages where this agent is the recipient (to or target field)
         // We need to search for content that contains the agentId in either "to" or "target" field
@@ -377,11 +445,31 @@ export class NetworkMCPServer {
         
         // Combine and filter for actual messages (type: ai_message)
         const allResults = [...toSearchResults, ...targetSearchResults, ...sentMessages];
-        const messageResults = allResults.filter(result => {
+        let messageResults = allResults.filter(result => {
           // Check if this is an AI message by examining the content structure
           return result.content && (result.content.message || result.content.to || result.content.target);
         });
-        
+
+        // Apply optional messageType filter
+        if (messageType) {
+          const wanted = String(messageType).toLowerCase();
+          messageResults = messageResults.filter(r => {
+            const t = (r.content?.messageType || r.content?.type || '').toString().toLowerCase();
+            return t === wanted;
+          });
+        }
+
+        // Apply optional since filter
+        if (since) {
+          const sinceDate = new Date(since);
+          if (!isNaN(sinceDate.getTime())) {
+            messageResults = messageResults.filter(r => {
+              const ts = new Date(r.timestamp || r.content?.timestamp);
+              return !isNaN(ts.getTime()) && ts >= sinceDate;
+            });
+          }
+        }
+
         // Remove duplicates and format response
         const uniqueMessages = new Map();
         messageResults.forEach(result => {
@@ -394,10 +482,11 @@ export class NetworkMCPServer {
             });
           }
         });
-        
+        const list = Array.from(uniqueMessages.values());
+        const max = limit ? Math.max(0, Math.min(parseInt(String(limit), 10) || 50, list.length)) : list.length;
         res.json({
           agentId,
-          messages: Array.from(uniqueMessages.values())
+          messages: list.slice(0, max)
         });
 
       } catch (error) {
@@ -496,7 +585,12 @@ export class NetworkMCPServer {
 
   private async registerWithUnifiedServer() {
     try {
-      const response = await fetch('http://localhost:3000/api/agents/register', {
+      const baseUrl = process.env.UNIFIED_SERVER_URL;
+      if (!baseUrl) {
+        console.debug('Unified server URL not set; skipping registration');
+        return;
+      }
+      const response = await fetch(`${baseUrl}/api/agents/register`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -522,7 +616,9 @@ export class NetworkMCPServer {
 
   private async publishEventToUnified(type: string, payload: any) {
     try {
-      await fetch('http://localhost:3000/api/events', {
+      const baseUrl = process.env.UNIFIED_SERVER_URL;
+      if (!baseUrl) return; // Silently skip when not configured
+      await fetch(`${baseUrl}/api/events`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -545,17 +641,9 @@ export class NetworkMCPServer {
       return {
         tools: [
           {
-            name: 'send_ai_message',
-            description: 'Send a direct message to another AI agent',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                to: { type: 'string', description: 'Target AI agent ID' },
-                message: { type: 'string', description: 'Message content' },
-                type: { type: 'string', description: 'Message type', default: 'direct' }
-              },
-              required: ['to', 'message']
-            }
+            name: UnifiedToolSchemas.send_ai_message.name,
+            description: UnifiedToolSchemas.send_ai_message.description,
+            inputSchema: UnifiedToolSchemas.send_ai_message.inputSchema
           },
           {
             name: 'get_ai_messages',
@@ -569,96 +657,25 @@ export class NetworkMCPServer {
             }
           },
           {
-            name: 'create_entities',
-            description: 'Create multiple new entities in the knowledge graph',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                entities: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      name: { type: 'string', description: 'The name of the entity' },
-                      entityType: { type: 'string', description: 'The type of the entity' },
-                      observations: {
-                        type: 'array',
-                        items: { type: 'string' },
-                        description: 'An array of observation contents associated with the entity',
-                      },
-                    },
-                    required: ['name', 'entityType', 'observations'],
-                  },
-                },
-              },
-              required: ['entities'],
-            },
+            name: UnifiedToolSchemas.create_entities.name,
+            description: UnifiedToolSchemas.create_entities.description,
+            inputSchema: UnifiedToolSchemas.create_entities.inputSchema,
+          },
+          // Note: `search_nodes` is deprecated and intentionally omitted from tools list.
+          {
+            name: UnifiedToolSchemas.add_observations.name,
+            description: UnifiedToolSchemas.add_observations.description,
+            inputSchema: UnifiedToolSchemas.add_observations.inputSchema,
           },
           {
-            name: 'search_nodes',
-            description: 'Search for nodes in the knowledge graph based on a query',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                query: { type: 'string', description: 'The search query to match against entity names, types, and observation content' }
-              },
-              required: ['query']
-            }
+            name: UnifiedToolSchemas.create_relations.name,
+            description: UnifiedToolSchemas.create_relations.description,
+            inputSchema: UnifiedToolSchemas.create_relations.inputSchema,
           },
           {
-            name: 'add_observations',
-            description: 'Add new observations to existing entities in the knowledge graph',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                observations: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      entityName: { type: 'string', description: 'The name of the entity to add the observations to' },
-                      contents: { 
-                        type: 'array', 
-                        items: { type: 'string' },
-                        description: 'An array of observation contents to add' 
-                      }
-                    },
-                    required: ['entityName', 'contents']
-                  }
-                }
-              },
-              required: ['observations']
-            }
-          },
-          {
-            name: 'create_relations',
-            description: 'Create multiple new relations between entities in the knowledge graph',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                relations: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      from: { type: 'string', description: 'The name of the entity where the relation starts' },
-                      to: { type: 'string', description: 'The name of the entity where the relation ends' },
-                      relationType: { type: 'string', description: 'The type of the relation' }
-                    },
-                    required: ['from', 'to', 'relationType']
-                  }
-                }
-              },
-              required: ['relations']
-            }
-          },
-          {
-            name: 'read_graph',
-            description: 'Read the entire knowledge graph',
-            inputSchema: {
-              type: 'object',
-              properties: {}
-            }
+            name: UnifiedToolSchemas.read_graph.name,
+            description: UnifiedToolSchemas.read_graph.description,
+            inputSchema: UnifiedToolSchemas.read_graph.inputSchema,
           }
         ],
       };
@@ -675,17 +692,9 @@ export class NetworkMCPServer {
     return {
       tools: [
         {
-          name: 'send_ai_message',
-          description: 'Send a direct message to another AI agent',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              to: { type: 'string', description: 'Target AI agent ID' },
-              message: { type: 'string', description: 'Message content' },
-              type: { type: 'string', description: 'Message type', default: 'direct' }
-            },
-            required: ['to', 'message']
-          }
+          name: UnifiedToolSchemas.send_ai_message.name,
+          description: UnifiedToolSchemas.send_ai_message.description,
+          inputSchema: UnifiedToolSchemas.send_ai_message.inputSchema
         },
         {
           name: 'get_ai_messages',
@@ -724,17 +733,7 @@ export class NetworkMCPServer {
             required: ['entities'],
           },
         },
-        {
-          name: 'search_nodes',
-          description: 'Search for nodes in the knowledge graph based on a query',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              query: { type: 'string', description: 'The search query to match against entity names, types, and observation content' }
-            },
-            required: ['query']
-          }
-        },
+        // Note: `search_nodes` is deprecated and intentionally omitted from tools list.
         {
           name: 'add_observations',
           description: 'Add new observations to existing entities in the knowledge graph',
@@ -798,25 +797,35 @@ export class NetworkMCPServer {
     try {
       switch (name) {
         case 'send_ai_message': {
-          const { to, message, type } = args;
-          const from = args.agentId || this.agentId;
-          
-          // Use the HTTP endpoint
+          // Normalize args and forward to HTTP endpoint which handles routing
+          const payload = {
+            from: args.from || args.agentId || this.agentId,
+            to: args.to || args.agentId,
+            content: args.content ?? args.message,
+            message: args.content ?? args.message, // keep legacy field for compatibility with endpoint
+            messageType: args.messageType || args.type || 'direct',
+            priority: args.priority || 'normal',
+            toCapabilities: args.toCapabilities || args.capabilities,
+            capabilities: args.toCapabilities || args.capabilities,
+            broadcast: args.broadcast === true || (args.to === '*'),
+            excludeSelf: args.excludeSelf !== false
+          };
+
+          if (!payload.content) {
+            throw new Error('Missing required field: content');
+          }
+
           const response = await fetch(`http://localhost:${this.port}/ai-message`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ from, to, message, type })
+            body: JSON.stringify(payload)
           });
-          
-          const result = await response.json() as { messageId: string };
-          
+
+          const result = await response.json();
           return {
             content: [
-              {
-                type: 'text',
-                text: `Message sent successfully. ID: ${result.messageId}`,
-              },
-            ],
+              { type: 'text', text: JSON.stringify(result, null, 2) }
+            ]
           };
         }
 
@@ -869,17 +878,24 @@ export class NetworkMCPServer {
         }
 
         case 'search_nodes': {
-          const { query } = args;
+          const { query, limit = 50 } = args;
+          const searchType = 'graph';
           const searchResults = await this.memoryManager.search(query, { shared: true });
-          
+          const results = searchResults.slice(0, limit);
+          if (!(global as any)._deprecated_search_nodes_logged) {
+            console.warn('⚠️ `search_nodes` is deprecated. Use `search_entities` with { searchType: "graph" }');
+            (global as any)._deprecated_search_nodes_logged = true;
+          }
           return {
             content: [
               {
                 type: 'text',
                 text: JSON.stringify({
                   query,
-                  total: searchResults.length,
-                  results: searchResults
+                  searchType,
+                  deprecated: true,
+                  total: results.length,
+                  results
                 }, null, 2),
               },
             ],
@@ -1016,7 +1032,8 @@ export class NetworkMCPServer {
         console.log(`💬 AI Messaging: http://localhost:${this.port}/ai-message`);
         console.log(`📊 Health Check: http://localhost:${this.port}/health`);
         if (this.messageHub) {
-          console.log(`📡 Message Hub WebSocket: ws://localhost:3003`);
+          const hubPort = this.messageHub.getPort();
+          console.log(`📡 Message Hub WebSocket: ws://localhost:${hubPort}`);
           console.log('⚡ Real-time notifications: <1 second message discovery');
         }
         console.log('🤖 Ready for AI-to-AI communication!');
