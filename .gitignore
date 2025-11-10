@@ -178,5 +178,15 @@ agent-logs/
 modules/
 
 # Claude state file (can get very large)
-claude-state.jsonCLAUDE_DESKTOP_STDIO_BRIDGE_FIX.md
+claude-state.json
+
+# Files containing secrets or API keys
+HOW_TO_PROCEED_WITH_API_KEY.md
+CLAUDE_DESKTOP_STDIO_BRIDGE_FIX.md
 CLAUDE_DESKTOP_WINDOWS_FIX.md
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+*.secret
