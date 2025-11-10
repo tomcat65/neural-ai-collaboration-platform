@@ -178,4 +178,5 @@ agent-logs/
 modules/
 
 # Claude state file (can get very large)
-claude-state.json
+claude-state.jsonCLAUDE_DESKTOP_STDIO_BRIDGE_FIX.md
+CLAUDE_DESKTOP_WINDOWS_FIX.md
