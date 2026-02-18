@@ -431,9 +431,12 @@ export class NeuralMCPServer {
         
         const { from, to, message, type, content } = parsedData;
         const actualMessage = message || content || parsedData.payload?.message || parsedData.payload?.content;
-        
-        console.log(`💬 AI Message: ${from} → ${to}: ${actualMessage}`);
-        
+
+        if (!from) {
+          console.warn(`⚠️ HTTP /ai-message called without 'from' — attributing to 'system'. Callers should always include 'from'.`);
+        }
+        console.log(`💬 AI Message: ${from || 'system'} → ${to}: ${actualMessage}`);
+
         const messageId = await this.memoryManager.storeMessage(
           from || 'system',
           to,
@@ -1355,6 +1358,9 @@ export class NeuralMCPServer {
         case 'send_ai_message': {
           // Avoid conflating sender and target: support `to`/`from` and aliases
           const explicitTarget = args.to || args.agentId; // agentId kept for backward compatibility
+          if (!args.from) {
+            console.warn(`⚠️ send_ai_message called without 'from' — attributing to server. Callers should always pass 'from'.`);
+          }
           const senderAgentId = args.from || this.agentId;
           const content = args.content ?? args.message;
           const messageType = args.messageType ?? 'info';

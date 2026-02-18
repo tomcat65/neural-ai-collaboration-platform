@@ -107,7 +107,7 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
       properties: {
         to: { type: 'string', description: 'Target AI agent ID (use "*" for broadcast)' },
         agentId: { type: 'string', description: 'DEPRECATED: Target alias for `to`' },
-        from: { type: 'string', description: 'Sender agent ID (defaults to server/bridge identity)' },
+        from: { type: 'string', description: 'Sender agent ID (required for correct attribution)' },
         content: { type: 'string', description: 'Message content' },
         message: { type: 'string', description: 'DEPRECATED: Alias for `content`' },
         toCapabilities: {
@@ -135,7 +135,7 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
           default: 'normal'
         }
       },
-      required: ['content']
+      required: ['content', 'from']
     }
   },
   get_ai_messages: {
