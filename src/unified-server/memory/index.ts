@@ -23,6 +23,15 @@ import {
 import { WeaviateClient } from '../../memory/weaviate-client.js';
 import { Neo4jClient } from '../../memory/neo4j-client.js';
 import { RedisClient } from '../../memory/redis-client.js';
+import {
+  setSystemConnected,
+  recordSQLiteFallback,
+  setDualWriteEnabled,
+  recordDualWriteResult,
+  recordMemoryReadLatency,
+  recordMemoryWriteLatency,
+  metrics
+} from '../../observability/index.js';
 
 export class MemoryManager {
   private db: Database.Database;
@@ -31,6 +40,7 @@ export class MemoryManager {
   public neo4jClient?: Neo4jClient;
   public redisClient?: RedisClient;
   private isAdvancedSystemsEnabled: boolean = false;
+  private isDualWriteEnabled: boolean = false;
 
   constructor(dbPath: string = './data/unified-platform.db') {
     this.db = new Database(dbPath);
@@ -48,40 +58,93 @@ export class MemoryManager {
     this.initializeDatabase();
     this.loadMemoryFromDatabase();
     this.initializeAdvancedSystems();
+    this.initializeDualWrite();
+  }
+
+  private initializeDualWrite(): void {
+    this.isDualWriteEnabled = process.env.DUAL_WRITE_ENABLED === 'true';
+    setDualWriteEnabled(this.isDualWriteEnabled);
+    if (this.isDualWriteEnabled) {
+      console.log('🔀 Dual-write mode ENABLED: Writing to both shared_memory AND canonical tables');
+    }
+  }
+
+  // For testing: allow overriding dual-write setting
+  public setDualWriteEnabled(enabled: boolean): void {
+    this.isDualWriteEnabled = enabled;
+    console.log(`🔀 Dual-write mode ${enabled ? 'ENABLED' : 'DISABLED'} (config override)`);
+  }
+
+  public isDualWriteMode(): boolean {
+    return this.isDualWriteEnabled;
   }
 
   private async initializeAdvancedSystems(): Promise<void> {
     try {
       console.log('🚀 Initializing advanced memory systems...');
-      
+
       // Initialize Redis client with Docker networking
-      this.redisClient = new RedisClient(process.env.REDIS_URL || 'redis://redis:6379');
-      await this.redisClient.initialize();
-      
+      try {
+        this.redisClient = new RedisClient(process.env.REDIS_URL || 'redis://redis:6379');
+        await this.redisClient.initialize();
+        setSystemConnected('redis', true);
+        metrics.logEvent('info', 'systems', 'Redis memory client initialized');
+      } catch (redisError) {
+        console.warn('⚠️ Redis initialization failed:', redisError);
+        setSystemConnected('redis', false);
+        metrics.logEvent('error', 'systems', 'Redis memory client initialization failed', { error: String(redisError) });
+      }
+
       // Initialize Weaviate client
-      this.weaviateClient = new WeaviateClient();
-      await this.weaviateClient.initialize();
-      
+      try {
+        this.weaviateClient = new WeaviateClient();
+        await this.weaviateClient.initialize();
+        setSystemConnected('weaviate', true);
+        metrics.logEvent('info', 'systems', 'Weaviate client initialized');
+      } catch (weaviateError) {
+        console.warn('⚠️ Weaviate initialization failed:', weaviateError);
+        setSystemConnected('weaviate', false);
+        metrics.logEvent('error', 'systems', 'Weaviate client initialization failed', { error: String(weaviateError) });
+      }
+
       // Initialize Neo4j client
-      this.neo4jClient = new Neo4jClient();
-      await this.neo4jClient.initialize();
-      
-      this.isAdvancedSystemsEnabled = true;
-      console.log('✅ Advanced memory systems initialized successfully');
-      
+      try {
+        this.neo4jClient = new Neo4jClient();
+        await this.neo4jClient.initialize();
+        setSystemConnected('neo4j', true);
+        metrics.logEvent('info', 'systems', 'Neo4j client initialized');
+      } catch (neo4jError) {
+        console.warn('⚠️ Neo4j initialization failed:', neo4jError);
+        setSystemConnected('neo4j', false);
+        metrics.logEvent('error', 'systems', 'Neo4j client initialization failed', { error: String(neo4jError) });
+      }
+
+      // Check if any advanced system is available
+      this.isAdvancedSystemsEnabled = !!(this.redisClient || this.weaviateClient || this.neo4jClient);
+
+      if (this.isAdvancedSystemsEnabled) {
+        console.log('✅ Advanced memory systems initialized (partial or full)');
+      } else {
+        console.log('⚠️ No advanced systems available - SQLite-only mode');
+        recordSQLiteFallback();
+      }
+
     } catch (error) {
       console.warn('⚠️ Advanced memory systems initialization failed:', error);
       console.log('🔄 Falling back to SQLite-only mode');
+      metrics.logEvent('error', 'systems', 'All advanced systems failed - SQLite fallback', { error: String(error) });
+      recordSQLiteFallback();
       this.isAdvancedSystemsEnabled = false;
     }
   }
 
   private initializeDatabase(): void {
-    // Individual Memory Tables
+    // Individual Memory Tables (with tenant_id for multi-tenant isolation)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS individual_memory (
         id TEXT PRIMARY KEY,
         agent_id TEXT NOT NULL,
+        tenant_id TEXT DEFAULT 'default',
         memory_type TEXT NOT NULL,
         content TEXT NOT NULL,
         importance REAL DEFAULT 0.5,
@@ -92,16 +155,11 @@ export class MemoryManager {
       )
     `);
 
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_individual_agent_id ON individual_memory(agent_id);
-      CREATE INDEX IF NOT EXISTS idx_individual_type ON individual_memory(memory_type);
-      CREATE INDEX IF NOT EXISTS idx_individual_importance ON individual_memory(importance);
-    `);
-
-    // Shared Memory Tables
+    // Shared Memory Tables (with tenant_id for multi-tenant isolation)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS shared_memory (
         id TEXT PRIMARY KEY,
+        tenant_id TEXT DEFAULT 'default',
         memory_type TEXT NOT NULL,
         content TEXT NOT NULL,
         created_by TEXT NOT NULL,
@@ -112,15 +170,11 @@ export class MemoryManager {
       )
     `);
 
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_shared_type ON shared_memory(memory_type);
-      CREATE INDEX IF NOT EXISTS idx_shared_created_by ON shared_memory(created_by);
-    `);
-
-    // Task Management Tables
+    // Task Management Tables (with tenant_id for multi-tenant isolation)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY,
+        tenant_id TEXT DEFAULT 'default',
         parent_task_id TEXT,
         title TEXT NOT NULL,
         description TEXT,
@@ -138,16 +192,11 @@ export class MemoryManager {
       )
     `);
 
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-      CREATE INDEX IF NOT EXISTS idx_tasks_assigned_to ON tasks(assigned_to);
-      CREATE INDEX IF NOT EXISTS idx_tasks_created_by ON tasks(created_by);
-    `);
-
-    // Knowledge Base Table
+    // Knowledge Base Table (with tenant_id for multi-tenant isolation)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS shared_knowledge (
         id TEXT PRIMARY KEY,
+        tenant_id TEXT DEFAULT 'default',
         title TEXT NOT NULL,
         content TEXT NOT NULL,
         type TEXT NOT NULL,
@@ -160,16 +209,11 @@ export class MemoryManager {
       )
     `);
 
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_knowledge_type ON shared_knowledge(type);
-      CREATE INDEX IF NOT EXISTS idx_knowledge_source ON shared_knowledge(source);
-      CREATE INDEX IF NOT EXISTS idx_knowledge_confidence ON shared_knowledge(confidence);
-    `);
-
-    // Consensus History Table
+    // Consensus History Table (with tenant_id for multi-tenant isolation)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS consensus_history (
         id TEXT PRIMARY KEY,
+        tenant_id TEXT DEFAULT 'default',
         decision TEXT NOT NULL,
         participants TEXT NOT NULL,
         votes TEXT,
@@ -181,10 +225,11 @@ export class MemoryManager {
       )
     `);
 
-    // Project Artifacts Table
+    // Project Artifacts Table (with tenant_id for multi-tenant isolation)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS project_artifacts (
         id TEXT PRIMARY KEY,
+        tenant_id TEXT DEFAULT 'default',
         name TEXT NOT NULL,
         type TEXT NOT NULL,
         path TEXT NOT NULL,
@@ -199,7 +244,72 @@ export class MemoryManager {
       )
     `);
 
+    // Migration: Add tenant_id column to existing tables if missing BEFORE creating tenant indexes
+    this.migrateAddTenantColumn();
+
+    // Create indexes after migrations to avoid referencing missing columns on older databases
+    this.createIndexes();
+
     console.log('🧠 Memory database initialized');
+  }
+
+  private migrateAddTenantColumn(): void {
+    // Check and add tenant_id to existing tables (for backward compatibility)
+    const tables = ['individual_memory', 'shared_memory', 'tasks', 'shared_knowledge', 'consensus_history', 'project_artifacts'];
+
+    for (const table of tables) {
+      try {
+        // Check if tenant_id column exists
+        const pragma = this.db.prepare(`PRAGMA table_info(${table})`).all() as any[];
+        const hasTenantId = pragma.some((col: any) => col.name === 'tenant_id');
+
+        if (!hasTenantId) {
+          this.db.exec(`ALTER TABLE ${table} ADD COLUMN tenant_id TEXT DEFAULT 'default'`);
+          this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_tenant ON ${table}(tenant_id)`);
+          console.log(`🔧 Migration: Added tenant_id column to ${table}`);
+        }
+      } catch (error) {
+        // Table might not exist yet, which is fine
+        console.debug(`Migration: Could not check ${table}:`, error);
+      }
+    }
+  }
+
+  private createIndexes(): void {
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_individual_agent_id ON individual_memory(agent_id);
+      CREATE INDEX IF NOT EXISTS idx_individual_type ON individual_memory(memory_type);
+      CREATE INDEX IF NOT EXISTS idx_individual_importance ON individual_memory(importance);
+      CREATE INDEX IF NOT EXISTS idx_individual_tenant ON individual_memory(tenant_id);
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_shared_type ON shared_memory(memory_type);
+      CREATE INDEX IF NOT EXISTS idx_shared_created_by ON shared_memory(created_by);
+      CREATE INDEX IF NOT EXISTS idx_shared_tenant ON shared_memory(tenant_id);
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+      CREATE INDEX IF NOT EXISTS idx_tasks_assigned_to ON tasks(assigned_to);
+      CREATE INDEX IF NOT EXISTS idx_tasks_created_by ON tasks(created_by);
+      CREATE INDEX IF NOT EXISTS idx_tasks_tenant ON tasks(tenant_id);
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_knowledge_type ON shared_knowledge(type);
+      CREATE INDEX IF NOT EXISTS idx_knowledge_source ON shared_knowledge(source);
+      CREATE INDEX IF NOT EXISTS idx_knowledge_confidence ON shared_knowledge(confidence);
+      CREATE INDEX IF NOT EXISTS idx_knowledge_tenant ON shared_knowledge(tenant_id);
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_consensus_tenant ON consensus_history(tenant_id);
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_artifacts_tenant ON project_artifacts(tenant_id);
+    `);
   }
 
   private loadMemoryFromDatabase(): void {
@@ -461,7 +571,7 @@ export class MemoryManager {
         INSERT INTO shared_memory (id, memory_type, content, created_by, tags)
         VALUES (?, ?, ?, ?, ?)
       `);
-      
+
       stmt.run(
         id,
         type,
@@ -469,6 +579,11 @@ export class MemoryManager {
         agentId,
         JSON.stringify((memory && memory.tags) || [])
       );
+
+      // DUAL-WRITE SHIM: Also write to canonical tables when enabled
+      if (this.isDualWriteEnabled && memory) {
+        await this.dualWriteToCanonical(id, agentId, memory, type);
+      }
 
       // Update shared memory cache based on type
       if (memory) {
@@ -542,6 +657,132 @@ export class MemoryManager {
 
     } catch (error) {
       console.warn('⚠️ Failed to store in advanced systems:', error);
+    }
+  }
+
+  /**
+   * DUAL-WRITE SHIM: Write to canonical tables (tasks, shared_knowledge)
+   * This enables gradual migration from shared_memory to canonical tables.
+   * Gate: DUAL_WRITE_ENABLED=true environment variable
+   */
+  private async dualWriteToCanonical(id: string, agentId: string, memory: any, type: string): Promise<void> {
+    try {
+      if (type === 'task') {
+        // Write to canonical tasks table
+        const taskId = memory.id || id;
+        const existsStmt = this.db.prepare('SELECT id FROM tasks WHERE id = ?');
+        const existing = existsStmt.get(taskId);
+
+        if (existing) {
+          // Update existing task
+          const updateStmt = this.db.prepare(`
+            UPDATE tasks SET
+              title = ?,
+              description = ?,
+              requirements = ?,
+              status = ?,
+              priority = ?,
+              estimated_effort = ?,
+              actual_effort = ?,
+              assigned_to = ?,
+              updated_at = CURRENT_TIMESTAMP,
+              completed_at = ?
+            WHERE id = ?
+          `);
+          updateStmt.run(
+            memory.title || 'Untitled Task',
+            memory.description || '',
+            JSON.stringify(memory.requirements || {}),
+            memory.status || 'created',
+            memory.priority || 'medium',
+            memory.estimatedEffort || null,
+            memory.actualEffort || null,
+            memory.assignedTo || null,
+            memory.completedAt || null,
+            taskId
+          );
+          console.log(`🔀 [DUAL-WRITE] Updated task in canonical table: ${taskId}`);
+        } else {
+          // Insert new task
+          const insertStmt = this.db.prepare(`
+            INSERT INTO tasks (
+              id, parent_task_id, title, description, requirements,
+              status, priority, estimated_effort, actual_effort,
+              created_by, assigned_to, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          insertStmt.run(
+            taskId,
+            memory.parentTaskId || null,
+            memory.title || 'Untitled Task',
+            memory.description || '',
+            JSON.stringify(memory.requirements || {}),
+            memory.status || 'created',
+            memory.priority || 'medium',
+            memory.estimatedEffort || null,
+            memory.actualEffort || null,
+            agentId,
+            memory.assignedTo || null,
+            memory.completedAt || null
+          );
+          console.log(`🔀 [DUAL-WRITE] Inserted task into canonical table: ${taskId}`);
+        }
+
+      } else if (type === 'knowledge') {
+        // Write to canonical shared_knowledge table
+        const knowledgeId = memory.id || id;
+        const existsStmt = this.db.prepare('SELECT id FROM shared_knowledge WHERE id = ?');
+        const existing = existsStmt.get(knowledgeId);
+
+        if (existing) {
+          // Update existing knowledge
+          const updateStmt = this.db.prepare(`
+            UPDATE shared_knowledge SET
+              title = ?,
+              content = ?,
+              type = ?,
+              tags = ?,
+              confidence = ?,
+              verifications = ?,
+              updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `);
+          updateStmt.run(
+            memory.title || 'Untitled Knowledge',
+            typeof memory.content === 'string' ? memory.content : JSON.stringify(memory.content || ''),
+            memory.type || 'fact',
+            JSON.stringify(memory.tags || []),
+            memory.confidence || 0.5,
+            JSON.stringify(memory.verifications || []),
+            knowledgeId
+          );
+          console.log(`🔀 [DUAL-WRITE] Updated knowledge in canonical table: ${knowledgeId}`);
+        } else {
+          // Insert new knowledge
+          const insertStmt = this.db.prepare(`
+            INSERT INTO shared_knowledge (
+              id, title, content, type, tags, source, confidence, verifications
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          insertStmt.run(
+            knowledgeId,
+            memory.title || 'Untitled Knowledge',
+            typeof memory.content === 'string' ? memory.content : JSON.stringify(memory.content || ''),
+            memory.type || 'fact',
+            JSON.stringify(memory.tags || []),
+            memory.source || agentId,
+            memory.confidence || 0.5,
+            JSON.stringify(memory.verifications || [])
+          );
+          console.log(`🔀 [DUAL-WRITE] Inserted knowledge into canonical table: ${knowledgeId}`);
+        }
+      }
+      // Other types (artifact, etc.) are not dual-written - only task and knowledge
+      recordDualWriteResult(true);
+    } catch (error) {
+      console.error(`⚠️ [DUAL-WRITE] Failed to write to canonical table:`, error);
+      recordDualWriteResult(false);
+      // Don't throw - dual-write failures shouldn't break primary storage
     }
   }
 
@@ -1004,5 +1245,126 @@ export class MemoryManager {
     }
     
     console.log('🧠 Enhanced memory manager closed');
+  }
+
+  // ─── ai_messages table methods (P1 migration) ───
+
+  /**
+   * Store a message in the dedicated ai_messages table.
+   * Falls back to shared_memory if ai_messages table doesn't exist yet.
+   */
+  async storeMessage(
+    from: string,
+    to: string,
+    content: string,
+    messageType: string = 'info',
+    priority: string = 'normal',
+    metadata?: Record<string, any>
+  ): Promise<string> {
+    const id = uuidv4();
+
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO ai_messages (id, from_agent, from_source, to_agent, content, message_type, priority, metadata)
+        VALUES (?, ?, 'direct', ?, ?, ?, ?, ?)
+      `);
+      stmt.run(id, from, to, content, messageType, priority, JSON.stringify(metadata || {}));
+    } catch (err: any) {
+      // Fallback: ai_messages table may not exist yet (pre-migration)
+      if (err.message?.includes('no such table')) {
+        console.warn('⚠️ ai_messages table not found, falling back to shared_memory');
+        return this.store(from, {
+          id: `message-${Date.now()}`,
+          to,
+          target: to,
+          from,
+          message: content,
+          content,
+          type: messageType,
+          messageType,
+          priority,
+          timestamp: new Date().toISOString(),
+          deliveryStatus: 'delivered',
+          metadata: metadata || {},
+        }, 'shared', 'ai_message');
+      }
+      throw err;
+    }
+
+    // Also store in Weaviate for semantic search if available
+    if (this.isAdvancedSystemsEnabled && this.weaviateClient) {
+      try {
+        await this.weaviateClient.storeMemory({
+          id,
+          agentId: from,
+          type: 'ai_message' as any,
+          content: content,
+          timestamp: Date.now(),
+          tags: ['message', messageType],
+          priority: priority === 'urgent' ? 10 : priority === 'high' ? 7 : 5,
+          relationships: [],
+          metadata: { to, messageType, priority },
+        });
+      } catch {
+        // Non-critical: Weaviate write failure shouldn't break messaging
+      }
+    }
+
+    console.log(`💬 Stored message: ${from} → ${to} [${messageType}]`);
+    return id;
+  }
+
+  /**
+   * Get messages for an agent from the dedicated ai_messages table.
+   * Falls back to shared_memory search if ai_messages table doesn't exist.
+   */
+  getMessages(
+    agentId: string,
+    options: {
+      messageType?: string;
+      since?: string;
+      limit?: number;
+    } = {}
+  ): any[] {
+    const limit = options.limit || 50;
+
+    try {
+      let query = 'SELECT * FROM ai_messages WHERE to_agent = ?';
+      const params: any[] = [agentId];
+
+      if (options.messageType) {
+        query += ' AND message_type = ?';
+        params.push(options.messageType);
+      }
+      if (options.since) {
+        query += ' AND created_at >= ?';
+        params.push(options.since);
+      }
+
+      query += ' ORDER BY created_at DESC LIMIT ?';
+      params.push(limit);
+
+      return this.db.prepare(query).all(...params) as any[];
+    } catch (err: any) {
+      if (err.message?.includes('no such table')) {
+        console.warn('⚠️ ai_messages table not found, falling back to search');
+        return [];
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Check if ai_messages table exists (for graceful migration detection)
+   */
+  hasAiMessagesTable(): boolean {
+    try {
+      const result = this.db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='ai_messages'"
+      ).get() as any;
+      return !!result;
+    } catch {
+      return false;
+    }
   }
 }

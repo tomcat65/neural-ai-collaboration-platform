@@ -6,9 +6,19 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import { MemoryManager } from './unified-server/memory/index.js';
 import { MessageHubIntegration } from './message-hub/hub-integration.js';
 import { UnifiedToolSchemas } from './shared/toolSchemas.js';
+import {
+  authMiddleware,
+  rateLimitMiddleware,
+  messageRateLimitMiddleware,
+  validateBody,
+  validateRawBody,
+  getRateLimiterStatus
+} from './middleware/index.js';
+import { metrics, sloMonitor, recordMCPLatency, startSLOMonitoring, correlationMiddleware, logger } from './observability/index.js';
 
 // Unified Neural AI Collaboration MCP Server
 // Exposes ALL system capabilities through a single MCP interface
@@ -60,30 +70,53 @@ export class UnifiedNeuralMCPServer {
 
   private setupExpressServer() {
     this.app = express();
+
+    // Correlation ID middleware (first to capture all requests)
+    this.app.use(correlationMiddleware);
+
+    // Security headers
+    this.app.use(helmet({
+      contentSecurityPolicy: false, // Disable CSP for API server
+      crossOriginEmbedderPolicy: false
+    }));
+
     this.app.use(cors());
 
-    this.app.use('/ai-message', express.raw({ type: '*/*', limit: '10mb' }));
-    
-    // API key middleware (enabled when API_KEY is set)
-    this.app.use((req: any, res: any, next: any) => {
-      const open = new Set<string>(['/health']);
-      if (!process.env.API_KEY || open.has(req.path)) return next();
-      const headerKey = (req.headers['x-api-key'] as string) || (req.headers['X-API-Key'] as string);
-      const queryKey = (req.query && (req.query.api_key as string)) || undefined;
-      const provided = headerKey || queryKey;
-      if (provided === process.env.API_KEY) return next();
-      return res.status(401).json({ error: 'Unauthorized' });
-    });
+    // Raw body parser for /ai-message (before JSON parser)
+    // Limit aligned with validateRawBody MAX_RAW_BODY_SIZE (1MB)
+    this.app.use('/ai-message', express.raw({ type: '*/*', limit: '1mb' }));
 
+    // JSON body parser for other routes
     this.app.use((req, res, next) => {
       if (req.path === '/ai-message') {
         return next();
       }
-      express.json()(req, res, next);
+      express.json({ limit: '10mb' })(req, res, next);
     });
 
-    // Health check endpoint
+    // ============================================================================
+    // SECURITY MIDDLEWARE - Phase 1 Implementation
+    // ============================================================================
+
+    // Apply authentication to all routes except public paths
+    this.app.use(authMiddleware);
+
+    // Apply general rate limiting
+    this.app.use(rateLimitMiddleware);
+
+    // Apply stricter rate limiting and validation to message endpoints
+    this.app.use('/ai-message', messageRateLimitMiddleware);
+    this.app.post('/ai-message', validateRawBody('aiMessage'));
+
+    // Apply validation to tool calls
+    this.app.post('/api/tools/:toolName', validateBody('toolCall'));
+
+    // Apply validation to MCP endpoint
+    this.app.post('/mcp', validateBody('mcpRequest'));
+
+    // Health check endpoint (liveness probe)
     this.app.get('/health', (_req, res) => {
+      const rateLimiterStatus = getRateLimiterStatus();
       res.json({
         status: 'healthy',
         service: 'unified-neural-mcp-server',
@@ -91,6 +124,7 @@ export class UnifiedNeuralMCPServer {
         timestamp: new Date().toISOString(),
         port: this.port,
         agentId: this.agentId,
+        rateLimiter: rateLimiterStatus,
         capabilities: [
           'advanced-memory-systems',
           'multi-provider-ai',
@@ -102,6 +136,145 @@ export class UnifiedNeuralMCPServer {
           'event-driven-orchestration'
         ]
       });
+    });
+
+    // Readiness probe - checks advanced system connectivity
+    this.app.get('/ready', async (_req, res) => {
+      try {
+        const systemStatus = await this.memoryManager.getSystemStatus();
+        const activeAlerts = sloMonitor.getActiveAlerts();
+        const criticalAlerts = activeAlerts.filter(a => a.severity === 'critical');
+
+        // Determine readiness based on system connectivity
+        const isReady = systemStatus.sqlite.connected; // SQLite is minimum requirement
+        const isDegraded = !systemStatus.advancedSystemsEnabled ||
+                          !systemStatus.redis.connected ||
+                          !systemStatus.weaviate.connected ||
+                          !systemStatus.neo4j.connected;
+
+        const status = {
+          ready: isReady,
+          degraded: isDegraded,
+          systems: {
+            sqlite: systemStatus.sqlite.connected,
+            redis: systemStatus.redis.connected,
+            weaviate: systemStatus.weaviate.connected,
+            neo4j: systemStatus.neo4j.connected,
+            advancedSystemsEnabled: systemStatus.advancedSystemsEnabled
+          },
+          criticalAlerts: criticalAlerts.length,
+          timestamp: new Date().toISOString()
+        };
+
+        // Return 200 if ready, 503 if not
+        if (isReady) {
+          res.status(isDegraded ? 200 : 200).json(status);
+        } else {
+          res.status(503).json(status);
+        }
+      } catch (error) {
+        res.status(503).json({
+          ready: false,
+          degraded: true,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          timestamp: new Date().toISOString()
+        });
+      }
+    });
+
+    // Metrics endpoint (Prometheus-compatible)
+    this.app.get('/metrics', (_req, res) => {
+      res.set('Content-Type', 'text/plain; version=0.0.4');
+      res.send(metrics.toPrometheusFormat());
+    });
+
+    // Metrics JSON endpoint (for dashboards)
+    this.app.get('/metrics.json', (_req, res) => {
+      res.json(metrics.getSnapshot());
+    });
+
+    // Recent events endpoint (for debugging/alerting)
+    this.app.get('/metrics/events', (req, res) => {
+      const count = parseInt(req.query.count as string) || 100;
+      const category = req.query.category as string;
+      const level = req.query.level as string;
+      res.json(metrics.getRecentEvents(count, category, level));
+    });
+
+    // Event retention/compaction status endpoint
+    this.app.get('/metrics/retention', (_req, res) => {
+      res.json({
+        config: metrics.getRetentionConfig(),
+        compactionStats: metrics.getCompactionStats(),
+        currentEventCount: metrics.getEventLogSize(),
+        eventCountsByCategory: metrics.getEventCounts(),
+        timestamp: new Date().toISOString()
+      });
+    });
+
+    // Manual compaction trigger endpoint (POST)
+    this.app.post('/metrics/compact', async (_req, res) => {
+      try {
+        const stats = await metrics.runCompaction();
+        res.json({
+          status: 'ok',
+          compactionStats: stats,
+          currentEventCount: metrics.getEventLogSize(),
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        res.status(500).json({
+          status: 'error',
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+    });
+
+    // SLO status endpoint
+    this.app.get('/slo/status', (_req, res) => {
+      res.json({
+        status: sloMonitor.getSLOStatus(),
+        activeAlerts: sloMonitor.getActiveAlerts(),
+        timestamp: new Date().toISOString()
+      });
+    });
+
+    // SLO alerts endpoint
+    this.app.get('/slo/alerts', (req, res) => {
+      const limit = parseInt(req.query.limit as string) || 100;
+      const activeOnly = req.query.active === 'true';
+
+      if (activeOnly) {
+        res.json(sloMonitor.getActiveAlerts());
+      } else {
+        res.json(sloMonitor.getAlertHistory(limit));
+      }
+    });
+
+    // Logger configuration endpoint
+    this.app.get('/logs/config', (_req, res) => {
+      res.json({
+        config: logger.getConfig(),
+        timestamp: new Date().toISOString()
+      });
+    });
+
+    // Update logger configuration (POST)
+    this.app.post('/logs/config', (req, res) => {
+      try {
+        const newConfig = req.body;
+        logger.configure(newConfig);
+        res.json({
+          status: 'ok',
+          config: logger.getConfig(),
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        res.status(400).json({
+          status: 'error',
+          error: error instanceof Error ? error.message : 'Invalid configuration'
+        });
+      }
     });
 
     // Direct HTTP API endpoints for all MCP tools
@@ -127,9 +300,10 @@ export class UnifiedNeuralMCPServer {
 
     // Main MCP over HTTP endpoint - JSON-RPC over HTTP
     this.app.post('/mcp', async (req, res) => {
+      const startTime = Date.now();
       res.setHeader('Content-Type', 'application/json');
       res.setHeader('Cache-Control', 'no-cache');
-      
+
       try {
         console.log('🔗 Unified Neural MCP Request received:', req.body);
         
@@ -195,15 +369,19 @@ export class UnifiedNeuralMCPServer {
             });
         }
         
-        console.log('✅ Unified Neural MCP request processed');
+        const latencyMs = Date.now() - startTime;
+        recordMCPLatency(latencyMs);
+        console.log(`✅ Unified Neural MCP request processed (${latencyMs}ms)`);
         return res.json({
           jsonrpc: '2.0',
           id: id ?? 1,
           result
         });
-        
+
       } catch (error) {
-        console.error('❌ Unified Neural MCP request error:', error);
+        const latencyMs = Date.now() - startTime;
+        recordMCPLatency(latencyMs);
+        console.error(`❌ Unified Neural MCP request error (${latencyMs}ms):`, error);
         return res.json({
           jsonrpc: '2.0',
           id: req.body?.id || 1,
@@ -258,14 +436,13 @@ export class UnifiedNeuralMCPServer {
         
         console.log(`💬 AI Message: ${from} → ${to}: ${actualMessage}`);
         
-        const messageId = await this.memoryManager.store(from || 'system', {
-          id: `message-${Date.now()}`,
+        const messageId = await this.memoryManager.storeMessage(
+          from || 'system',
           to,
-          target: to,
-          message: actualMessage,
-          type: type || 'direct',
-          timestamp: new Date().toISOString()
-        }, 'shared', 'ai_message');
+          actualMessage,
+          type || 'direct',
+          'normal'
+        );
 
         await this.publishEventToUnified('ai.message', {
           from,
@@ -287,53 +464,34 @@ export class UnifiedNeuralMCPServer {
       }
     });
 
-    // Get messages for an AI agent (with optional filtering via query)
+    // Get messages for an AI agent — P1: uses indexed ai_messages table
     this.app.get('/ai-messages/:agentId', async (req, res) => {
       try {
         const { agentId } = req.params;
         const { since, messageType, limit } = req.query as { since?: string; messageType?: string; limit?: string };
-        
-        const toSearchResults = await this.memoryManager.search(`"to":"${agentId}"`, { shared: true });
-        const targetSearchResults = await this.memoryManager.search(`"target":"${agentId}"`, { shared: true });
-        const sentMessages = await this.memoryManager.search(agentId, { shared: true });
-        
-        const allResults = [...toSearchResults, ...targetSearchResults, ...sentMessages];
-        let messageResults = allResults.filter(result => {
-          return result.content && (result.content.message || result.content.to || result.content.target);
-        });
-        if (messageType) {
-          const wanted = String(messageType).toLowerCase();
-          messageResults = messageResults.filter(r => {
-            const t = (r.content?.messageType || r.content?.type || '').toString().toLowerCase();
-            return t === wanted;
-          });
-        }
-        if (since) {
-          const sinceDate = new Date(since);
-          if (!isNaN(sinceDate.getTime())) {
-            messageResults = messageResults.filter(r => {
-              const ts = new Date(r.timestamp || r.content?.timestamp);
-              return !isNaN(ts.getTime()) && ts >= sinceDate;
-            });
-          }
-        }
-        
-        const uniqueMessages = new Map();
-        messageResults.forEach(result => {
-          if (!uniqueMessages.has(result.id)) {
-            uniqueMessages.set(result.id, {
-              id: result.id,
-              content: result.content,
-              timestamp: result.timestamp,
-              from: result.source || 'unknown'
-            });
-          }
-        });
-        
-        const list = Array.from(uniqueMessages.values());
-        const max = limit ? Math.max(0, Math.min(parseInt(String(limit), 10) || 50, list.length)) : list.length;
-        res.json({ agentId, messages: list.slice(0, max) });
 
+        const rawMessages = this.memoryManager.getMessages(agentId, {
+          messageType,
+          since,
+          limit: limit ? parseInt(limit, 10) : 50,
+        });
+
+        const messages = rawMessages.map((msg: any) => ({
+          id: msg.id,
+          content: {
+            from: msg.from_agent,
+            to: msg.to_agent,
+            content: msg.content,
+            messageType: msg.message_type,
+            priority: msg.priority,
+            timestamp: msg.created_at,
+            deliveryStatus: 'delivered',
+          },
+          timestamp: msg.created_at,
+          from: msg.from_agent,
+        }));
+
+        res.json({ agentId, messages });
       } catch (error) {
         console.error('❌ Get messages error:', error);
         res.status(500).json({ error: 'Failed to get messages' });
@@ -1258,7 +1416,14 @@ export class UnifiedNeuralMCPServer {
               }
             };
 
-            const messageId = await this.memoryManager.store(senderAgentId, messageData, 'shared', 'ai_message');
+            const messageId = await this.memoryManager.storeMessage(
+              senderAgentId,
+              targetAgentId,
+              content,
+              messageType,
+              priority,
+              messageData.metadata
+            );
             results.push({ to: targetAgentId, messageId });
 
             // Simulate real-time delivery per recipient
@@ -1303,27 +1468,32 @@ export class UnifiedNeuralMCPServer {
 
         case 'get_ai_messages': {
           const { agentId: targetAgentId, limit = 50, messageType, since } = args;
-          
-          // Enhanced message retrieval with filtering
-          let searchQuery = `"to":"${targetAgentId}"`;
-          if (messageType) {
-            searchQuery += ` AND "messageType":"${messageType}"`;
-          }
-          
-          const messages = await this.memoryManager.search(searchQuery, { shared: true });
-          
-          let filteredMessages = messages.filter(msg => 
-            msg.content && (msg.content.to === targetAgentId || msg.content.target === targetAgentId)
-          );
 
-          if (since) {
-            const sinceDate = new Date(since);
-            filteredMessages = filteredMessages.filter(msg => 
-              new Date(msg.timestamp || msg.content?.timestamp) >= sinceDate
-            );
-          }
+          // P1: Use dedicated ai_messages table with indexed queries
+          const rawMessages = this.memoryManager.getMessages(targetAgentId, {
+            messageType,
+            since,
+            limit,
+          });
 
-          const limitedMessages = filteredMessages.slice(0, limit);
+          // Transform to match existing response format for backward compatibility
+          const formattedMessages = rawMessages.map((msg: any) => ({
+            id: msg.id,
+            type: 'shared',
+            content: {
+              from: msg.from_agent,
+              to: msg.to_agent,
+              content: msg.content,
+              messageType: msg.message_type,
+              priority: msg.priority,
+              timestamp: msg.created_at,
+              deliveryStatus: 'delivered',
+              metadata: msg.metadata ? JSON.parse(msg.metadata)?.original || msg.metadata : {},
+            },
+            relevance: 0.6,
+            source: msg.from_agent,
+            timestamp: msg.created_at,
+          }));
 
           return {
             content: [
@@ -1331,14 +1501,14 @@ export class UnifiedNeuralMCPServer {
                 type: 'text',
                 text: JSON.stringify({
                   agentId: targetAgentId,
-                  totalMessages: filteredMessages.length,
-                  returnedMessages: limitedMessages.length,
+                  totalMessages: formattedMessages.length,
+                  returnedMessages: formattedMessages.length,
                   filters: {
                     messageType: messageType || 'all',
                     since: since || 'beginning',
                     limit
                   },
-                  messages: limitedMessages,
+                  messages: formattedMessages,
                   metadata: {
                     realTimeSync: true,
                     crossPlatformAccess: true,
@@ -2543,12 +2713,21 @@ export class UnifiedNeuralMCPServer {
       await this.messageHub.start();
     }
 
+    // Start SLO monitoring (check every 60 seconds)
+    startSLOMonitoring(60000);
+
+    // Event compaction with 30-day retention (per PM guidance)
+    // Uses defaults from metrics module (10000 events, 720 hours, 1 hour interval)
+    // Compaction is async/non-blocking
+    metrics.startCompaction();
+
     return new Promise<void>((resolve) => {
       this.app.listen(this.port, () => {
         console.log(`🧠 Unified Neural AI Collaboration MCP Server started on port ${this.port}`);
         console.log(`📡 MCP Endpoint: http://localhost:${this.port}/mcp`);
         console.log(`💬 AI Messaging: http://localhost:${this.port}/ai-message`);
         console.log(`📊 Health Check: http://localhost:${this.port}/health`);
+        console.log(`📈 SLO Status: http://localhost:${this.port}/slo/status`);
         console.log(`🔧 System Status: http://localhost:${this.port}/system/status`);
         
         if (this.messageHub) {
