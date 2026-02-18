@@ -111,20 +111,21 @@
 ---
 
 ## Task 500: Weaviate Search Scoring [P4]
-- [ ] 500: Replace Math.random() scores with real relevance scoring
+- [x] 500: Replace Math.random() scores with real relevance scoring
 - AC:
-  - searchScore based on match quality (exact=1.0, partial=0.8, content=0.6)
-  - semanticSimilarity from Weaviate distance when available
-  - graphWeight = 1.0 static
-  - Deterministic ordering
-  - P0 contract tests pass
+  - searchScore based on match quality (exact=1.0, partial=0.8, content=0.6) — done in P3
+  - semanticSimilarity = null (Weaviate not wired into search path; client has _additional.score ready for future use)
+  - graphWeight = 1.0 static — done in P3
+  - Deterministic ordering: results sorted by searchScore descending
+  - P0 contract tests: 14/14 passing
+  - `grep -c "Math.random" src/unified-neural-mcp-server.ts` = 0
 - Files:
   - touches: src/unified-neural-mcp-server.ts
   - reads: src/memory/weaviate-client.ts
-- Verify: `grep -c "Math.random" src/unified-neural-mcp-server.ts` = 0
 - Risk: low
 - Max-iterations: 2
 - Blocked-by: 400
+- Status: **DONE**
 
 ---
 

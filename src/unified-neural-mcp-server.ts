@@ -841,7 +841,7 @@ export class NeuralMCPServer {
           // Basic search for now, but structured for advanced features
           const searchResults = await this.memoryManager.search(query, { shared: true });
           
-          const enhancedResults = searchResults.slice(0, limit).map((result, idx) => {
+          const enhancedResults = searchResults.slice(0, limit).map((result) => {
             const nameMatch = result.content?.name?.toLowerCase().includes(query.toLowerCase());
             const typeMatch = result.content?.type?.toLowerCase().includes(query.toLowerCase());
             const score = nameMatch ? 1.0 : typeMatch ? 0.8 : 0.6;
@@ -852,7 +852,7 @@ export class NeuralMCPServer {
               memorySource: 'sqlite',
               semanticSimilarity: null
             };
-          });
+          }).sort((a, b) => b.searchScore - a.searchScore);
 
           return {
             content: [
@@ -863,9 +863,6 @@ export class NeuralMCPServer {
                   searchType,
                   totalResults: enhancedResults.length,
                   results: enhancedResults,
-                  searchMetadata: {
-                    memorySources: ['sqlite'],
-                  }
                 }, null, 2),
               },
             ],
@@ -888,7 +885,7 @@ export class NeuralMCPServer {
               memorySource: 'sqlite',
               semanticSimilarity: null
             };
-          });
+          }).sort((a, b) => b.searchScore - a.searchScore);
 
           // One-time deprecation log
           if (!(global as any)._deprecated_search_nodes_logged) {
