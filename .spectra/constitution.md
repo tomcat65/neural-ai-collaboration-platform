@@ -60,6 +60,24 @@ Volume: `unified_unified_neural_data`
 ### Top message senders (from shared_memory.created_by)
 unified-neural-mcp-server(574), claude-desktop(155), claude-cli(128), codex(98), Sally(28), richard-pricing(27)
 
+## Downtime Windows & Fallback Protocol
+
+Neural goes down briefly during:
+- **P2** (server consolidation) — rebuild Docker image, down/up cycle (minutes)
+- **P5** (drop Redis+Neo4j) — remove services from compose, restart stack (minutes)
+
+### Fallback Stack (when neural is down)
+
+1. **Communication:** Slack `#neural-system` — claude-code and codex post status updates there
+2. **Project memory:** `.spectra/` files on disk — committed to git after each phase, survives any neural outage
+3. **Coordinator context:** claude-sonnet uses the claude.ai conversation transcript as primary context
+
+### Protocol
+- Before bringing neural down for P2/P5, post a "going down" message to Slack `#neural-system`
+- Post rebuild results and "back up" confirmation to Slack
+- Resume neural messaging once health check passes
+- If rebuild fails and neural stays down, all coordination moves to Slack until resolved
+
 ## Agents
 - **claude-code** — builder agent (Cursor/CLI, project root)
 - **codex** — outside perspective, architecture review

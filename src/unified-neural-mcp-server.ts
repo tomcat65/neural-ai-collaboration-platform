@@ -22,7 +22,7 @@ import { metrics, sloMonitor, recordMCPLatency, startSLOMonitoring, correlationM
 
 // Unified Neural AI Collaboration MCP Server
 // Exposes ALL system capabilities through a single MCP interface
-export class UnifiedNeuralMCPServer {
+export class NeuralMCPServer {
   private server: Server;
   private memoryManager: MemoryManager;
   private app!: express.Application;
@@ -59,8 +59,6 @@ export class UnifiedNeuralMCPServer {
     try {
       const hubPort = parseInt(process.env.MESSAGE_HUB_PORT || '3003', 10);
       this.messageHub = new MessageHubIntegration(hubPort, this.port);
-      // Note: MessageHub integration may need NetworkMCPServer interface
-      // For now, we'll initialize without tight coupling
       
       console.log(`🔗 Message Hub integration initialized on port ${hubPort}`);
     } catch (error) {
@@ -2760,7 +2758,7 @@ export class UnifiedNeuralMCPServer {
 // Start server if this file is run directly
 if (import.meta.url === `file://${process.argv[1]}`) {
   const port = parseInt(process.env.NEURAL_MCP_PORT || '6174');
-  const server = new UnifiedNeuralMCPServer(port);
+  const server = new NeuralMCPServer(port);
   
   server.start().catch((error) => {
     console.error('Failed to start Unified Neural MCP Server:', error);

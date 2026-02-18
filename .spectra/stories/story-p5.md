@@ -51,6 +51,13 @@
 - deletes: `src/memory/redis-client.ts`, `src/memory/neo4j-client.ts`
 - touches: `src/unified-server/memory/index.ts`, `src/unified-neural-mcp-server.ts`, `src/observability/index.ts`, `docker/docker-compose.unified-neural-mcp.yml`, `package.json`
 
+## Downtime Protocol
+- **Neural goes down** during stack restart after removing Redis/Neo4j services (minutes)
+- **Before restart:** post "neural going down for P5 stack change" to Slack `#neural-system`
+- **After restart:** verify `/health` returns 200, verify `docker compose config --services` shows only 3 services, post "neural back up" to Slack
+- **If restart fails:** all coordination stays on Slack until resolved
+- **Fallback memory:** `.spectra/` files on disk (committed to git)
+
 ## Wiring Proof
 - CLI: `grep -ri "redis\|neo4j" src/ --include="*.ts" | grep -v "//\|/\*"` returns empty
 - CLI: `docker compose config --services` lists only neural-mcp, weaviate, t2v-transformers

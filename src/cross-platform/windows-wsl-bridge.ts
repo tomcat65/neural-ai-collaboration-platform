@@ -366,7 +366,7 @@ export class WindowsWSLBridge {
     const baseConfig = {
       server: {
         command: 'node',
-        args: ['mcp-http-server.js'],
+        args: ['unified-neural-mcp-server.js'],
         env: {
           PORT: this.config.serverPort.toString(),
           CROSS_PLATFORM: 'true',
@@ -431,7 +431,7 @@ export class WindowsWSLBridge {
         mcpServers: {
           'neural-ai-collaboration': {
             command: 'node',
-            args: ['mcp-http-server.js'],
+            args: ['unified-neural-mcp-server.js'],
             env: {
               PORT: this.config.serverPort.toString(),
               HOST: '0.0.0.0',

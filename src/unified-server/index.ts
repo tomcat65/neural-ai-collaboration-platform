@@ -1342,8 +1342,8 @@ const defaultConfig: UnifiedServerConfig = {
   },
   mcp: {
     enabled: true,
-    serverPath: './dist/mcp-http-server.js',
-    port: 5174,
+    serverPath: './dist/unified-neural-mcp-server.js',
+    port: 6174,
     autoRestart: true
   }
 };

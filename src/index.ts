@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
-// Note: This file is not used in the current architecture
-// The MCP server is started via unified-server/index.ts
-// which spawns ./dist/mcp-http-server.js
+// Entry point — the MCP server is started via unified-neural-mcp-server.ts
+// See: src/unified-neural-mcp-server.ts (NeuralMCPServer class)
 
-console.log('MCP Server is started via unified-server');
+console.log('MCP Server is started via unified-neural-mcp-server');

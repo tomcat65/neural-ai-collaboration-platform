@@ -1,5 +1,4 @@
 import { MessageHubWebSocketServer } from './websocket-server.js';
-import { NetworkMCPServer } from '../mcp-http-server.js';
 
 /**
  * Integration Bridge between Message Hub and existing MCP Server
@@ -8,7 +7,7 @@ import { NetworkMCPServer } from '../mcp-http-server.js';
  */
 export class MessageHubIntegration {
   private webSocketServer: MessageHubWebSocketServer;
-  private mcpServer: NetworkMCPServer | null = null;
+  private mcpServer: any = null;
   private integrationPort: number;
   private mcpPort: number;
 
@@ -126,7 +125,7 @@ export class MessageHubIntegration {
    * Enhanced MCP Server integration
    * Modifies existing /ai-message endpoint to use Hub notifications
    */
-  public integrateWithMCPServer(mcpServer: NetworkMCPServer) {
+  public integrateWithMCPServer(mcpServer: any) {
     this.mcpServer = mcpServer;
     console.log('🔗 Message Hub integrated with MCP Server');
     

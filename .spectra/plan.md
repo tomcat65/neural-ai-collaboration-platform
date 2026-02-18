@@ -37,46 +37,54 @@
 - Risk: low
 - Max-iterations: 3
 - Blocked-by: 000
+- Status: **DONE** — 14/14 tests passing
 
 ---
 
 ## Task 200: ai_messages Table Migration [P1]
-- [ ] 200: Create ai_messages table, migrate 1,284 messages, update handlers
+- [x] 200: Create ai_messages table, migrate 1,299 messages, update handlers
 - AC:
-  - New ai_messages table with indexes
-  - 1,284 rows migrated from shared_memory (exact count match)
-  - from_agent from shared_memory.created_by (no "from" in JSON)
-  - send_ai_message writes to ai_messages
-  - get_ai_messages queries ai_messages with indexed WHERE
-  - /ai-message and /ai-messages endpoints updated
-  - Old shared_memory rows preserved
-  - EXPLAIN QUERY PLAN shows index usage
-  - P0 contract tests pass
+  - New ai_messages table with 3 indexes (to_agent, from_agent, type)
+  - 1,299/1,299 rows migrated, 0 failures (actual count higher than estimated)
+  - All 6 codex amendments implemented:
+    1. Validation beyond count (NULL checks, checksum, distribution)
+    2. Idempotency guard (legacy_shared_memory_id UNIQUE, INSERT OR IGNORE)
+    3. from_agent precedence (json.from > json.sender > created_by > unknown)
+    4. Single transaction with rollback
+    5. Malformed payload capture (ai_message_migration_failures table)
+    6. Cutover gate (EXPLAIN QUERY PLAN confirms SEARCH using index)
+  - storeMessage()/getMessages() in MemoryManager
+  - send_ai_message + get_ai_messages handlers updated
+  - /ai-message and /ai-messages HTTP endpoints updated
+  - shared_memory rows untouched (zero data loss)
+  - 14/14 P0 contract tests pass
 - Files:
-  - creates: src/migrations/001-ai-messages-table.ts, scripts/run-migration.sh
+  - creates: src/migrations/001-ai-messages-table.ts, scripts/run-migration-001.sh
   - touches: src/unified-server/memory/index.ts, src/unified-neural-mcp-server.ts
-- Verify: `sqlite3 unified-platform.db "SELECT COUNT(*) FROM ai_messages"` = 1284
+- Verify: `docker exec unified-unified-neural-mcp-1 sqlite3 /app/data/unified-platform.db "SELECT COUNT(*) FROM ai_messages"` >= 1299
 - Risk: **high** (data migration)
-- Max-iterations: 5
 - Blocked-by: 100
+- Status: **DONE** — committed 6d8a968
 
 ---
 
 ## Task 300: Server Consolidation [P2]
-- [ ] 300: Delete mcp-http-server.ts, rename to NeuralMCPServer
+- [x] 300: Delete mcp-http-server.ts, rename to NeuralMCPServer
 - AC:
-  - src/mcp-http-server.ts deleted
+  - src/mcp-http-server.ts deleted (1,059 lines removed)
+  - src/tools/userTeamTools.ts deleted (dead code, only imported by deleted file)
   - Class renamed UnifiedNeuralMCPServer → NeuralMCPServer
+  - hub-integration.ts updated — removed NetworkMCPServer import
+  - src/index.ts, unified-server/index.ts, cross-platform/windows-wsl-bridge.ts references cleaned
   - Zero grep results for NetworkMCPServer or mcp-http-server in src/
-  - Server starts cleanly
-  - P0 contract tests pass
+  - Server starts cleanly, TypeScript compiles with no errors
+  - 14/14 P0 contract tests pass
 - Files:
-  - deletes: src/mcp-http-server.ts
-  - touches: src/unified-neural-mcp-server.ts, src/index.ts
-- Verify: `grep -r "NetworkMCPServer\|mcp-http-server" src/` returns empty
+  - deletes: src/mcp-http-server.ts, src/tools/userTeamTools.ts, src/tools/ (empty dir)
+  - touches: src/unified-neural-mcp-server.ts, src/index.ts, src/message-hub/hub-integration.ts, src/unified-server/index.ts, src/cross-platform/windows-wsl-bridge.ts
 - Risk: medium
-- Max-iterations: 3
 - Blocked-by: 200
+- Status: **DONE**
 
 ---
 

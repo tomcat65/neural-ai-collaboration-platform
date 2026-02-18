@@ -38,6 +38,13 @@
 - deletes: `src/mcp-http-server.ts`, possibly `src/tools/userTeamTools.ts`
 - reads: `docker/docker-compose.unified-neural-mcp.yml`
 
+## Downtime Protocol
+- **Neural goes down** during Docker rebuild (minutes, not hours)
+- **Before rebuild:** post "neural going down for P2 rebuild" to Slack `#neural-system`
+- **After rebuild:** verify `/health` returns 200, post "neural back up" to Slack
+- **If rebuild fails:** all coordination stays on Slack until resolved
+- **Fallback memory:** `.spectra/` files on disk (committed to git)
+
 ## Wiring Proof
 - CLI: `grep -r "NetworkMCPServer\|mcp-http-server" src/` returns empty
 - CLI: `docker compose -f docker/docker-compose.unified-neural-mcp.yml up -d && curl http://localhost:6174/health` returns 200
