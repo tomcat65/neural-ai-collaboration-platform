@@ -28,6 +28,14 @@ Populated during build phases. Record failures, lessons, and patterns here.
 - Contract test for `get_system_status` replaced with `search_nodes` legacy alias test.
 - Tool registry currently has 15 tools in tools/list + `set_agent_identity` case handler (now also in tools/list).
 
+## P5 Learnings
+- Deleting redis-client.ts and neo4j-client.ts broke the TypeScript build because 8 dead memory module files still imported them. All 8 were dead code (no active imports). Had to delete the entire cluster: advanced-neural-ai, adaptive-learning, neural-consolidation, enhanced-collaboration, neural-ai-platform, performance-optimization, hierarchical-memory, enterprise-features.
+- event-driven-agents/ also dead (imported redis directly). Deleted.
+- middleware/security.ts uses `redis` package independently for rate limiting with graceful fallback to memory. This is a separate concern from the core memory system and was intentionally kept.
+- observability/metrics.ts has Neo4j metric definitions (NEO4J_CONNECTED, NEO4J_FALLBACK_TOTAL) that are now unused but safe dead code — kept to avoid breaking the metrics interface.
+- After removing redis/neo4j from docker-compose, orphaned containers remain from previous runs. Must stop+rm them manually or use `--remove-orphans`.
+- `/ready` endpoint no longer includes redis/neo4j in systems — degradation check is now only weaviate-aware.
+
 ## Known Risks
 - Stale host-side DB (`data/unified-platform.db`, 229 rows) is NOT the live data. Always operate against Docker volume.
 - `simulateAdvancedMemoryIntegration()` is a no-op console.log — safe to remove.

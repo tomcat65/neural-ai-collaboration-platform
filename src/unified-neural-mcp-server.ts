@@ -146,18 +146,14 @@ export class NeuralMCPServer {
         // Determine readiness based on system connectivity
         const isReady = systemStatus.sqlite.connected; // SQLite is minimum requirement
         const isDegraded = !systemStatus.advancedSystemsEnabled ||
-                          !systemStatus.redis.connected ||
-                          !systemStatus.weaviate.connected ||
-                          !systemStatus.neo4j.connected;
+                          !systemStatus.weaviate.connected;
 
         const status = {
           ready: isReady,
           degraded: isDegraded,
           systems: {
             sqlite: systemStatus.sqlite.connected,
-            redis: systemStatus.redis.connected,
             weaviate: systemStatus.weaviate.connected,
-            neo4j: systemStatus.neo4j.connected,
             advancedSystemsEnabled: systemStatus.advancedSystemsEnabled
           },
           criticalAlerts: criticalAlerts.length,
@@ -515,17 +511,10 @@ export class NeuralMCPServer {
         let advancedStats: any = {};
         if (memoryStatus.advancedSystemsEnabled) {
           try {
-            if (memoryStatus.redis.connected && this.memoryManager.redisClient) {
-              const redisStats = await this.memoryManager.redisClient.getCacheStats();
-              advancedStats.redis = redisStats;
-            }
-            
             if (memoryStatus.weaviate.connected && this.memoryManager.weaviateClient) {
               const weaviateStats = await this.memoryManager.weaviateClient.getStatistics();
               advancedStats.weaviate = weaviateStats;
             }
-            
-            advancedStats.neo4j = { status: 'connected', note: 'Statistics available via tools' };
           } catch (statsError) {
             console.warn('⚠️ Error getting advanced system statistics:', statsError);
           }
@@ -826,8 +815,7 @@ export class NeuralMCPServer {
                   entities: createdEntities,
                   advancedFeatures: {
                     vectorEmbeddings: 'generated',
-                    graphRelations: 'indexed',
-                    cacheUpdated: 'redis'
+                    graphRelations: 'indexed'
                   }
                 }, null, 2),
               },

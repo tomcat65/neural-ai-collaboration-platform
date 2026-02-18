@@ -21,8 +21,6 @@ import {
   ProjectArtifacts
 } from '../types/memory.js';
 import { WeaviateClient } from '../../memory/weaviate-client.js';
-import { Neo4jClient } from '../../memory/neo4j-client.js';
-import { RedisClient } from '../../memory/redis-client.js';
 import {
   setSystemConnected,
   recordSQLiteFallback,
@@ -37,8 +35,6 @@ export class MemoryManager {
   private db: Database.Database;
   private memorySystem: MemorySystem;
   public weaviateClient?: WeaviateClient;
-  public neo4jClient?: Neo4jClient;
-  public redisClient?: RedisClient;
   private isAdvancedSystemsEnabled: boolean = false;
   private isDualWriteEnabled: boolean = false;
 
@@ -83,18 +79,6 @@ export class MemoryManager {
     try {
       console.log('🚀 Initializing advanced memory systems...');
 
-      // Initialize Redis client with Docker networking
-      try {
-        this.redisClient = new RedisClient(process.env.REDIS_URL || 'redis://redis:6379');
-        await this.redisClient.initialize();
-        setSystemConnected('redis', true);
-        metrics.logEvent('info', 'systems', 'Redis memory client initialized');
-      } catch (redisError) {
-        console.warn('⚠️ Redis initialization failed:', redisError);
-        setSystemConnected('redis', false);
-        metrics.logEvent('error', 'systems', 'Redis memory client initialization failed', { error: String(redisError) });
-      }
-
       // Initialize Weaviate client
       try {
         this.weaviateClient = new WeaviateClient();
@@ -107,20 +91,7 @@ export class MemoryManager {
         metrics.logEvent('error', 'systems', 'Weaviate client initialization failed', { error: String(weaviateError) });
       }
 
-      // Initialize Neo4j client
-      try {
-        this.neo4jClient = new Neo4jClient();
-        await this.neo4jClient.initialize();
-        setSystemConnected('neo4j', true);
-        metrics.logEvent('info', 'systems', 'Neo4j client initialized');
-      } catch (neo4jError) {
-        console.warn('⚠️ Neo4j initialization failed:', neo4jError);
-        setSystemConnected('neo4j', false);
-        metrics.logEvent('error', 'systems', 'Neo4j client initialization failed', { error: String(neo4jError) });
-      }
-
-      // Check if any advanced system is available
-      this.isAdvancedSystemsEnabled = !!(this.redisClient || this.weaviateClient || this.neo4jClient);
+      this.isAdvancedSystemsEnabled = !!this.weaviateClient;
 
       if (this.isAdvancedSystemsEnabled) {
         console.log('✅ Advanced memory systems initialized (partial or full)');
@@ -603,7 +574,7 @@ export class MemoryManager {
       }
     }
 
-    // 2. Store in advanced systems if available - TEMPORARILY SKIP ai_message for Neo4j compatibility
+    // 2. Store in advanced systems if available (skip ai_message — stored in dedicated table)
     if (this.isAdvancedSystemsEnabled && type !== 'ai_message') {
       await this.storeInAdvancedSystems(id, agentId, memory, scope, type);
     }
@@ -626,32 +597,6 @@ export class MemoryManager {
           priority: Math.round((memory?.importance || 0.5) * 10),
           relationships: [],
           metadata: memory?.metadata || {}
-        });
-      }
-
-      // Store in Neo4j for relationship mapping
-      if (this.neo4jClient) {
-        await this.neo4jClient.storeMemory({
-          id,
-          agentId,
-          content: typeof memory === 'string' ? memory : JSON.stringify(memory),
-          type: type as any,
-          timestamp: Date.now(),
-          tags: memory?.tags || [],
-          priority: Math.round((memory?.importance || 0.5) * 10),
-          relationships: [],
-          metadata: memory?.metadata || {}
-        });
-      }
-
-      // Cache in Redis for fast access
-      if (this.redisClient) {
-        await this.redisClient.cacheMemory(`memory:${id}`, {
-          id,
-          agentId,
-          content: memory,
-          type,
-          timestamp: new Date()
         });
       }
 
@@ -847,15 +792,6 @@ export class MemoryManager {
   }
 
   async search(query: string, scope: MemoryScope | string): Promise<SearchResult[]> {
-    // 1. Check Redis cache first
-    if (this.isAdvancedSystemsEnabled && this.redisClient) {
-      const cachedResults = await this.redisClient.getCachedSearchResults(query);
-      if (cachedResults) {
-        console.log(`⚡ Returning cached search results for: "${query}"`);
-        return cachedResults;
-      }
-    }
-
     const results: SearchResult[] = [];
     const searchTerm = query.toLowerCase();
     
@@ -1101,11 +1037,6 @@ export class MemoryManager {
 
     const finalResults = Array.from(uniqueResults.values()).sort((a, b) => b.relevance - a.relevance);
 
-    // 3. Cache results in Redis for future queries
-    if (this.isAdvancedSystemsEnabled && this.redisClient && finalResults.length > 0) {
-      await this.redisClient.cacheSearchResults(query, finalResults);
-    }
-
     return finalResults;
   }
 
@@ -1133,40 +1064,6 @@ export class MemoryManager {
         }
       }
 
-      // 2. Relationship-based search with Neo4j  
-      if (this.neo4jClient && scope.shared) {
-        console.log(`🕸️ Performing relationship search with Neo4j: "${query}"`);
-        
-        // Search for memories that might contain the query term
-        // Since we don't have searchMemoriesByContent, we'll use a basic approach
-        try {
-          // Get related memories for any existing memory (simplified approach)  
-          const relatedMemories = await this.neo4jClient.getRelatedMemories('dummy', 'RELATED');
-          
-          for (const nResult of relatedMemories) {
-            if (nResult.content.toLowerCase().includes(query.toLowerCase())) {
-              const furtherRelated = await this.neo4jClient.getRelatedMemories(nResult.id, 'RELATED');
-              
-              results.push({
-                id: nResult.id,
-                type: 'shared',
-                content: {
-                  original: nResult.content,
-                  tags: nResult.tags,
-                  relatedCount: furtherRelated.length,
-                  relatedMemories: furtherRelated.slice(0, 3),
-                  source: 'neo4j'
-                },
-                relevance: (nResult.priority || 5) / 10,
-                source: `neo4j:${nResult.agentId}`,
-                timestamp: new Date(nResult.timestamp)
-              });
-            }
-          }
-        } catch (neo4jError) {
-          console.warn('Neo4j search error:', neo4jError);
-        }
-      }
 
     } catch (error) {
       console.warn('⚠️ Advanced search systems error:', error);
@@ -1209,22 +1106,13 @@ export class MemoryManager {
   async getSystemStatus(): Promise<any> {
     const status = {
       sqlite: { connected: true, type: 'SQLite' },
-      redis: { connected: false, type: 'Redis Cache' },
       weaviate: { connected: false, type: 'Vector Database' },
-      neo4j: { connected: false, type: 'Graph Database' },
       advancedSystemsEnabled: this.isAdvancedSystemsEnabled
     };
 
     if (this.isAdvancedSystemsEnabled) {
-      if (this.redisClient) {
-        status.redis.connected = await this.redisClient.healthCheck();
-      }
       if (this.weaviateClient) {
         status.weaviate.connected = await this.weaviateClient.healthCheck();
-      }
-      if (this.neo4jClient) {
-        // Neo4j doesn't have a public health check method, assume connected if client exists
-        status.neo4j.connected = true;
       }
     }
 
@@ -1233,17 +1121,7 @@ export class MemoryManager {
 
   async close(): Promise<void> {
     this.db.close();
-    
-    if (this.isAdvancedSystemsEnabled) {
-      if (this.redisClient) {
-        await this.redisClient.close();
-      }
-      if (this.neo4jClient) {
-        await this.neo4jClient.close();
-      }
-      // Weaviate client doesn't need explicit closing
-    }
-    
+    // Weaviate client doesn't need explicit closing
     console.log('🧠 Enhanced memory manager closed');
   }
 

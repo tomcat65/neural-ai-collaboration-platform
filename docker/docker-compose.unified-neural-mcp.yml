@@ -14,28 +14,16 @@ services:
       - MESSAGE_HUB_PORT=3004
       - NODE_ENV=production
       - API_KEY=${API_KEY}
-      # Advanced memory backends
-      - REDIS_URL=redis://redis:6379
+      # Advanced memory backend
       - WEAVIATE_URL=http://weaviate:8080
-      - NEO4J_URL=bolt://neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=password
       - ENABLE_ADVANCED_MEMORY=true
-      - ENABLE_MULTI_PROVIDER_AI=true
-      - ENABLE_AUTONOMOUS_AGENTS=true
       - ENABLE_CROSS_PLATFORM=true
-      - ENABLE_CONSENSUS=true
-      - ENABLE_ML_INTEGRATION=true
     volumes:
       - unified_neural_data:/app/data
       - ../logs:/app/logs
     networks:
       - neural_network
     depends_on:
-      redis:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
       weaviate:
         condition: service_healthy
     healthcheck:
@@ -49,45 +37,6 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.neural-mcp.rule=Host(`neural-mcp.localhost`)"
       - "traefik.http.services.neural-mcp.loadbalancer.server.port=6174"
-  # Optional: Include Redis for advanced caching (if not using external Redis)
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - neural_network
-    command: redis-server --appendonly yes
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-  # Optional: Include Neo4j for graph database (if not using external Neo4j)
-  neo4j:
-    image: neo4j:5-community
-    ports:
-      - "7474:7474"  # HTTP
-      - "7687:7687"  # Bolt
-    environment:
-      - NEO4J_AUTH=neo4j/password
-      - NEO4J_PLUGINS=["apoc"]
-      - NEO4J_apoc_export_file_enabled=true
-      - NEO4J_apoc_import_file_enabled=true
-    volumes:
-      - neo4j_data:/data
-      - neo4j_logs:/logs
-    networks:
-      - neural_network
-    healthcheck:
-      # Use cypher-shell to avoid 401s on HTTP endpoint
-      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "password", "RETURN 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-  # Optional: Include Weaviate for vector semantic search
   weaviate:
     image: semitechnologies/weaviate:1.22.4
     ports:
@@ -119,12 +68,6 @@ services:
 
 volumes:
   unified_neural_data:
-    driver: local
-  redis_data:
-    driver: local
-  neo4j_data:
-    driver: local
-  neo4j_logs:
     driver: local
   weaviate_data:
     driver: local
