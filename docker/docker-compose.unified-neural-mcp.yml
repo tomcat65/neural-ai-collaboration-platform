@@ -1,3 +1,5 @@
+name: unified
+
 services:
   unified-neural-mcp:
     build:

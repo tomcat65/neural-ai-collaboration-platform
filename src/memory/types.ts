@@ -3,6 +3,7 @@ export type MemoryType = 'task' | 'knowledge' | 'episodic' | 'semantic' | 'worki
 export interface MemoryItem {
   id: string;
   agentId: string;
+  tenantId?: string; // Multi-tenant isolation (Phase 5)
   type: MemoryType;
   content: string;
   timestamp: number; // Changed from Date to number to match usage
@@ -50,6 +51,7 @@ export interface Relationship {
 export interface MemorySearchQuery {
   query: string;
   agentId?: string;
+  tenantId?: string; // Multi-tenant isolation (Phase 5)
   memoryType?: MemoryType;
   tags?: string[];
   dateRange?: {

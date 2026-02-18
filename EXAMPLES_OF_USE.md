@@ -160,6 +160,49 @@ curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
   }' | jq
 ```
 
+## 🏷️ Multi-Tenant Mode (Feature Flag)
+
+Enable isolation/quotas per tenant (flagged off by default):
+```bash
+export MULTI_TENANT_ENABLED=true
+export ADMIN_API_KEY=$(openssl rand -hex 32)  # strong admin key
+```
+
+Create two tenants and issue keys (admin key required):
+```bash
+# Create tenant A (free tier)
+curl -s -X POST http://localhost:6174/admin/tenants \
+  -H "X-Admin-Key: ${ADMIN_API_KEY}" -H "Content-Type: application/json" \
+  -d '{"name":"tenant-a","tier":"free"}'
+
+# Create tenant B (pro tier)
+curl -s -X POST http://localhost:6174/admin/tenants \
+  -H "X-Admin-Key: ${ADMIN_API_KEY}" -H "Content-Type: application/json" \
+  -d '{"name":"tenant-b","tier":"pro"}'
+
+# Generate API key for tenant A
+curl -s -X POST http://localhost:6174/admin/tenants/tenant-a/keys \
+  -H "X-Admin-Key: ${ADMIN_API_KEY}" | jq
+```
+
+Use a tenant key for MCP calls (tenant isolation enforced):
+```bash
+TENANT_KEY="nac_tenant-a_...yourkey..."
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${TENANT_KEY}" \
+  -d '{"jsonrpc":"2.0","id":201,"method":"tools/call","params":{"name":"get_individual_memory","arguments":{}}}'
+```
+
+Check your tenant usage/quota (self-service):
+```bash
+curl -s http://localhost:6174/admin/me/usage -H "X-API-Key: ${TENANT_KEY}" | jq
+```
+
+Notes:
+- Default tenant stays enterprise-tier for backward compatibility.
+- All admin endpoints require `X-Admin-Key` or an admin API key; keep admin keys secret.
+- If `MULTI_TENANT_ENABLED=false`, behavior matches legacy single-tenant mode.
+
 
 ---
 

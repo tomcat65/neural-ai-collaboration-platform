@@ -27,6 +27,12 @@ export class WeaviateClient {
             indexInverted: true,
           },
           {
+            name: 'tenantId',
+            dataType: ['string'],
+            description: 'Tenant ID for multi-tenant isolation (Phase 5)',
+            indexInverted: true,
+          },
+          {
             name: 'memoryType',
             dataType: ['string'],
             description: 'Type of memory (task, knowledge, episodic, semantic)',
@@ -82,6 +88,7 @@ export class WeaviateClient {
     try {
       const memoryObject = {
         agentId: memory.agentId,
+        tenantId: memory.tenantId || 'default', // Multi-tenant isolation
         memoryType: memory.type,
         content: memory.content,
         timestamp: new Date().toISOString(),
@@ -107,21 +114,25 @@ export class WeaviateClient {
     queryOrOptions: string | {
       query: string;
       agentId?: string;
+      tenantId?: string; // Multi-tenant isolation
       limit?: number;
       filters?: any;
     },
     agentId?: string,
     memoryType?: MemoryType,
-    limit: number = 10
+    limit: number = 10,
+    tenantId?: string // Multi-tenant isolation
   ): Promise<MemoryItem[]> {
     try {
       let query: string;
       let searchLimit: number;
       let whereFilter: any = {};
-      
+      let effectiveTenantId: string | undefined;
+
       if (typeof queryOrOptions === 'string') {
         query = queryOrOptions;
         searchLimit = limit;
+        effectiveTenantId = tenantId;
         if (agentId) {
           whereFilter.agentId = agentId;
         }
@@ -131,12 +142,18 @@ export class WeaviateClient {
       } else {
         query = queryOrOptions.query;
         searchLimit = queryOrOptions.limit || limit;
+        effectiveTenantId = queryOrOptions.tenantId || tenantId;
         if (queryOrOptions.agentId) {
           whereFilter.agentId = queryOrOptions.agentId;
         }
         if (queryOrOptions.filters) {
           whereFilter = { ...whereFilter, ...queryOrOptions.filters };
         }
+      }
+
+      // Multi-tenant isolation: always filter by tenantId when provided
+      if (effectiveTenantId) {
+        whereFilter.tenantId = effectiveTenantId;
       }
 
       let result: any;
@@ -198,16 +215,34 @@ export class WeaviateClient {
     }
   }
 
-  async getAgentMemories(agentId: string, limit: number = 50): Promise<MemoryItem[]> {
+  async getAgentMemories(agentId: string, limit: number = 50, tenantId?: string): Promise<MemoryItem[]> {
     try {
-      const result = await this.client.graphql
-        .get()
-        .withClassName(this.className)
-        .withWhere({
+      // Build where clause with multi-tenant isolation
+      const whereConditions: any[] = [
+        {
           path: ['agentId'],
           operator: 'Equal',
           valueString: agentId,
-        })
+        }
+      ];
+
+      // Multi-tenant isolation: filter by tenantId when provided
+      if (tenantId) {
+        whereConditions.push({
+          path: ['tenantId'],
+          operator: 'Equal',
+          valueString: tenantId,
+        });
+      }
+
+      const whereClause = whereConditions.length === 1
+        ? whereConditions[0]
+        : { operator: 'And', operands: whereConditions };
+
+      const result = await this.client.graphql
+        .get()
+        .withClassName(this.className)
+        .withWhere(whereClause)
         .withLimit(limit)
         .withSort([{ path: ['timestamp'], order: 'desc' }])
         .do();

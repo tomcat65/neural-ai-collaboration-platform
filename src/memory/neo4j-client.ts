@@ -35,6 +35,12 @@ export class Neo4jMemoryClient {
         FOR (m:Memory) ON (m.timestamp)
       `);
 
+      // Multi-tenant isolation index (Phase 5)
+      await session.run(`
+        CREATE INDEX memory_tenant IF NOT EXISTS
+        FOR (m:Memory) ON (m.tenantId)
+      `);
+
       console.log('✅ Neo4j schema initialized successfully');
     } catch (error) {
       console.error('❌ Error initializing Neo4j schema:', error);
@@ -74,6 +80,7 @@ export class Neo4jMemoryClient {
           type: $type,
           content: $content,
           agentId: $agentId,
+          tenantId: $tenantId,
           timestamp: $timestamp,
           tags: $tags,
           metadata: $metadata
@@ -83,6 +90,7 @@ export class Neo4jMemoryClient {
         type: memory.type,
         content: this.toNeoProp(memory.content),
         agentId: memory.agentId,
+        tenantId: memory.tenantId || 'default', // Multi-tenant isolation
         timestamp: new Date(memory.timestamp).toISOString(),
         tags: Array.isArray(memory.tags) ? memory.tags : [],
         metadata: this.toNeoProp(memory.metadata || {}),
@@ -95,13 +103,15 @@ export class Neo4jMemoryClient {
     }
   }
 
-  async getMemory(id: string): Promise<MemoryItem | null> {
+  async getMemory(id: string, tenantId?: string): Promise<MemoryItem | null> {
     const session = this.driver.session();
     try {
-      const result = await session.run(`
-        MATCH (m:Memory {id: $id})
-        RETURN m
-      `, { id });
+      // Multi-tenant isolation: optionally filter by tenantId
+      const query = tenantId
+        ? `MATCH (m:Memory {id: $id, tenantId: $tenantId}) RETURN m`
+        : `MATCH (m:Memory {id: $id}) RETURN m`;
+
+      const result = await session.run(query, { id, tenantId });
 
       if (result.records.length === 0) return null;
 

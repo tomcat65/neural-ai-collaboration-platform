@@ -67,6 +67,17 @@ The platform operates across **four specialized databases** for comprehensive AI
 - **Message Discovery**: <1 second message discovery and routing
 - **Guaranteed Delivery**: Persistent message queuing and retry logic
 
+## 🔐 Security & Auth (MCP + Admin)
+- API key is **mandatory** for all non-health endpoints. Set `API_KEY` (or `NEURAL_API_KEY`) in your environment/compose; clients must send `X-API-Key` or `Authorization: Bearer`.
+- Metrics/admin endpoints are **auth-only**: `/metrics*`, `/slo/*`, `/logs/config`, `/metrics/retention|compact|events` require API key. Public-only: `/health`, `/health.json`, `/ready`.
+- SLO targets encoded (MCP p95<300ms/p99<600ms, WS fan-out p95<200ms, memory read p95<250ms/write p95<400ms, 99.9% availability); alerts exposed at `/slo/status`, `/slo/alerts` (auth required).
+- Rate limiting: general + message + pre-auth with Redis HA fallback. Backend switches are logged; memory fallback is automatic.
+
+## 🏷️ Multi-Tenant Mode (Feature Flag)
+- Enable with `MULTI_TENANT_ENABLED=true`. Backward compatible: legacy single-tenant remains when flag is off.
+- Isolation: tenant-scoped storage across SQLite, Redis cache, Weaviate, and Neo4j (tenantId columns/prefixes/filters).
+- Per-tenant quotas & rate limits: tiered (free/pro/enterprise) with fail-closed 429s; metrics expose `rate_limit_tenant_*`.
+- Admin endpoints (auth required via `X-Admin-Key` or admin API key): create/update tenants, manage API keys, view quotas/usage. Default tenant is protected and remains enterprise tier for compatibility.
 ### **✅ System Monitoring**
 - **Health Endpoints**: Real-time system status monitoring
 - **Performance Metrics**: Database connection status and performance stats

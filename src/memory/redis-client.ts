@@ -3,6 +3,7 @@ import { createClient, RedisClientType } from 'redis';
 export interface RedisMemoryData {
   id: string;
   agentId: string;
+  tenantId?: string; // Multi-tenant isolation (Phase 5)
   content: any;
   type: string;
   timestamp: Date;
@@ -62,7 +63,18 @@ export class RedisClient {
     }
   }
 
-  // Cache memory data with optional TTL
+  /**
+   * Build tenant-scoped cache key
+   * Pattern: tenant:{tenantId}:{key} or {key} if no tenantId
+   */
+  private buildTenantKey(key: string, tenantId?: string): string {
+    if (tenantId && tenantId !== 'default') {
+      return `tenant:${tenantId}:${key}`;
+    }
+    return key;
+  }
+
+  // Cache memory data with optional TTL and tenant isolation
   async cacheMemory(key: string, data: RedisMemoryData, ttl?: number): Promise<void> {
     try {
       if (!this.isConnected) {
@@ -70,28 +82,33 @@ export class RedisClient {
         return;
       }
 
+      // Apply tenant scoping to key
+      const tenantKey = this.buildTenantKey(key, data.tenantId);
+
       const cacheData = {
         ...data,
         cachedAt: new Date().toISOString()
       };
 
       const ttlSeconds = ttl || this.defaultTTL;
-      await this.client.setEx(key, ttlSeconds, JSON.stringify(cacheData));
+      await this.client.setEx(tenantKey, ttlSeconds, JSON.stringify(cacheData));
 
-      console.log(`💾 Cached memory: ${key} (TTL: ${ttlSeconds}s)`);
+      console.log(`💾 Cached memory: ${tenantKey} (TTL: ${ttlSeconds}s)`);
     } catch (error) {
       console.error(`❌ Failed to cache memory ${key}:`, error);
     }
   }
 
-  // Retrieve cached memory data
-  async getCachedMemory(key: string): Promise<RedisMemoryData | null> {
+  // Retrieve cached memory data with optional tenant isolation
+  async getCachedMemory(key: string, tenantId?: string): Promise<RedisMemoryData | null> {
     try {
       if (!this.isConnected) {
         return null;
       }
 
-      const cached = await this.client.get(key);
+      // Apply tenant scoping to key
+      const tenantKey = this.buildTenantKey(key, tenantId);
+      const cached = await this.client.get(tenantKey);
       if (!cached) return null;
 
       return JSON.parse(cached);
@@ -101,40 +118,43 @@ export class RedisClient {
     }
   }
 
-  // Cache search results
-  async cacheSearchResults(query: string, results: any[], ttl?: number): Promise<void> {
+  // Cache search results with tenant isolation
+  async cacheSearchResults(query: string, results: any[], ttl?: number, tenantId?: string): Promise<void> {
     try {
       if (!this.isConnected) return;
 
-      const cacheKey = `search:${Buffer.from(query).toString('base64')}`;
+      const baseKey = `search:${Buffer.from(query).toString('base64')}`;
+      const cacheKey = this.buildTenantKey(baseKey, tenantId);
       const cacheData = {
         query,
         results,
         count: results.length,
+        tenantId,
         cachedAt: new Date().toISOString()
       };
 
       const ttlSeconds = ttl || 300; // 5 minutes for search results
       await this.client.setEx(cacheKey, ttlSeconds, JSON.stringify(cacheData));
 
-      console.log(`🔍 Cached search results for: "${query}" (${results.length} results)`);
+      console.log(`🔍 Cached search results for: "${query}" (${results.length} results)${tenantId ? ` [tenant:${tenantId}]` : ''}`);
     } catch (error) {
       console.error(`❌ Failed to cache search results for "${query}":`, error);
     }
   }
 
-  // Get cached search results
-  async getCachedSearchResults(query: string): Promise<any[] | null> {
+  // Get cached search results with tenant isolation
+  async getCachedSearchResults(query: string, tenantId?: string): Promise<any[] | null> {
     try {
       if (!this.isConnected) return null;
 
-      const cacheKey = `search:${Buffer.from(query).toString('base64')}`;
+      const baseKey = `search:${Buffer.from(query).toString('base64')}`;
+      const cacheKey = this.buildTenantKey(baseKey, tenantId);
       const cached = await this.client.get(cacheKey);
-      
+
       if (!cached) return null;
 
       const data = JSON.parse(cached);
-      console.log(`⚡ Retrieved cached search results for: "${query}" (${data.count} results)`);
+      console.log(`⚡ Retrieved cached search results for: "${query}" (${data.count} results)${tenantId ? ` [tenant:${tenantId}]` : ''}`);
       return data.results;
     } catch (error) {
       console.error(`❌ Failed to get cached search results for "${query}":`, error);
@@ -142,22 +162,23 @@ export class RedisClient {
     }
   }
 
-  // Cache agent memory with agent-specific key
-  async cacheAgentMemory(agentId: string, memoryId: string, data: any, ttl?: number): Promise<void> {
+  // Cache agent memory with agent-specific key and tenant isolation
+  async cacheAgentMemory(agentId: string, memoryId: string, data: any, ttl?: number, tenantId?: string): Promise<void> {
     const key = `agent:${agentId}:memory:${memoryId}`;
     await this.cacheMemory(key, {
       id: memoryId,
       agentId,
+      tenantId,
       content: data,
       type: 'agent_memory',
       timestamp: new Date()
     }, ttl);
   }
 
-  // Get cached agent memory
-  async getCachedAgentMemory(agentId: string, memoryId: string): Promise<any | null> {
+  // Get cached agent memory with tenant isolation
+  async getCachedAgentMemory(agentId: string, memoryId: string, tenantId?: string): Promise<any | null> {
     const key = `agent:${agentId}:memory:${memoryId}`;
-    const cached = await this.getCachedMemory(key);
+    const cached = await this.getCachedMemory(key, tenantId);
     return cached?.content || null;
   }
 
