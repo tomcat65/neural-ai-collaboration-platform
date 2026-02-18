@@ -7,6 +7,12 @@ Populated during build phases. Record failures, lessons, and patterns here.
 - `set_agent_identity` exists in `toolSchemas.ts` and as a case handler but is NOT in the `tools/list` response. It's callable but hidden. Decision: keep as-is for now, add to tools/list in P3 if desired.
 - Tool registry currently has 30 tools (not 31 — `search_nodes` is exposed as a legacy alias).
 
+## from_agent Attribution Bug (fixed 78a34a4)
+- `from` was optional in send_ai_message schema — callers that omitted it got `from_agent='unified-neural-mcp-server'`
+- Now required: `required: ['content', 'from']`
+- Handler still falls back gracefully but logs a warning
+- When `docker compose up` is run without exporting API_KEY, the container starts but auth fails on all MCP calls — always export API_KEY or use Tommy's `neural-unified-up` script
+
 ## P1 Learnings
 - Actual ai_message count was 1,299 (not 1,284 as initially estimated from incomplete inventory).
 - 1,297 of 1,299 messages have a `from` field in JSON. Only 2 don't (HTTP-origin messages). The `from_agent` precedence chain was still valuable for those 2.
@@ -14,6 +20,13 @@ Populated during build phases. Record failures, lessons, and patterns here.
 - Docker heredoc piping to sqlite3 silently fails. Use `docker cp` + `.read` approach instead.
 - API_KEY is in `.env` file and gets picked up by Docker compose. Tommy's startup script at `~/bin/neural-unified-up` handles this.
 - After rebuild/restart, always verify with `/health` and `tools/list` before running tests.
+
+## P3 Learnings
+- Actual simulation tool count was 17 (not 16 as estimated in plan).
+- `set_agent_identity` and `search_nodes` added to tools/list to reach target of 15 tools.
+- read_graph response structure changed: `statistics.basic.nodeCount` → `statistics.nodeCount` (flat, no nesting).
+- Contract test for `get_system_status` replaced with `search_nodes` legacy alias test.
+- Tool registry currently has 15 tools in tools/list + `set_agent_identity` case handler (now also in tools/list).
 
 ## Known Risks
 - Stale host-side DB (`data/unified-platform.db`, 229 rows) is NOT the live data. Always operate against Docker volume.

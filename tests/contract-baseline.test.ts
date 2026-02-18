@@ -195,8 +195,8 @@ describe('Neural Contract Baseline', () => {
       expect(result.graph.relations).toBeDefined();
       expect(result.graph.observations).toBeDefined();
       expect(result.statistics).toBeDefined();
-      expect(result.statistics.basic.nodeCount).toBeGreaterThanOrEqual(0);
-      expect(result.statistics.basic.edgeCount).toBeGreaterThanOrEqual(0);
+      expect(result.statistics.nodeCount).toBeGreaterThanOrEqual(0);
+      expect(result.statistics.edgeCount).toBeGreaterThanOrEqual(0);
     });
   });
 
@@ -326,18 +326,11 @@ describe('Neural Contract Baseline', () => {
     });
   });
 
-  describe('get_system_status', () => {
-    it('returns system status with connection info', async () => {
-      const result = await mcpCall('get_system_status', {});
-
+  describe('search_nodes (legacy alias)', () => {
+    it('returns results like search_entities with graph type', async () => {
+      const result = await mcpCall('search_nodes', { query: 'test' });
       expect(result).toBeDefined();
-      const resultStr = JSON.stringify(result);
-      // Should mention system components
-      expect(
-        resultStr.includes('sqlite') ||
-        resultStr.includes('status') ||
-        resultStr.includes('connected')
-      ).toBe(true);
+      expect(result.results).toBeDefined();
     });
   });
 
@@ -419,12 +412,13 @@ describe('Neural Contract Baseline', () => {
         'send_ai_message',
         'get_ai_messages',
         'register_agent',
+        'set_agent_identity',
         'get_agent_status',
         'record_learning',
         'set_preferences',
         'get_individual_memory',
         'translate_path',
-        'get_system_status',
+        'search_nodes',
       ];
 
       const toolNames = tools.map((t: any) => t.name);

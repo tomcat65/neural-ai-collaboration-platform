@@ -10,7 +10,7 @@ export interface ToolDefinition {
 export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   create_entities: {
     name: 'create_entities',
-    description: 'Create multiple new entities in the advanced knowledge graph system (Neo4j, Weaviate, Redis)',
+    description: 'Create multiple new entities in the knowledge graph',
     inputSchema: {
       type: 'object',
       properties: {
@@ -84,19 +84,10 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   },
   read_graph: {
     name: 'read_graph',
-    description: 'Read the entire knowledge graph with advanced filtering and analysis capabilities',
+    description: 'Read the entire knowledge graph',
     inputSchema: {
       type: 'object',
-      properties: {
-        includeVectors: { type: 'boolean', description: 'Include vector embeddings', default: false },
-        includeCache: { type: 'boolean', description: 'Include Redis cache data', default: false },
-        analysisLevel: { 
-          type: 'string', 
-          enum: ['basic', 'detailed', 'comprehensive'], 
-          description: 'Level of analysis to include',
-          default: 'basic'
-        }
-      }
+      properties: {}
     }
   },
   send_ai_message: {
@@ -233,57 +224,6 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
       required: ['query']
     }
   },
-  execute_ai_request: {
-    name: 'execute_ai_request',
-    description: 'Execute AI requests with intelligent provider routing and optimization',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        prompt: { type: 'string', description: 'The AI prompt to execute' },
-        provider: { type: 'string', enum: ['openai', 'anthropic', 'google', 'auto'], default: 'auto' },
-        model: { type: 'string', description: 'Specific model to use' },
-        maxTokens: { type: 'number', description: 'Maximum tokens for response' },
-        temperature: { type: 'number', description: 'Response creativity (0-1)' },
-        systemPrompt: { type: 'string', description: 'System/instruction prompt' }
-      },
-      required: ['prompt']
-    }
-  },
-  stream_ai_response: {
-    name: 'stream_ai_response',
-    description: 'Stream AI responses in real-time with WebSocket delivery',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        prompt: { type: 'string', description: 'The AI prompt to execute' },
-        provider: { type: 'string', enum: ['openai', 'anthropic', 'google', 'auto'], default: 'auto' },
-        streamId: { type: 'string', description: 'Unique stream identifier' }
-      },
-      required: ['prompt']
-    }
-  },
-  get_provider_status: {
-    name: 'get_provider_status',
-    description: 'Get health, performance, and cost information for AI providers',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        provider: { type: 'string', enum: ['openai', 'anthropic', 'google'], description: 'Specific provider or omit for all' }
-      }
-    }
-  },
-  configure_providers: {
-    name: 'configure_providers',
-    description: 'Configure AI provider settings, API keys, and routing rules',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        provider: { type: 'string', enum: ['openai', 'anthropic', 'google'] },
-        configuration: { type: 'object', description: 'Provider-specific configuration' }
-      },
-      required: ['provider', 'configuration']
-    }
-  }
 };
 
 export const getUnifiedToolDefinitions = (...names: (keyof typeof UnifiedToolSchemas)[]): ToolDefinition[] => {
