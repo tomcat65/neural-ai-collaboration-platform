@@ -1022,6 +1022,13 @@ export class NeuralMCPServer {
           // Get handoff from previous session (idempotency: only return unconsumed handoffs)
           const rawHandoff = this.memoryManager.getActiveHandoff(sessProjectId);
           const handoff = rawHandoff && !rawHandoff.consumedAt ? rawHandoff : null;
+          const handoffResponse = handoff ? {
+            _wrapped: MemoryManager.wrapContent(handoff.summary, 'handoff', sessProjectId, 'agent'),
+            openItems: handoff.openItems,
+            fromAgent: handoff.fromAgent,
+            projectId: handoff.projectId,
+            createdAt: handoff.createdAt,
+          } : null;
           if (handoff) {
             this.memoryManager.consumeHandoff(handoff.id);
           }
@@ -1046,7 +1053,7 @@ export class NeuralMCPServer {
                 status: 'session_opened',
                 agentId: sessAgentId,
                 projectId: sessProjectId,
-                handoff: handoff,
+                handoff: handoffResponse,
                 context: context,
                 notificationStatus,
               }, null, 2)

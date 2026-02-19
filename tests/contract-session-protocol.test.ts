@@ -101,7 +101,7 @@ describe('Session Protocol Contract Tests', () => {
       // Structure checks
       expect(bundle.identity).toBeDefined();
       expect(bundle.identity.learnings).toBeDefined();
-      expect(bundle.identity.preferences).toBeDefined();
+      expect(bundle.identity._preferencesWrapped).toBeDefined();
       expect(bundle.unreadMessages).toBeDefined();
       expect(bundle.guardrails).toBeDefined();
       expect(bundle.meta).toBeDefined();
@@ -273,7 +273,8 @@ describe('Session Protocol Contract Tests', () => {
       });
       expect(beginResult2.status).toBe('session_opened');
       expect(beginResult2.handoff).not.toBeNull();
-      expect(beginResult2.handoff.summary).toBe(rtSummary);
+      expect(beginResult2.handoff._wrapped).toContain(rtSummary);
+      expect(beginResult2.handoff._wrapped).toContain('trust="agent"');
       expect(beginResult2.handoff.openItems).toEqual(rtOpenItems);
       expect(beginResult2.handoff.fromAgent).toBe(testAgentId);
       expect(beginResult2.handoff.projectId).toBe(rtProjectId);
@@ -298,7 +299,7 @@ describe('Session Protocol Contract Tests', () => {
         projectId: rtProjectId,
       });
       expect(beginResult3.handoff).not.toBeNull();
-      expect(beginResult3.handoff.summary).toBe(secondSummary);
+      expect(beginResult3.handoff._wrapped).toContain(secondSummary);
       expect(beginResult3.handoff.openItems).toEqual(secondItems);
     });
   });

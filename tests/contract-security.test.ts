@@ -124,7 +124,7 @@ describe('Security Contract Tests (NE-S6)', () => {
         typeof m.content === 'string' && m.content.includes('<neural_memory')
       );
       expect(firstWrapped.content).toContain('source="message"');
-      expect(firstWrapped.content).toContain('trust=');
+      expect(firstWrapped.content).toContain('trust="agent"');
       expect(firstWrapped.content).toContain('</neural_memory>');
     });
 
@@ -392,7 +392,79 @@ describe('Security Contract Tests (NE-S6)', () => {
     });
   });
 
-  // === Test 6: Wrapper attribute escaping ===
+  // === Test 6: Context isolation — raw fields not leaked ===
+
+  describe('NE-S6d: context isolation', () => {
+    it('identity learnings contain only _wrapped, not raw fields', async () => {
+      const bundle = await mcpCall('get_agent_context', {
+        agentId: testAgentId,
+      });
+
+      expect(bundle.identity.learnings.length).toBeGreaterThan(0);
+      const learning = bundle.identity.learnings[0];
+      expect(learning._wrapped).toBeDefined();
+      // Raw fields must not leak alongside _wrapped
+      expect(learning.lesson).toBeUndefined();
+      expect(learning.context).toBeUndefined();
+      expect(learning.confidence).toBeUndefined();
+    });
+
+    it('identity has no raw preferences, only _preferencesWrapped', async () => {
+      const bundle = await mcpCall('get_agent_context', {
+        agentId: testAgentId,
+      });
+
+      // Raw preferences field should not exist
+      expect(bundle.identity.preferences).toBeUndefined();
+      expect(bundle.identity._preferencesWrapped).toBeDefined();
+      expect(bundle.identity._preferencesWrapped).toContain('<neural_memory');
+    });
+
+    it('get_agent_context handoff is null after begin_session consumption', async () => {
+      const idempotencyProject = `${TEST_PREFIX}idempotency_${Date.now()}`;
+
+      // Create project and close session to write a handoff
+      await mcpCall('begin_session', {
+        agentId: testAgentId,
+        projectId: idempotencyProject,
+      });
+      await mcpCall('end_session', {
+        agentId: testAgentId,
+        projectId: idempotencyProject,
+        summary: 'handoff for idempotency test',
+      });
+
+      // begin_session consumes the handoff
+      const beginResult = await mcpCall('begin_session', {
+        agentId: testAgentId,
+        projectId: idempotencyProject,
+      });
+      expect(beginResult.handoff).not.toBeNull();
+      expect(beginResult.handoff._wrapped).toContain('handoff for idempotency test');
+
+      // Now get_agent_context should NOT see the consumed handoff
+      const bundle = await mcpCall('get_agent_context', {
+        agentId: testAgentId,
+        projectId: idempotencyProject,
+        depth: 'warm',
+      });
+      expect(bundle.handoff).toBeNull();
+    });
+
+    it('messages use trust="agent", not trust="verified"', async () => {
+      const bundle = await mcpCall('get_agent_context', {
+        agentId: testAgentId,
+      });
+
+      if (bundle.unreadMessages.length > 0) {
+        const msg = bundle.unreadMessages[0];
+        expect(msg.content).toContain('trust="agent"');
+        expect(msg.content).not.toContain('trust="verified"');
+      }
+    });
+  });
+
+  // === Test 7: Wrapper attribute escaping ===
 
   describe('NE-S6a: wrapper attribute escaping', () => {
     it('entity names with special characters are escaped in wrapper attributes', async () => {

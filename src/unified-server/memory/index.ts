@@ -1313,7 +1313,7 @@ export class MemoryManager {
     depth: 'hot' | 'warm' | 'cold' = projectId ? 'warm' : 'hot'
   ): any {
     const bundle: any = {
-      identity: { learnings: [], preferences: {} },
+      identity: { learnings: [] },
       project: null,
       handoff: null,
       unreadMessages: [],
@@ -1327,10 +1327,8 @@ export class MemoryManager {
     const agentMem = this.memorySystem.individual.get(agentId);
     if (agentMem) {
       bundle.identity.learnings = agentMem.learnings.slice(-20).map((l: any) => ({
-        ...l,
         _wrapped: MemoryManager.wrapContent(JSON.stringify(l), 'learning', agentId, 'identity')
       }));
-      bundle.identity.preferences = agentMem.preferences || {};
       bundle.identity._preferencesWrapped = MemoryManager.wrapContent(
         JSON.stringify(agentMem.preferences || {}), 'preferences', agentId, 'identity'
       );
@@ -1341,7 +1339,7 @@ export class MemoryManager {
       bundle.unreadMessages = this.getMessages(agentId, { unreadOnly: true, limit: 20 }).map((m: any) => ({
         id: m.id,
         from: m.from_agent,
-        content: MemoryManager.wrapContent(m.content, 'message', m.from_agent || 'unknown'),
+        content: MemoryManager.wrapContent(m.content, 'message', m.from_agent || 'unknown', 'agent'),
         type: m.message_type,
         priority: m.priority,
         timestamp: m.created_at,
@@ -1358,8 +1356,8 @@ export class MemoryManager {
       bundle.guardrails = guardrailRows.map((r: any) => {
         try {
           const parsed = JSON.parse(r.content);
-          return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'guardrail', parsed.name || 'guardrail') };
-        } catch { return { raw: MemoryManager.wrapContent(r.content, 'guardrail', 'unknown') }; }
+          return { _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'guardrail', parsed.name || 'guardrail') };
+        } catch { return { _wrapped: MemoryManager.wrapContent(r.content, 'guardrail', 'unknown') }; }
       });
     } catch { /* ok */ }
 
@@ -1375,19 +1373,25 @@ export class MemoryManager {
         bundle.project.hotObservations = hotRows.map((r: any) => {
           try {
             const parsed = JSON.parse(r.content);
-            return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || 'hot') };
-          } catch { return { raw: MemoryManager.wrapContent(r.content, 'observation', 'hot') }; }
+            return { _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || 'hot', 'agent') };
+          } catch { return { _wrapped: MemoryManager.wrapContent(r.content, 'observation', 'hot', 'agent') }; }
         });
       }
     } catch { /* ok */ }
 
-    // 5. Handoff flag
+    // 5. Handoff flag (filter consumed handoffs for context isolation)
     if (projectId) {
-      const handoff = this.getActiveHandoff(projectId);
+      const rawHandoff = this.getActiveHandoff(projectId);
+      const handoff = rawHandoff && !rawHandoff.consumedAt ? rawHandoff : null;
       if (handoff) {
-        handoff.summary = MemoryManager.wrapContent(handoff.summary, 'handoff', projectId);
+        bundle.handoff = {
+          _wrapped: MemoryManager.wrapContent(handoff.summary, 'handoff', projectId, 'agent'),
+          openItems: handoff.openItems,
+          fromAgent: handoff.fromAgent,
+          projectId: handoff.projectId,
+          createdAt: handoff.createdAt,
+        };
       }
-      bundle.handoff = handoff;
     }
 
     // --- WARM tier (project context, 30-day window) ---
@@ -1404,10 +1408,9 @@ export class MemoryManager {
         if (projRow) {
           try {
             const projData = JSON.parse(projRow.content);
-            bundle.project.summary = projData.observations?.join('; ') || projData.name || projectId;
-            bundle.project._summaryWrapped = MemoryManager.wrapContent(bundle.project.summary, 'project_summary', projectId!, 'verified');
-            bundle.project.entity = projData;
-            bundle.project._entityWrapped = MemoryManager.wrapContent(JSON.stringify(projData), 'entity', projectId!, 'verified');
+            const summaryText = projData.observations?.join('; ') || projData.name || projectId;
+            bundle.project._summaryWrapped = MemoryManager.wrapContent(summaryText, 'project_summary', projectId!, 'agent');
+            bundle.project._entityWrapped = MemoryManager.wrapContent(JSON.stringify(projData), 'entity', projectId!, 'agent');
           } catch { /* ok */ }
         }
       } catch { /* ok */ }
@@ -1423,8 +1426,8 @@ export class MemoryManager {
         bundle.project.recentObservations = obsRows.map((r: any) => {
           try {
             const parsed = JSON.parse(r.content);
-            return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || projectId!) };
-          } catch { return { raw: MemoryManager.wrapContent(r.content, 'observation', projectId!) }; }
+            return { _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || projectId!, 'agent') };
+          } catch { return { _wrapped: MemoryManager.wrapContent(r.content, 'observation', projectId!, 'agent') }; }
         });
       } catch { /* ok */ }
 
@@ -1435,8 +1438,7 @@ export class MemoryManager {
            ORDER BY created_at DESC LIMIT 5`
         ).all() as any[];
         bundle.project.recentDecisions = decRows.map((d: any) => ({
-          ...d,
-          _wrapped: MemoryManager.wrapContent(JSON.stringify(d), 'decision', projectId!, 'verified')
+          _wrapped: MemoryManager.wrapContent(JSON.stringify(d), 'decision', projectId!, 'agent')
         }));
       } catch { /* ok */ }
     }
@@ -1452,8 +1454,8 @@ export class MemoryManager {
         bundle.project.allObservations = allObs.map((r: any) => {
           try {
             const parsed = JSON.parse(r.content);
-            return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || projectId!) };
-          } catch { return { raw: MemoryManager.wrapContent(r.content, 'observation', projectId!) }; }
+            return { _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || projectId!, 'agent') };
+          } catch { return { _wrapped: MemoryManager.wrapContent(r.content, 'observation', projectId!, 'agent') }; }
         });
       } catch { /* ok */ }
 
@@ -1466,8 +1468,8 @@ export class MemoryManager {
         bundle.project.allEntities = allEntities.map((r: any) => {
           try {
             const parsed = JSON.parse(r.content);
-            return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'entity', parsed.name || projectId!) };
-          } catch { return { raw: MemoryManager.wrapContent(r.content, 'entity', projectId!) }; }
+            return { _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'entity', parsed.name || projectId!, 'agent') };
+          } catch { return { _wrapped: MemoryManager.wrapContent(r.content, 'entity', projectId!, 'agent') }; }
         });
       } catch { /* ok */ }
     }
