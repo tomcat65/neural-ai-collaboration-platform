@@ -1,0 +1,6 @@
+# Dev override — enables admin/debug endpoints
+# Usage: docker compose -f docker-compose.unified-neural-mcp.yml -f docker-compose.unified-neural-mcp.dev.yml up
+services:
+  unified-neural-mcp:
+    environment:
+      - ENABLE_ADMIN_ENDPOINTS=1

@@ -273,8 +273,8 @@ const session = await begin_session({
   agentId: "codex",
   projectId: "my-project"
 });
-// session.handoff.summary === "Completed auth module refactor. Tests passing."
-// session.handoff.openItems === ["Deploy to staging", "Update API docs"]
+// session.handoff._wrapped contains "Completed auth module refactor. Tests passing."
+// session.handoff._openItemsWrapped contains wrapped versions of ["Deploy to staging", "Update API docs"]
 ```
 
 ## Cross-Platform Path Translation

@@ -101,7 +101,7 @@ describe('Session Protocol Contract Tests', () => {
       // Structure checks
       expect(bundle.identity).toBeDefined();
       expect(bundle.identity.learnings).toBeDefined();
-      expect(bundle.identity.preferences).toBeDefined();
+      expect(bundle.identity._preferencesWrapped).toBeDefined();
       expect(bundle.unreadMessages).toBeDefined();
       expect(bundle.guardrails).toBeDefined();
       expect(bundle.meta).toBeDefined();
@@ -273,8 +273,12 @@ describe('Session Protocol Contract Tests', () => {
       });
       expect(beginResult2.status).toBe('session_opened');
       expect(beginResult2.handoff).not.toBeNull();
-      expect(beginResult2.handoff.summary).toBe(rtSummary);
-      expect(beginResult2.handoff.openItems).toEqual(rtOpenItems);
+      expect(beginResult2.handoff._wrapped).toContain(rtSummary);
+      expect(beginResult2.handoff._wrapped).toContain('trust="agent"');
+      expect(beginResult2.handoff._openItemsWrapped).toHaveLength(rtOpenItems.length);
+      for (const item of rtOpenItems) {
+        expect(beginResult2.handoff._openItemsWrapped.some((w: string) => w.includes(item))).toBe(true);
+      }
       expect(beginResult2.handoff.fromAgent).toBe(testAgentId);
       expect(beginResult2.handoff.projectId).toBe(rtProjectId);
     });
@@ -298,9 +302,72 @@ describe('Session Protocol Contract Tests', () => {
         projectId: rtProjectId,
       });
       expect(beginResult3.handoff).not.toBeNull();
-      expect(beginResult3.handoff.summary).toBe(secondSummary);
-      expect(beginResult3.handoff.openItems).toEqual(secondItems);
+      expect(beginResult3.handoff._wrapped).toContain(secondSummary);
+      expect(beginResult3.handoff._openItemsWrapped).toHaveLength(secondItems.length);
+      expect(beginResult3.handoff._openItemsWrapped[0]).toContain(secondItems[0]);
     });
+  });
+
+  // === Phase 0: Context bloat relief ===
+
+  describe('context bloat budget', () => {
+    it('begin_session token estimate stays under 4000 with 15+ messages and 15+ observations', async () => {
+      const bloatProject = `${TEST_PREFIX}bloat_${Date.now()}`;
+      const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+      // Setup: create project
+      await mcpCall('begin_session', {
+        agentId: testAgentId,
+        projectId: bloatProject,
+      });
+
+      // Send 16 messages via HTTP endpoint (bypasses MCP rate limiter)
+      for (let i = 0; i < 16; i++) {
+        await fetch(`${BASE_URL}/ai-message`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-API-Key': API_KEY },
+          body: JSON.stringify({
+            from: `${TEST_PREFIX}sender_${i}`,
+            to: testAgentId,
+            message: `Bloat test message number ${i} with some extra padding content to simulate real messages that have meaningful length`,
+            type: 'info',
+          }),
+        });
+        if (i % 4 === 3) await delay(100);
+      }
+
+      // Create 16 observations in batches (4 per call to reduce request count)
+      for (let batch = 0; batch < 4; batch++) {
+        await mcpCall('add_observations', {
+          observations: Array.from({ length: 4 }, (_, j) => ({
+            entityName: bloatProject,
+            contents: [`Observation ${batch * 4 + j}: detailed technical note about the project state with enough content to be realistic`],
+          })),
+        });
+        await delay(100);
+      }
+
+      // Now begin a fresh session — context should be lightweight
+      const result = await mcpCall('begin_session', {
+        agentId: testAgentId,
+        projectId: bloatProject,
+      });
+
+      expect(result.status).toBe('session_opened');
+
+      // Token estimate should be under 4000
+      const tokenEstimate = result.context.meta.tokenEstimate;
+      expect(tokenEstimate).toBeLessThan(4000);
+
+      // Messages should be count-only, not full content
+      expect(result.context.unreadMessages.count).toBeGreaterThanOrEqual(16);
+      expect(Array.isArray(result.context.unreadMessages)).toBe(false);
+
+      // Observations should be capped at 3
+      if (result.context.project?.recentObservations) {
+        expect(result.context.project.recentObservations.length).toBeLessThanOrEqual(3);
+      }
+    }, 30000); // 30s timeout for setup
   });
 
   // === Tool registry includes session tools ===

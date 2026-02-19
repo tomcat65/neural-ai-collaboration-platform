@@ -70,7 +70,10 @@ info "Ensuring Simple stack is stopped (avoid conflicts) ..."
 info "Starting Unified MCP stack (compose: $COMPOSE_YML) ..."
 (
   cd "$PROJECT_DIR"
-  docker compose -p unified -f "docker/docker-compose.unified-neural-mcp.yml" up -d --build --remove-orphans
+  docker compose -p unified \
+    -f "docker/docker-compose.unified-neural-mcp.yml" \
+    -f "docker/docker-compose.unified-neural-mcp.dev.yml" \
+    up -d --build --remove-orphans
 )
 
 # 5) Health check

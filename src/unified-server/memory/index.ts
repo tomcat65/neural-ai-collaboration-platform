@@ -1271,10 +1271,31 @@ export class MemoryManager {
   }
 
   /**
-   * Wrap content string in <neural_memory> structural delimiters.
+   * Query the neural_audit_log table (for admin/testing).
    */
-  static wrapContent(content: string, source: string, entity: string): string {
-    return `<neural_memory source="${source}" entity="${entity}" trust="verified">\n${content}\n</neural_memory>`;
+  queryAuditLog(agentId?: string, operation?: string, limit: number = 20): any[] {
+    let query = 'SELECT * FROM neural_audit_log WHERE 1=1';
+    const params: any[] = [];
+    if (agentId) { query += ' AND agent_id = ?'; params.push(agentId); }
+    if (operation) { query += ' AND operation = ?'; params.push(operation); }
+    query += ' ORDER BY created_at DESC LIMIT ?';
+    params.push(limit);
+    return this.db.prepare(query).all(...params);
+  }
+
+  /**
+   * Escape a string for safe use inside XML/HTML attribute values.
+   */
+  private static escapeAttr(value: string): string {
+    return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  /**
+   * Wrap content string in <neural_memory> structural delimiters.
+   * trust levels: 'verified' (server-generated), 'agent' (agent-submitted), 'identity' (agent identity data)
+   */
+  static wrapContent(content: string, source: string, entity: string, trust: 'verified' | 'agent' | 'identity' = 'verified'): string {
+    return `<neural_memory source="${MemoryManager.escapeAttr(source)}" entity="${MemoryManager.escapeAttr(entity)}" trust="${trust}">\n${content}\n</neural_memory>`;
   }
 
   // ─── Session Protocol methods ───
@@ -1292,10 +1313,10 @@ export class MemoryManager {
     depth: 'hot' | 'warm' | 'cold' = projectId ? 'warm' : 'hot'
   ): any {
     const bundle: any = {
-      identity: { learnings: [], preferences: {} },
+      identity: { learnings: [] },
       project: null,
       handoff: null,
-      unreadMessages: [],
+      unreadMessages: { count: 0, hint: 'Use get_ai_messages(agentId) to retrieve' },
       guardrails: [],
       meta: { depth, tokenEstimate: 0 }
     };
@@ -1305,20 +1326,24 @@ export class MemoryManager {
     // 1. Agent identity: learnings + preferences
     const agentMem = this.memorySystem.individual.get(agentId);
     if (agentMem) {
-      bundle.identity.learnings = agentMem.learnings.slice(-20); // last 20
-      bundle.identity.preferences = agentMem.preferences || {};
+      bundle.identity.learnings = agentMem.learnings.slice(-20).map((l: any) => ({
+        _wrapped: MemoryManager.wrapContent(JSON.stringify(l), 'learning', agentId, 'identity')
+      }));
+      bundle.identity._preferencesWrapped = MemoryManager.wrapContent(
+        JSON.stringify(agentMem.preferences || {}), 'preferences', agentId, 'identity'
+      );
     }
 
-    // 2. Unread messages
+    // 2. Unread messages — count only via SQL COUNT (no row limit ceiling)
     try {
-      bundle.unreadMessages = this.getMessages(agentId, { unreadOnly: true, limit: 20 }).map((m: any) => ({
-        id: m.id,
-        from: m.from_agent,
-        content: MemoryManager.wrapContent(m.content, 'message', m.from_agent || 'unknown'),
-        type: m.message_type,
-        priority: m.priority,
-        timestamp: m.created_at,
-      }));
+      this.ensureReadAtColumn();
+      const countRow = this.db.prepare(
+        'SELECT COUNT(*) as cnt FROM ai_messages WHERE to_agent = ? AND read_at IS NULL'
+      ).get(agentId) as any;
+      bundle.unreadMessages = {
+        count: countRow?.cnt ?? 0,
+        hint: 'Use get_ai_messages(agentId) to retrieve',
+      };
     } catch { /* ai_messages table may not exist */ }
 
     // 3. Guardrails — entities of type 'guardrail'
@@ -1331,8 +1356,8 @@ export class MemoryManager {
       bundle.guardrails = guardrailRows.map((r: any) => {
         try {
           const parsed = JSON.parse(r.content);
-          return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'guardrail', parsed.name || 'guardrail') };
-        } catch { return { raw: MemoryManager.wrapContent(r.content, 'guardrail', 'unknown') }; }
+          return { _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'guardrail', parsed.name || 'guardrail') };
+        } catch { return { _wrapped: MemoryManager.wrapContent(r.content, 'guardrail', 'unknown') }; }
       });
     } catch { /* ok */ }
 
@@ -1348,19 +1373,27 @@ export class MemoryManager {
         bundle.project.hotObservations = hotRows.map((r: any) => {
           try {
             const parsed = JSON.parse(r.content);
-            return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || 'hot') };
-          } catch { return { raw: MemoryManager.wrapContent(r.content, 'observation', 'hot') }; }
+            return { _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || 'hot', 'agent') };
+          } catch { return { _wrapped: MemoryManager.wrapContent(r.content, 'observation', 'hot', 'agent') }; }
         });
       }
     } catch { /* ok */ }
 
-    // 5. Handoff flag
+    // 5. Handoff flag (filter consumed handoffs for context isolation)
     if (projectId) {
-      const handoff = this.getActiveHandoff(projectId);
+      const rawHandoff = this.getActiveHandoff(projectId);
+      const handoff = rawHandoff && !rawHandoff.consumedAt ? rawHandoff : null;
       if (handoff) {
-        handoff.summary = MemoryManager.wrapContent(handoff.summary, 'handoff', projectId);
+        bundle.handoff = {
+          _wrapped: MemoryManager.wrapContent(handoff.summary, 'handoff', projectId, 'agent'),
+          _openItemsWrapped: (handoff.openItems || []).map((item: string) =>
+            MemoryManager.wrapContent(item, 'handoff_item', projectId, 'agent')
+          ),
+          fromAgent: handoff.fromAgent,
+          projectId: handoff.projectId,
+          createdAt: handoff.createdAt,
+        };
       }
-      bundle.handoff = handoff;
     }
 
     // --- WARM tier (project context, 30-day window) ---
@@ -1377,8 +1410,9 @@ export class MemoryManager {
         if (projRow) {
           try {
             const projData = JSON.parse(projRow.content);
-            bundle.project.summary = projData.observations?.join('; ') || projData.name || projectId;
-            bundle.project.entity = projData;
+            const summaryText = projData.observations?.join('; ') || projData.name || projectId;
+            bundle.project._summaryWrapped = MemoryManager.wrapContent(summaryText, 'project_summary', projectId!, 'agent');
+            bundle.project._entityWrapped = MemoryManager.wrapContent(JSON.stringify(projData), 'entity', projectId!, 'agent');
           } catch { /* ok */ }
         }
       } catch { /* ok */ }
@@ -1389,13 +1423,13 @@ export class MemoryManager {
         const obsRows = this.db.prepare(
           `SELECT id, content, created_at FROM shared_memory
            WHERE memory_type = 'observation' AND LOWER(content) LIKE ?
-           AND created_at >= ? ORDER BY created_at DESC LIMIT 20`
+           AND created_at >= ? ORDER BY created_at DESC LIMIT 3`
         ).all(`%${projectId.toLowerCase()}%`, thirtyDaysAgo) as any[];
         bundle.project.recentObservations = obsRows.map((r: any) => {
           try {
             const parsed = JSON.parse(r.content);
-            return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || projectId!) };
-          } catch { return { raw: MemoryManager.wrapContent(r.content, 'observation', projectId!) }; }
+            return { _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || projectId!, 'agent') };
+          } catch { return { _wrapped: MemoryManager.wrapContent(r.content, 'observation', projectId!, 'agent') }; }
         });
       } catch { /* ok */ }
 
@@ -1405,7 +1439,9 @@ export class MemoryManager {
           `SELECT id, decision, reasoning, created_at FROM consensus_history
            ORDER BY created_at DESC LIMIT 5`
         ).all() as any[];
-        bundle.project.recentDecisions = decRows;
+        bundle.project.recentDecisions = decRows.map((d: any) => ({
+          _wrapped: MemoryManager.wrapContent(JSON.stringify(d), 'decision', projectId!, 'agent')
+        }));
       } catch { /* ok */ }
     }
 
@@ -1420,8 +1456,8 @@ export class MemoryManager {
         bundle.project.allObservations = allObs.map((r: any) => {
           try {
             const parsed = JSON.parse(r.content);
-            return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || projectId!) };
-          } catch { return { raw: MemoryManager.wrapContent(r.content, 'observation', projectId!) }; }
+            return { _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || projectId!, 'agent') };
+          } catch { return { _wrapped: MemoryManager.wrapContent(r.content, 'observation', projectId!, 'agent') }; }
         });
       } catch { /* ok */ }
 
@@ -1434,8 +1470,8 @@ export class MemoryManager {
         bundle.project.allEntities = allEntities.map((r: any) => {
           try {
             const parsed = JSON.parse(r.content);
-            return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'entity', parsed.name || projectId!) };
-          } catch { return { raw: MemoryManager.wrapContent(r.content, 'entity', projectId!) }; }
+            return { _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'entity', parsed.name || projectId!, 'agent') };
+          } catch { return { _wrapped: MemoryManager.wrapContent(r.content, 'entity', projectId!, 'agent') }; }
         });
       } catch { /* ok */ }
     }
@@ -1486,6 +1522,19 @@ export class MemoryManager {
       };
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Mark a handoff as consumed (idempotency guard for begin_session retries).
+   */
+  consumeHandoff(handoffId: string): void {
+    try {
+      this.db.prepare(
+        "UPDATE session_handoffs SET consumed_at = datetime('now') WHERE id = ? AND consumed_at IS NULL"
+      ).run(handoffId);
+    } catch (e: any) {
+      console.error(`⚠️ consumeHandoff failed (non-fatal): ${e.message}`);
     }
   }
 
