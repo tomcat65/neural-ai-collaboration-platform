@@ -806,7 +806,7 @@ export class NeuralMCPServer {
         // === MEMORY & KNOWLEDGE MANAGEMENT ===
         case 'create_entities': {
           const { entities } = args;
-          
+
           const createdEntities = await Promise.all(entities.map(async (entity: any) => {
             const entityData = {
               name: entity.name,
@@ -820,9 +820,12 @@ export class NeuralMCPServer {
                 cacheEnabled: true
               }
             };
-            
+
             const entityId = await this.memoryManager.store(agent, entityData, 'shared', 'entity');
-            
+
+            // NE-S6b: Audit log
+            this.memoryManager.auditLog('create_entity', agent, JSON.stringify(entityData), entity.name);
+
             return { id: entityId, ...entityData };
           }));
 
@@ -989,6 +992,9 @@ export class NeuralMCPServer {
             notificationStatus = 'skipped';
           }
 
+          // NE-S6b: Audit log
+          this.memoryManager.auditLog('begin_session', sessAgentId, sessProjectId, sessProjectId);
+
           return {
             content: [{
               type: 'text',
@@ -1013,10 +1019,31 @@ export class NeuralMCPServer {
             learnings: endLearnings
           } = args;
 
+          // NE-S6c: Sanitize summary and open items
+          const summaryCheck = MemoryManager.sanitizeContent(endSummary);
+          if (!summaryCheck.safe) {
+            this.memoryManager.auditLog('end_session', endAgentId, endSummary, endProjectId, true, summaryCheck.reason);
+            this.notificationPort.send(`⚠️ Neural write flagged — agent: ${endAgentId}, operation: end_session, reason: ${summaryCheck.reason}`);
+            throw new Error(`Content flagged by sanitizer: ${summaryCheck.reason}`);
+          }
+          if (Array.isArray(endOpenItems)) {
+            for (const item of endOpenItems) {
+              const itemCheck = MemoryManager.sanitizeContent(item);
+              if (!itemCheck.safe) {
+                this.memoryManager.auditLog('end_session', endAgentId, item, endProjectId, true, itemCheck.reason);
+                this.notificationPort.send(`⚠️ Neural write flagged — agent: ${endAgentId}, operation: end_session, reason: ${itemCheck.reason}`);
+                throw new Error(`Content flagged by sanitizer: ${itemCheck.reason}`);
+              }
+            }
+          }
+
           // Write handoff flag (deactivates prior, inserts new)
           const handoffId = this.memoryManager.writeHandoff(
             endProjectId, endAgentId, endSummary, endOpenItems
           );
+
+          // NE-S6b: Audit log
+          this.memoryManager.auditLog('end_session', endAgentId, endSummary, endProjectId);
 
           // Record learnings if provided
           if (Array.isArray(endLearnings)) {
@@ -1058,7 +1085,21 @@ export class NeuralMCPServer {
 
         case 'add_observations': {
           const { observations } = args;
-          
+
+          // NE-S6c: Sanitize observation contents
+          for (const obs of observations) {
+            if (Array.isArray(obs.contents)) {
+              for (const c of obs.contents) {
+                const check = MemoryManager.sanitizeContent(c);
+                if (!check.safe) {
+                  this.memoryManager.auditLog('add_observation', agent, c, obs.entityName, true, check.reason);
+                  this.notificationPort.send(`⚠️ Neural write flagged — agent: ${agent}, operation: add_observation, reason: ${check.reason}`);
+                  throw new Error(`Content flagged by sanitizer: ${check.reason}`);
+                }
+              }
+            }
+          }
+
           const results = await Promise.all(observations.map(async (obs: any) => {
             const observationData = {
               entityName: obs.entityName,
@@ -1070,9 +1111,12 @@ export class NeuralMCPServer {
                 relationshipsUpdated: true
               }
             };
-            
+
             const observationId = await this.memoryManager.store(agent, observationData, 'shared', 'observation');
-            
+
+            // NE-S6b: Audit log
+            this.memoryManager.auditLog('add_observation', agent, JSON.stringify(observationData), obs.entityName);
+
             return { id: observationId, ...observationData };
           }));
 
@@ -1106,7 +1150,7 @@ export class NeuralMCPServer {
 
         case 'create_relations': {
           const { relations } = args;
-          
+
           const createdRelations = await Promise.all(relations.map(async (relation: any) => {
             const relationData = {
               from: relation.from,
@@ -1121,9 +1165,12 @@ export class NeuralMCPServer {
                 strength: 'medium'
               }
             };
-            
+
             const relationId = await this.memoryManager.store(agent, relationData, 'shared', 'relation');
-            
+
+            // NE-S6b: Audit log
+            this.memoryManager.auditLog('create_relation', agent, JSON.stringify(relationData), `${relation.from}->${relation.to}`);
+
             return { id: relationId, ...relationData };
           }));
 
@@ -1196,6 +1243,14 @@ export class NeuralMCPServer {
             throw new Error('Missing required field: `content` (or `message` alias)');
           }
 
+          // NE-S6c: Sanitize message content
+          const msgSanitize = MemoryManager.sanitizeContent(content);
+          if (!msgSanitize.safe) {
+            this.memoryManager.auditLog('send_ai_message', senderAgentId, content, explicitTarget, true, msgSanitize.reason);
+            this.notificationPort.send(`⚠️ Neural write flagged — agent: ${senderAgentId}, operation: send_ai_message, reason: ${msgSanitize.reason}`);
+            throw new Error(`Content flagged by sanitizer: ${msgSanitize.reason}`);
+          }
+
           // Resolve recipients
           let recipients: string[] = [];
           if (!broadcast && explicitTarget) {
@@ -1252,6 +1307,9 @@ export class NeuralMCPServer {
               messageData.metadata
             );
             results.push({ to: targetAgentId, messageId });
+
+            // NE-S6b: Audit log
+            this.memoryManager.auditLog('send_ai_message', senderAgentId, content, targetAgentId);
 
             // Simulate real-time delivery per recipient
             await this.simulateRealTimeDelivery(messageData, messageId);

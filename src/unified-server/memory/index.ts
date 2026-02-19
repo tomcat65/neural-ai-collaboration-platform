@@ -1,5 +1,6 @@
 // Hierarchical Memory Manager Implementation
 import Database from 'better-sqlite3';
+import { createHash } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import {
   MemorySystem,
@@ -240,6 +241,30 @@ export class MemoryManager {
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_session_handoffs_project
         ON session_handoffs(project_id, created_at DESC)
+    `);
+
+    // Neural Audit Log — tracks all write operations with content hashing
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS neural_audit_log (
+        id TEXT PRIMARY KEY,
+        operation TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        entity_name TEXT,
+        content_hash TEXT NOT NULL,
+        flagged INTEGER NOT NULL DEFAULT 0,
+        flag_reason TEXT,
+        created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+      )
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_audit_agent
+        ON neural_audit_log(agent_id, created_at DESC)
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_audit_flagged
+        ON neural_audit_log(flagged) WHERE flagged = 1
     `);
 
     // Migration: Add tenant_id column to existing tables if missing BEFORE creating tenant indexes
@@ -1201,6 +1226,57 @@ export class MemoryManager {
     return { chunk: row.chunk, chunkIndex, totalChunks, contentSize };
   }
 
+  // ─── Security: Content Sanitization + Audit ───
+
+  private static readonly INJECTION_PATTERNS: RegExp[] = [
+    /ignore previous/i,
+    /system override/i,
+    /\bSYSTEM:/,
+    /\[INST\]/,
+    /<\|.*?\|>/,
+    /\}\s*\{.*tool/i,
+  ];
+
+  static sanitizeContent(content: string): { safe: boolean; reason?: string } {
+    for (const pattern of MemoryManager.INJECTION_PATTERNS) {
+      if (pattern.test(content)) {
+        return { safe: false, reason: `Flagged pattern: ${pattern.toString()}` };
+      }
+    }
+    if (content.length > 10000) {
+      return { safe: false, reason: 'Content exceeds 10000 character limit' };
+    }
+    return { safe: true };
+  }
+
+  static contentHash(content: string): string {
+    return createHash('sha256').update(content).digest('hex');
+  }
+
+  /**
+   * Write an entry to the neural_audit_log table.
+   * Fire-and-forget — failures are logged but never throw.
+   */
+  auditLog(operation: string, agentId: string, content: string, entityName?: string, flagged: boolean = false, flagReason?: string): void {
+    try {
+      const id = uuidv4();
+      const hash = MemoryManager.contentHash(content);
+      this.db.prepare(
+        `INSERT INTO neural_audit_log (id, operation, agent_id, entity_name, content_hash, flagged, flag_reason)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(id, operation, agentId, entityName || null, hash, flagged ? 1 : 0, flagReason || null);
+    } catch (e: any) {
+      console.error(`⚠️ Audit log write failed (non-fatal): ${e.message}`);
+    }
+  }
+
+  /**
+   * Wrap content string in <neural_memory> structural delimiters.
+   */
+  static wrapContent(content: string, source: string, entity: string): string {
+    return `<neural_memory source="${source}" entity="${entity}" trust="verified">\n${content}\n</neural_memory>`;
+  }
+
   // ─── Session Protocol methods ───
 
   /**
@@ -1238,7 +1314,7 @@ export class MemoryManager {
       bundle.unreadMessages = this.getMessages(agentId, { unreadOnly: true, limit: 20 }).map((m: any) => ({
         id: m.id,
         from: m.from_agent,
-        content: m.content,
+        content: MemoryManager.wrapContent(m.content, 'message', m.from_agent || 'unknown'),
         type: m.message_type,
         priority: m.priority,
         timestamp: m.created_at,
@@ -1253,7 +1329,10 @@ export class MemoryManager {
          ORDER BY created_at DESC LIMIT 10`
       ).all() as any[];
       bundle.guardrails = guardrailRows.map((r: any) => {
-        try { return JSON.parse(r.content); } catch { return { raw: r.content }; }
+        try {
+          const parsed = JSON.parse(r.content);
+          return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'guardrail', parsed.name || 'guardrail') };
+        } catch { return { raw: MemoryManager.wrapContent(r.content, 'guardrail', 'unknown') }; }
       });
     } catch { /* ok */ }
 
@@ -1267,14 +1346,21 @@ export class MemoryManager {
       if (hotRows.length > 0) {
         if (!bundle.project) bundle.project = {};
         bundle.project.hotObservations = hotRows.map((r: any) => {
-          try { return JSON.parse(r.content); } catch { return { raw: r.content }; }
+          try {
+            const parsed = JSON.parse(r.content);
+            return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || 'hot') };
+          } catch { return { raw: MemoryManager.wrapContent(r.content, 'observation', 'hot') }; }
         });
       }
     } catch { /* ok */ }
 
     // 5. Handoff flag
     if (projectId) {
-      bundle.handoff = this.getActiveHandoff(projectId);
+      const handoff = this.getActiveHandoff(projectId);
+      if (handoff) {
+        handoff.summary = MemoryManager.wrapContent(handoff.summary, 'handoff', projectId);
+      }
+      bundle.handoff = handoff;
     }
 
     // --- WARM tier (project context, 30-day window) ---
@@ -1306,7 +1392,10 @@ export class MemoryManager {
            AND created_at >= ? ORDER BY created_at DESC LIMIT 20`
         ).all(`%${projectId.toLowerCase()}%`, thirtyDaysAgo) as any[];
         bundle.project.recentObservations = obsRows.map((r: any) => {
-          try { return JSON.parse(r.content); } catch { return { raw: r.content }; }
+          try {
+            const parsed = JSON.parse(r.content);
+            return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || projectId!) };
+          } catch { return { raw: MemoryManager.wrapContent(r.content, 'observation', projectId!) }; }
         });
       } catch { /* ok */ }
 
@@ -1329,7 +1418,10 @@ export class MemoryManager {
            ORDER BY created_at DESC LIMIT 100`
         ).all(`%${projectId.toLowerCase()}%`) as any[];
         bundle.project.allObservations = allObs.map((r: any) => {
-          try { return JSON.parse(r.content); } catch { return { raw: r.content }; }
+          try {
+            const parsed = JSON.parse(r.content);
+            return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'observation', parsed.entityName || projectId!) };
+          } catch { return { raw: MemoryManager.wrapContent(r.content, 'observation', projectId!) }; }
         });
       } catch { /* ok */ }
 
@@ -1340,7 +1432,10 @@ export class MemoryManager {
            ORDER BY created_at DESC LIMIT 50`
         ).all(`%${projectId.toLowerCase()}%`) as any[];
         bundle.project.allEntities = allEntities.map((r: any) => {
-          try { return JSON.parse(r.content); } catch { return { raw: r.content }; }
+          try {
+            const parsed = JSON.parse(r.content);
+            return { ...parsed, _wrapped: MemoryManager.wrapContent(JSON.stringify(parsed), 'entity', parsed.name || projectId!) };
+          } catch { return { raw: MemoryManager.wrapContent(r.content, 'entity', projectId!) }; }
         });
       } catch { /* ok */ }
     }
