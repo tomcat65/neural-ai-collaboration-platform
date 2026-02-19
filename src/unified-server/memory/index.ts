@@ -270,6 +270,9 @@ export class MemoryManager {
     // Migration: Add tenant_id column to existing tables if missing BEFORE creating tenant indexes
     this.migrateAddTenantColumn();
 
+    // Migration 002: Users table + tenant_id/user_id on ai_messages & session_handoffs
+    this.migrateUsersAndTenantColumns();
+
     // Create indexes after migrations to avoid referencing missing columns on older databases
     this.createIndexes();
 
@@ -295,6 +298,94 @@ export class MemoryManager {
         // Table might not exist yet, which is fine
         console.debug(`Migration: Could not check ${table}:`, error);
       }
+    }
+  }
+
+  private migrateUsersAndTenantColumns(): void {
+    try {
+      // ─── Users table ───
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS users (
+          id TEXT PRIMARY KEY,
+          tenant_id TEXT NOT NULL DEFAULT 'default',
+          display_name TEXT NOT NULL,
+          timezone TEXT DEFAULT 'UTC',
+          locale TEXT DEFAULT 'en-US',
+          date_format TEXT DEFAULT 'YYYY-MM-DD',
+          units TEXT DEFAULT 'metric',
+          working_hours TEXT DEFAULT '{"start":"09:00","end":"17:00"}',
+          last_seen_tz TEXT,
+          prefs_version INTEGER DEFAULT 1,
+          created_at DATETIME DEFAULT (datetime('now')),
+          updated_at DATETIME DEFAULT (datetime('now'))
+        )
+      `);
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id)`);
+
+      // ─── Add tenant_id + user_id to ai_messages if missing ───
+      const aiCols = this.db.prepare('PRAGMA table_info(ai_messages)').all() as any[];
+      const aiColNames = aiCols.map((c: any) => c.name);
+
+      if (!aiColNames.includes('tenant_id')) {
+        this.db.exec(`ALTER TABLE ai_messages ADD COLUMN tenant_id TEXT DEFAULT 'default'`);
+        this.db.exec(`UPDATE ai_messages SET tenant_id = 'default' WHERE tenant_id IS NULL`);
+        console.log('🔧 Migration 002: Added tenant_id to ai_messages');
+      }
+      if (!aiColNames.includes('user_id')) {
+        this.db.exec(`ALTER TABLE ai_messages ADD COLUMN user_id TEXT`);
+        console.log('🔧 Migration 002: Added user_id to ai_messages');
+      }
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_ai_messages_tenant ON ai_messages(tenant_id)`);
+
+      // ─── Add tenant_id + user_id to session_handoffs if missing ───
+      const shCols = this.db.prepare('PRAGMA table_info(session_handoffs)').all() as any[];
+      const shColNames = shCols.map((c: any) => c.name);
+
+      if (!shColNames.includes('tenant_id')) {
+        this.db.exec(`ALTER TABLE session_handoffs ADD COLUMN tenant_id TEXT DEFAULT 'default'`);
+        this.db.exec(`UPDATE session_handoffs SET tenant_id = 'default' WHERE tenant_id IS NULL`);
+        console.log('🔧 Migration 002: Added tenant_id to session_handoffs');
+      }
+      if (!shColNames.includes('user_id')) {
+        this.db.exec(`ALTER TABLE session_handoffs ADD COLUMN user_id TEXT`);
+        console.log('🔧 Migration 002: Added user_id to session_handoffs');
+      }
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_session_handoffs_tenant ON session_handoffs(tenant_id)`);
+
+      // ─── Update session_handoffs unique index to (tenant_id, project_id) ───
+      // Check if the old global index exists and replace it
+      const indexes = this.db.prepare(
+        `SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_session_handoffs_active'`
+      ).get() as any;
+
+      if (indexes && indexes.sql && !indexes.sql.includes('tenant_id')) {
+        // Old index is project_id-only — drop and recreate
+        this.db.exec(`DROP INDEX idx_session_handoffs_active`);
+        this.db.exec(`
+          CREATE UNIQUE INDEX idx_session_handoffs_active
+            ON session_handoffs(tenant_id, project_id) WHERE active = 1
+        `);
+        console.log('🔧 Migration 002: Updated session_handoffs unique index to (tenant_id, project_id)');
+      } else if (!indexes) {
+        // Index doesn't exist at all — create it
+        this.db.exec(`
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_session_handoffs_active
+            ON session_handoffs(tenant_id, project_id) WHERE active = 1
+        `);
+      }
+
+      // ─── Bootstrap user 'tommy' ───
+      const existingUser = this.db.prepare(`SELECT id FROM users WHERE id = 'tommy'`).get();
+      if (!existingUser) {
+        this.db.prepare(`
+          INSERT INTO users (id, tenant_id, display_name, timezone, locale, date_format, units, working_hours)
+          VALUES ('tommy', 'default', 'Tommy', 'America/Chicago', 'en-US', 'YYYY-MM-DD', 'metric', '{"start":"09:00","end":"17:00"}')
+        `).run();
+        console.log('🔧 Migration 002: Bootstrap user "tommy" created');
+      }
+
+    } catch (error) {
+      console.warn('⚠️ Migration 002 (users + tenant columns) encountered an issue:', error);
     }
   }
 
