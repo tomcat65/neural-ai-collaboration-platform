@@ -274,8 +274,12 @@ export class NeuralMCPServer {
       }
     });
 
-    // Admin endpoint: query audit log (for testing/debugging)
-    this.app.get('/admin/audit-log', (req, res) => {
+    // Admin endpoint: query audit log (restricted unless ENABLE_ADMIN_ENDPOINTS is set)
+    this.app.get('/admin/audit-log', (req, res): void => {
+      if (!process.env.ENABLE_ADMIN_ENDPOINTS) {
+        res.status(403).json({ error: 'Admin endpoints disabled. Set ENABLE_ADMIN_ENDPOINTS=1 to enable.' });
+        return;
+      }
       try {
         const { agent_id, operation, limit } = req.query as {
           agent_id?: string; operation?: string; limit?: string;
@@ -1024,7 +1028,9 @@ export class NeuralMCPServer {
           const handoff = rawHandoff && !rawHandoff.consumedAt ? rawHandoff : null;
           const handoffResponse = handoff ? {
             _wrapped: MemoryManager.wrapContent(handoff.summary, 'handoff', sessProjectId, 'agent'),
-            openItems: handoff.openItems,
+            _openItemsWrapped: (handoff.openItems || []).map((item: string) =>
+              MemoryManager.wrapContent(item, 'handoff_item', sessProjectId, 'agent')
+            ),
             fromAgent: handoff.fromAgent,
             projectId: handoff.projectId,
             createdAt: handoff.createdAt,

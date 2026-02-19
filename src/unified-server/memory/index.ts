@@ -1334,11 +1334,14 @@ export class MemoryManager {
       );
     }
 
-    // 2. Unread messages — count only (agents pull via get_ai_messages when needed)
+    // 2. Unread messages — count only via SQL COUNT (no row limit ceiling)
     try {
-      const unreadRows = this.getMessages(agentId, { unreadOnly: true, limit: 100 });
+      this.ensureReadAtColumn();
+      const countRow = this.db.prepare(
+        'SELECT COUNT(*) as cnt FROM ai_messages WHERE to_agent = ? AND read_at IS NULL'
+      ).get(agentId) as any;
       bundle.unreadMessages = {
-        count: unreadRows.length,
+        count: countRow?.cnt ?? 0,
         hint: 'Use get_ai_messages(agentId) to retrieve',
       };
     } catch { /* ai_messages table may not exist */ }
@@ -1383,7 +1386,9 @@ export class MemoryManager {
       if (handoff) {
         bundle.handoff = {
           _wrapped: MemoryManager.wrapContent(handoff.summary, 'handoff', projectId, 'agent'),
-          openItems: handoff.openItems,
+          _openItemsWrapped: (handoff.openItems || []).map((item: string) =>
+            MemoryManager.wrapContent(item, 'handoff_item', projectId, 'agent')
+          ),
           fromAgent: handoff.fromAgent,
           projectId: handoff.projectId,
           createdAt: handoff.createdAt,

@@ -275,7 +275,10 @@ describe('Session Protocol Contract Tests', () => {
       expect(beginResult2.handoff).not.toBeNull();
       expect(beginResult2.handoff._wrapped).toContain(rtSummary);
       expect(beginResult2.handoff._wrapped).toContain('trust="agent"');
-      expect(beginResult2.handoff.openItems).toEqual(rtOpenItems);
+      expect(beginResult2.handoff._openItemsWrapped).toHaveLength(rtOpenItems.length);
+      for (const item of rtOpenItems) {
+        expect(beginResult2.handoff._openItemsWrapped.some((w: string) => w.includes(item))).toBe(true);
+      }
       expect(beginResult2.handoff.fromAgent).toBe(testAgentId);
       expect(beginResult2.handoff.projectId).toBe(rtProjectId);
     });
@@ -300,7 +303,8 @@ describe('Session Protocol Contract Tests', () => {
       });
       expect(beginResult3.handoff).not.toBeNull();
       expect(beginResult3.handoff._wrapped).toContain(secondSummary);
-      expect(beginResult3.handoff.openItems).toEqual(secondItems);
+      expect(beginResult3.handoff._openItemsWrapped).toHaveLength(secondItems.length);
+      expect(beginResult3.handoff._openItemsWrapped[0]).toContain(secondItems[0]);
     });
   });
 
