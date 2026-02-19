@@ -19,6 +19,7 @@ import {
   getRateLimiterStatus
 } from './middleware/index.js';
 import { metrics, sloMonitor, recordMCPLatency, startSLOMonitoring, correlationMiddleware, logger } from './observability/index.js';
+import { NotificationPort, SlackNotificationAdapter } from './notifications/index.js';
 
 // Unified Neural AI Collaboration MCP Server
 // Exposes ALL system capabilities through a single MCP interface
@@ -30,6 +31,7 @@ export class NeuralMCPServer {
   private sessionId: string;
   private port: number;
   private messageHub?: MessageHubIntegration;
+  private notificationPort: NotificationPort;
 
   constructor(port: number = 6174, dbPath?: string) {
     this.port = port;
@@ -49,6 +51,7 @@ export class NeuralMCPServer {
       }
     );
 
+    this.notificationPort = new SlackNotificationAdapter();
     this.setupToolHandlers();
     this.setupExpressServer();
     this.registerWithUnifiedServer();
@@ -730,6 +733,23 @@ export class NeuralMCPServer {
           }
         },
 
+        // === SESSION PROTOCOL ===
+        {
+          name: UnifiedToolSchemas.get_agent_context.name,
+          description: UnifiedToolSchemas.get_agent_context.description,
+          inputSchema: UnifiedToolSchemas.get_agent_context.inputSchema
+        },
+        {
+          name: UnifiedToolSchemas.begin_session.name,
+          description: UnifiedToolSchemas.begin_session.description,
+          inputSchema: UnifiedToolSchemas.begin_session.inputSchema
+        },
+        {
+          name: UnifiedToolSchemas.end_session.name,
+          description: UnifiedToolSchemas.end_session.description,
+          inputSchema: UnifiedToolSchemas.end_session.inputSchema
+        },
+
         // === SEARCH (LEGACY) ===
         {
           name: UnifiedToolSchemas.search_nodes.name,
@@ -936,6 +956,104 @@ export class NeuralMCPServer {
           const targetAgent = args.agentId || agent;
           const mem = this.memoryManager.getAgentMemory(targetAgent);
           return { content: [{ type: 'text', text: JSON.stringify(mem, null, 2) }] };
+        }
+
+        // === SESSION PROTOCOL TOOLS ===
+        case 'get_agent_context': {
+          const { agentId: ctxAgentId, projectId, depth } = args;
+          const bundle = this.memoryManager.getAgentContext(ctxAgentId, projectId, depth);
+          return { content: [{ type: 'text', text: JSON.stringify(bundle, null, 2) }] };
+        }
+
+        case 'begin_session': {
+          const { agentId: sessAgentId, projectId: sessProjectId } = args;
+
+          // Ensure project entity exists
+          this.memoryManager.ensureProjectEntity(sessAgentId, sessProjectId);
+
+          // Load warm context
+          const context = this.memoryManager.getAgentContext(sessAgentId, sessProjectId, 'warm');
+
+          // Get handoff from previous session
+          const handoff = this.memoryManager.getActiveHandoff(sessProjectId);
+
+          // Slack notification (non-blocking)
+          let notificationStatus = 'skipped';
+          const slackMsg = `📂 ${sessProjectId} session open — ${sessAgentId}`;
+          const notifResult = await this.notificationPort.send(slackMsg);
+          notificationStatus = notifResult.sent ? 'sent' : 'failed';
+          if (!notifResult.sent && notifResult.error !== 'SLACK_WEBHOOK_URL not configured') {
+            console.warn(`⚠️ Slack notification failed: ${notifResult.error}`);
+            notificationStatus = 'failed';
+          } else if (!notifResult.sent) {
+            notificationStatus = 'skipped';
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                status: 'session_opened',
+                agentId: sessAgentId,
+                projectId: sessProjectId,
+                handoff: handoff,
+                context: context,
+                notificationStatus,
+              }, null, 2)
+            }]
+          };
+        }
+
+        case 'end_session': {
+          const {
+            agentId: endAgentId,
+            projectId: endProjectId,
+            summary: endSummary,
+            openItems: endOpenItems,
+            learnings: endLearnings
+          } = args;
+
+          // Write handoff flag (deactivates prior, inserts new)
+          const handoffId = this.memoryManager.writeHandoff(
+            endProjectId, endAgentId, endSummary, endOpenItems
+          );
+
+          // Record learnings if provided
+          if (Array.isArray(endLearnings)) {
+            for (const learning of endLearnings) {
+              await this.memoryManager.recordLearning(
+                endAgentId,
+                learning.context,
+                learning.lesson,
+                learning.confidence || 0.8
+              );
+            }
+          }
+
+          // Slack notification (non-blocking)
+          let endNotifStatus = 'skipped';
+          const endSlackMsg = `✅ ${endProjectId} session closed — ${endAgentId} — ${endSummary}`;
+          const endNotifResult = await this.notificationPort.send(endSlackMsg);
+          endNotifStatus = endNotifResult.sent ? 'sent' : 'failed';
+          if (!endNotifResult.sent && endNotifResult.error === 'SLACK_WEBHOOK_URL not configured') {
+            endNotifStatus = 'skipped';
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                status: 'session_closed',
+                agentId: endAgentId,
+                projectId: endProjectId,
+                handoffId: handoffId,
+                summary: endSummary,
+                openItems: endOpenItems || [],
+                learningsRecorded: Array.isArray(endLearnings) ? endLearnings.length : 0,
+                notificationStatus: endNotifStatus,
+              }, null, 2)
+            }]
+          };
         }
 
         case 'add_observations': {

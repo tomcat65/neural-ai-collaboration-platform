@@ -215,6 +215,66 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
       required: ['query']
     }
   },
+  get_agent_context: {
+    name: 'get_agent_context',
+    description: 'Retrieve a tiered context bundle for an agent, optionally scoped to a project. Returns identity, project state, unread messages, guardrails, and handoff flags.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'Agent ID to build context for' },
+        projectId: { type: 'string', description: 'Optional project scope (enables WARM/COLD tiers and handoff flag)' },
+        depth: {
+          type: 'string',
+          enum: ['hot', 'warm', 'cold'],
+          description: 'Context depth: hot (identity+messages+guardrails), warm (hot+project 30d), cold (everything). Defaults to warm if projectId provided, else hot.',
+        }
+      },
+      required: ['agentId']
+    }
+  },
+  begin_session: {
+    name: 'begin_session',
+    description: 'Open a project session for an agent. Loads context bundle, returns handoff flag from previous session, creates project skeleton if missing, and posts Slack notification.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'Agent opening the session' },
+        projectId: { type: 'string', description: 'Project to open a session for' }
+      },
+      required: ['agentId', 'projectId']
+    }
+  },
+  end_session: {
+    name: 'end_session',
+    description: 'Close a project session. Writes a handoff flag for the next session, records learnings, and posts Slack notification.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'Agent closing the session' },
+        projectId: { type: 'string', description: 'Project to close the session for' },
+        summary: { type: 'string', description: 'Summary of what was accomplished this session' },
+        openItems: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Open items to hand off to the next session'
+        },
+        learnings: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              context: { type: 'string' },
+              lesson: { type: 'string' },
+              confidence: { type: 'number' }
+            },
+            required: ['context', 'lesson']
+          },
+          description: 'Learnings to record from this session'
+        }
+      },
+      required: ['agentId', 'projectId', 'summary']
+    }
+  },
   search_nodes: {
     name: 'search_nodes',
     description: 'DEPRECATED alias for graph-only search; use search_entities with { searchType: "graph" }',

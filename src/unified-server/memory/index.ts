@@ -216,6 +216,32 @@ export class MemoryManager {
       )
     `);
 
+    // Session Handoffs Table — stores flag_for_next_session per project
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS session_handoffs (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        from_agent TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        open_items_json TEXT,
+        created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+        consumed_at DATETIME NULL,
+        active INTEGER NOT NULL DEFAULT 1,
+        last_confirmed DATETIME NULL
+      )
+    `);
+
+    // Partial unique index: exactly one active handoff per project
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_session_handoffs_active
+        ON session_handoffs(project_id) WHERE active = 1
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_session_handoffs_project
+        ON session_handoffs(project_id, created_at DESC)
+    `);
+
     // Migration: Add tenant_id column to existing tables if missing BEFORE creating tenant indexes
     this.migrateAddTenantColumn();
 
@@ -1173,6 +1199,252 @@ export class MemoryManager {
     ).get(offset + 1, chunkSize, id) as any; // SUBSTR is 1-indexed
 
     return { chunk: row.chunk, chunkIndex, totalChunks, contentSize };
+  }
+
+  // ─── Session Protocol methods ───
+
+  /**
+   * Build a tiered context bundle for an agent.
+   * depth: 'hot' | 'warm' | 'cold'
+   *   HOT:  identity + unread messages + handoff flag + guardrails
+   *   WARM: HOT + project observations (30d) + recent decisions
+   *   COLD: everything
+   */
+  getAgentContext(
+    agentId: string,
+    projectId?: string,
+    depth: 'hot' | 'warm' | 'cold' = projectId ? 'warm' : 'hot'
+  ): any {
+    const bundle: any = {
+      identity: { learnings: [], preferences: {} },
+      project: null,
+      handoff: null,
+      unreadMessages: [],
+      guardrails: [],
+      meta: { depth, tokenEstimate: 0 }
+    };
+
+    // --- HOT tier (always included) ---
+
+    // 1. Agent identity: learnings + preferences
+    const agentMem = this.memorySystem.individual.get(agentId);
+    if (agentMem) {
+      bundle.identity.learnings = agentMem.learnings.slice(-20); // last 20
+      bundle.identity.preferences = agentMem.preferences || {};
+    }
+
+    // 2. Unread messages
+    try {
+      bundle.unreadMessages = this.getMessages(agentId, { unreadOnly: true, limit: 20 }).map((m: any) => ({
+        id: m.id,
+        from: m.from_agent,
+        content: m.content,
+        type: m.message_type,
+        priority: m.priority,
+        timestamp: m.created_at,
+      }));
+    } catch { /* ai_messages table may not exist */ }
+
+    // 3. Guardrails — entities of type 'guardrail'
+    try {
+      const guardrailRows = this.db.prepare(
+        `SELECT id, content, created_at FROM shared_memory
+         WHERE memory_type = 'entity' AND LOWER(content) LIKE '%"type":"guardrail"%'
+         ORDER BY created_at DESC LIMIT 10`
+      ).all() as any[];
+      bundle.guardrails = guardrailRows.map((r: any) => {
+        try { return JSON.parse(r.content); } catch { return { raw: r.content }; }
+      });
+    } catch { /* ok */ }
+
+    // 4. HOT-tagged observations
+    try {
+      const hotRows = this.db.prepare(
+        `SELECT id, content, created_at FROM shared_memory
+         WHERE memory_type = 'observation' AND content LIKE '%[HOT]%'
+         ORDER BY created_at DESC LIMIT 20`
+      ).all() as any[];
+      if (hotRows.length > 0) {
+        if (!bundle.project) bundle.project = {};
+        bundle.project.hotObservations = hotRows.map((r: any) => {
+          try { return JSON.parse(r.content); } catch { return { raw: r.content }; }
+        });
+      }
+    } catch { /* ok */ }
+
+    // 5. Handoff flag
+    if (projectId) {
+      bundle.handoff = this.getActiveHandoff(projectId);
+    }
+
+    // --- WARM tier (project context, 30-day window) ---
+    if ((depth === 'warm' || depth === 'cold') && projectId) {
+      if (!bundle.project) bundle.project = {};
+
+      // Project entity
+      try {
+        const projRow = this.db.prepare(
+          `SELECT id, content, created_at FROM shared_memory
+           WHERE memory_type = 'entity' AND LOWER(content) LIKE ?
+           ORDER BY created_at DESC LIMIT 1`
+        ).get(`%"name":"${projectId.toLowerCase()}"%`) as any;
+        if (projRow) {
+          try {
+            const projData = JSON.parse(projRow.content);
+            bundle.project.summary = projData.observations?.join('; ') || projData.name || projectId;
+            bundle.project.entity = projData;
+          } catch { /* ok */ }
+        }
+      } catch { /* ok */ }
+
+      // Recent observations for project (30 days)
+      try {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString();
+        const obsRows = this.db.prepare(
+          `SELECT id, content, created_at FROM shared_memory
+           WHERE memory_type = 'observation' AND LOWER(content) LIKE ?
+           AND created_at >= ? ORDER BY created_at DESC LIMIT 20`
+        ).all(`%${projectId.toLowerCase()}%`, thirtyDaysAgo) as any[];
+        bundle.project.recentObservations = obsRows.map((r: any) => {
+          try { return JSON.parse(r.content); } catch { return { raw: r.content }; }
+        });
+      } catch { /* ok */ }
+
+      // Recent decisions (last 5)
+      try {
+        const decRows = this.db.prepare(
+          `SELECT id, decision, reasoning, created_at FROM consensus_history
+           ORDER BY created_at DESC LIMIT 5`
+        ).all() as any[];
+        bundle.project.recentDecisions = decRows;
+      } catch { /* ok */ }
+    }
+
+    // --- COLD tier (everything) ---
+    if (depth === 'cold' && projectId) {
+      try {
+        const allObs = this.db.prepare(
+          `SELECT id, content, created_at FROM shared_memory
+           WHERE memory_type = 'observation' AND LOWER(content) LIKE ?
+           ORDER BY created_at DESC LIMIT 100`
+        ).all(`%${projectId.toLowerCase()}%`) as any[];
+        bundle.project.allObservations = allObs.map((r: any) => {
+          try { return JSON.parse(r.content); } catch { return { raw: r.content }; }
+        });
+      } catch { /* ok */ }
+
+      try {
+        const allEntities = this.db.prepare(
+          `SELECT id, content, created_at FROM shared_memory
+           WHERE memory_type = 'entity' AND LOWER(content) LIKE ?
+           ORDER BY created_at DESC LIMIT 50`
+        ).all(`%${projectId.toLowerCase()}%`) as any[];
+        bundle.project.allEntities = allEntities.map((r: any) => {
+          try { return JSON.parse(r.content); } catch { return { raw: r.content }; }
+        });
+      } catch { /* ok */ }
+    }
+
+    // --- Context budget enforcement ---
+    const tokenEstimate = Math.ceil(JSON.stringify(bundle).length / 4);
+    bundle.meta.tokenEstimate = tokenEstimate;
+
+    if (tokenEstimate > 2000 && depth !== 'hot') {
+      // Truncate COLD first, then WARM; never truncate HOT
+      if (bundle.project?.allObservations) {
+        bundle.project.allObservations = bundle.project.allObservations.slice(0, 5);
+        bundle.meta.truncated = 'cold';
+      }
+      if (bundle.project?.allEntities) {
+        bundle.project.allEntities = bundle.project.allEntities.slice(0, 3);
+      }
+
+      const afterCold = Math.ceil(JSON.stringify(bundle).length / 4);
+      if (afterCold > 2000 && bundle.project?.recentObservations) {
+        bundle.project.recentObservations = bundle.project.recentObservations.slice(0, 3);
+        bundle.meta.truncated = 'warm';
+      }
+
+      bundle.meta.tokenEstimate = Math.ceil(JSON.stringify(bundle).length / 4);
+    }
+
+    return bundle;
+  }
+
+  /**
+   * Get the active handoff flag for a project.
+   */
+  getActiveHandoff(projectId: string): any | null {
+    try {
+      const row = this.db.prepare(
+        'SELECT * FROM session_handoffs WHERE project_id = ? AND active = 1'
+      ).get(projectId) as any;
+      if (!row) return null;
+      return {
+        id: row.id,
+        projectId: row.project_id,
+        fromAgent: row.from_agent,
+        summary: row.summary,
+        openItems: row.open_items_json ? JSON.parse(row.open_items_json) : [],
+        createdAt: row.created_at,
+        consumedAt: row.consumed_at,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Write a new handoff flag, deactivating any previous one for the same project.
+   * Runs in a single transaction for atomicity.
+   */
+  writeHandoff(projectId: string, fromAgent: string, summary: string, openItems?: string[]): string {
+    const id = uuidv4();
+    const txn = this.db.transaction(() => {
+      // Deactivate prior handoff
+      this.db.prepare(
+        'UPDATE session_handoffs SET active = 0 WHERE project_id = ? AND active = 1'
+      ).run(projectId);
+      // Insert new active handoff
+      this.db.prepare(
+        `INSERT INTO session_handoffs (id, project_id, from_agent, summary, open_items_json)
+         VALUES (?, ?, ?, ?, ?)`
+      ).run(id, projectId, fromAgent, summary, openItems ? JSON.stringify(openItems) : null);
+    });
+    txn();
+    return id;
+  }
+
+  /**
+   * Ensure a project entity skeleton exists in shared_memory.
+   * Returns the existing entity ID or creates a new one.
+   */
+  ensureProjectEntity(agentId: string, projectId: string): string {
+    // Check if a project entity already exists
+    const existing = this.db.prepare(
+      `SELECT id FROM shared_memory
+       WHERE memory_type = 'entity' AND LOWER(content) LIKE ?
+       LIMIT 1`
+    ).get(`%"name":"${projectId.toLowerCase()}"%`) as any;
+
+    if (existing) return existing.id;
+
+    // Create skeleton entity
+    const entityId = uuidv4();
+    const skeleton = {
+      name: projectId,
+      type: 'project',
+      observations: [`Project ${projectId} created`],
+      createdBy: agentId,
+      timestamp: new Date().toISOString(),
+    };
+
+    this.db.prepare(
+      `INSERT INTO shared_memory (id, memory_type, content, created_by, tags)
+       VALUES (?, 'entity', ?, ?, '["project"]')`
+    ).run(entityId, JSON.stringify(skeleton), agentId);
+
+    return entityId;
   }
 
   async close(): Promise<void> {

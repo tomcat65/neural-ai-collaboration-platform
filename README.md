@@ -1,6 +1,6 @@
 # Neural AI Collaboration Platform
 
-A **deterministic AI memory and messaging server** built on SQLite + Weaviate, exposing 15 MCP tools for knowledge graph management, AI-to-AI messaging, agent coordination, and cross-platform support.
+A **deterministic AI memory and messaging server** built on SQLite + Weaviate, exposing 18 MCP tools for knowledge graph management, AI-to-AI messaging, agent coordination, session protocol, and cross-platform support.
 
 ## Architecture
 
@@ -47,7 +47,7 @@ Tommy's convenience scripts:
 - Public endpoints: `/health`, `/health.json`, `/ready`.
 - Rate limiting with optional Redis backend (graceful fallback to in-memory).
 
-## MCP Tools (15)
+## MCP Tools (18)
 
 ### Knowledge Graph (5)
 | Tool | Description |
@@ -77,6 +77,13 @@ Tommy's convenience scripts:
 | `record_learning` | Record a learning entry for an agent |
 | `set_preferences` | Update agent preferences |
 | `get_individual_memory` | Retrieve preferences, learnings, and context |
+
+### Session Protocol (3)
+| Tool | Description |
+|------|-------------|
+| `get_agent_context` | Tiered context bundle (HOT/WARM/COLD) with identity, messages, guardrails, handoff |
+| `begin_session` | Open a project session — loads context, returns handoff flag, creates project skeleton |
+| `end_session` | Close a project session — writes handoff flag, records learnings, Slack notification |
 
 ### Utilities (2)
 | Tool | Description |
@@ -178,6 +185,7 @@ curl -s -X POST http://localhost:6174/mcp \
 | `MESSAGE_HUB_PORT` | No | 3004 | WebSocket hub port |
 | `WEAVIATE_URL` | No | `http://weaviate:8080` | Weaviate connection URL |
 | `ENABLE_ADVANCED_MEMORY` | No | true | Enable Weaviate integration |
+| `SLACK_WEBHOOK_URL` | No | — | Slack Incoming Webhook URL for session notifications |
 | `NODE_ENV` | No | development | Node environment |
 
 ## Documentation
