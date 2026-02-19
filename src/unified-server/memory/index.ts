@@ -1271,10 +1271,31 @@ export class MemoryManager {
   }
 
   /**
-   * Wrap content string in <neural_memory> structural delimiters.
+   * Query the neural_audit_log table (for admin/testing).
    */
-  static wrapContent(content: string, source: string, entity: string): string {
-    return `<neural_memory source="${source}" entity="${entity}" trust="verified">\n${content}\n</neural_memory>`;
+  queryAuditLog(agentId?: string, operation?: string, limit: number = 20): any[] {
+    let query = 'SELECT * FROM neural_audit_log WHERE 1=1';
+    const params: any[] = [];
+    if (agentId) { query += ' AND agent_id = ?'; params.push(agentId); }
+    if (operation) { query += ' AND operation = ?'; params.push(operation); }
+    query += ' ORDER BY created_at DESC LIMIT ?';
+    params.push(limit);
+    return this.db.prepare(query).all(...params);
+  }
+
+  /**
+   * Escape a string for safe use inside XML/HTML attribute values.
+   */
+  private static escapeAttr(value: string): string {
+    return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  /**
+   * Wrap content string in <neural_memory> structural delimiters.
+   * trust levels: 'verified' (server-generated), 'agent' (agent-submitted), 'identity' (agent identity data)
+   */
+  static wrapContent(content: string, source: string, entity: string, trust: 'verified' | 'agent' | 'identity' = 'verified'): string {
+    return `<neural_memory source="${MemoryManager.escapeAttr(source)}" entity="${MemoryManager.escapeAttr(entity)}" trust="${trust}">\n${content}\n</neural_memory>`;
   }
 
   // ─── Session Protocol methods ───
@@ -1305,8 +1326,14 @@ export class MemoryManager {
     // 1. Agent identity: learnings + preferences
     const agentMem = this.memorySystem.individual.get(agentId);
     if (agentMem) {
-      bundle.identity.learnings = agentMem.learnings.slice(-20); // last 20
+      bundle.identity.learnings = agentMem.learnings.slice(-20).map((l: any) => ({
+        ...l,
+        _wrapped: MemoryManager.wrapContent(JSON.stringify(l), 'learning', agentId, 'identity')
+      }));
       bundle.identity.preferences = agentMem.preferences || {};
+      bundle.identity._preferencesWrapped = MemoryManager.wrapContent(
+        JSON.stringify(agentMem.preferences || {}), 'preferences', agentId, 'identity'
+      );
     }
 
     // 2. Unread messages
@@ -1378,7 +1405,9 @@ export class MemoryManager {
           try {
             const projData = JSON.parse(projRow.content);
             bundle.project.summary = projData.observations?.join('; ') || projData.name || projectId;
+            bundle.project._summaryWrapped = MemoryManager.wrapContent(bundle.project.summary, 'project_summary', projectId!, 'verified');
             bundle.project.entity = projData;
+            bundle.project._entityWrapped = MemoryManager.wrapContent(JSON.stringify(projData), 'entity', projectId!, 'verified');
           } catch { /* ok */ }
         }
       } catch { /* ok */ }
@@ -1405,7 +1434,10 @@ export class MemoryManager {
           `SELECT id, decision, reasoning, created_at FROM consensus_history
            ORDER BY created_at DESC LIMIT 5`
         ).all() as any[];
-        bundle.project.recentDecisions = decRows;
+        bundle.project.recentDecisions = decRows.map((d: any) => ({
+          ...d,
+          _wrapped: MemoryManager.wrapContent(JSON.stringify(d), 'decision', projectId!, 'verified')
+        }));
       } catch { /* ok */ }
     }
 
@@ -1486,6 +1518,19 @@ export class MemoryManager {
       };
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Mark a handoff as consumed (idempotency guard for begin_session retries).
+   */
+  consumeHandoff(handoffId: string): void {
+    try {
+      this.db.prepare(
+        "UPDATE session_handoffs SET consumed_at = datetime('now') WHERE id = ? AND consumed_at IS NULL"
+      ).run(handoffId);
+    } catch (e: any) {
+      console.error(`⚠️ consumeHandoff failed (non-fatal): ${e.message}`);
     }
   }
 

@@ -274,6 +274,21 @@ export class NeuralMCPServer {
       }
     });
 
+    // Admin endpoint: query audit log (for testing/debugging)
+    this.app.get('/admin/audit-log', (req, res) => {
+      try {
+        const { agent_id, operation, limit } = req.query as {
+          agent_id?: string; operation?: string; limit?: string;
+        };
+        const entries = this.memoryManager.queryAuditLog(
+          agent_id, operation, limit ? parseInt(limit, 10) : 20
+        );
+        res.json({ entries });
+      } catch (error) {
+        res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+      }
+    });
+
     // Direct HTTP API endpoints for all MCP tools
     this.app.get('/api/tools', async (_req, res) => {
       try {
@@ -807,6 +822,20 @@ export class NeuralMCPServer {
         case 'create_entities': {
           const { entities } = args;
 
+          // NE-S6c fix: Sanitize entity observations
+          for (const entity of entities) {
+            if (Array.isArray(entity.observations)) {
+              for (const obs of entity.observations) {
+                const check = MemoryManager.sanitizeContent(obs);
+                if (!check.safe) {
+                  this.memoryManager.auditLog('create_entity', agent, obs, entity.name, true, check.reason);
+                  this.notificationPort.send(`⚠️ Neural write flagged — agent: ${agent}, operation: create_entity, reason: ${check.reason}`).catch(() => {});
+                  throw new Error(`Content flagged by sanitizer: ${check.reason}`);
+                }
+              }
+            }
+          }
+
           const createdEntities = await Promise.all(entities.map(async (entity: any) => {
             const entityData = {
               name: entity.name,
@@ -943,6 +972,19 @@ export class NeuralMCPServer {
         case 'record_learning': {
           const { context, lesson, confidence = 0.8 } = args;
           const targetAgent = args.agentId || agent;
+
+          // NE-S6c fix: Sanitize learning content
+          for (const [field, value] of [['context', context], ['lesson', lesson]] as const) {
+            if (value) {
+              const check = MemoryManager.sanitizeContent(value);
+              if (!check.safe) {
+                this.memoryManager.auditLog('record_learning', targetAgent, value, field, true, check.reason);
+                this.notificationPort.send(`⚠️ Neural write flagged — agent: ${targetAgent}, operation: record_learning, reason: ${check.reason}`).catch(() => {});
+                throw new Error(`Content flagged by sanitizer: ${check.reason}`);
+              }
+            }
+          }
+
           await this.memoryManager.recordLearning(targetAgent, context, lesson, confidence);
           await this.publishEventToUnified('agent.learning.recorded', { agent: targetAgent, context, lesson, confidence });
           return { content: [{ type: 'text', text: JSON.stringify({ status: 'ok' }) }] };
@@ -977,19 +1019,21 @@ export class NeuralMCPServer {
           // Load warm context
           const context = this.memoryManager.getAgentContext(sessAgentId, sessProjectId, 'warm');
 
-          // Get handoff from previous session
-          const handoff = this.memoryManager.getActiveHandoff(sessProjectId);
+          // Get handoff from previous session (idempotency: only return unconsumed handoffs)
+          const rawHandoff = this.memoryManager.getActiveHandoff(sessProjectId);
+          const handoff = rawHandoff && !rawHandoff.consumedAt ? rawHandoff : null;
+          if (handoff) {
+            this.memoryManager.consumeHandoff(handoff.id);
+          }
 
-          // Slack notification (non-blocking)
+          // Slack notification (non-fatal — never blocks or fails the tool)
           let notificationStatus = 'skipped';
-          const slackMsg = `📂 ${sessProjectId} session open — ${sessAgentId}`;
-          const notifResult = await this.notificationPort.send(slackMsg);
-          notificationStatus = notifResult.sent ? 'sent' : 'failed';
-          if (!notifResult.sent && notifResult.error !== 'SLACK_WEBHOOK_URL not configured') {
-            console.warn(`⚠️ Slack notification failed: ${notifResult.error}`);
+          try {
+            const slackMsg = `📂 ${sessProjectId} session open — ${sessAgentId}`;
+            const notifResult = await this.notificationPort.send(slackMsg);
+            notificationStatus = notifResult.sent ? 'sent' : (notifResult.error === 'SLACK_WEBHOOK_URL not configured' ? 'skipped' : 'failed');
+          } catch {
             notificationStatus = 'failed';
-          } else if (!notifResult.sent) {
-            notificationStatus = 'skipped';
           }
 
           // NE-S6b: Audit log
@@ -1023,7 +1067,7 @@ export class NeuralMCPServer {
           const summaryCheck = MemoryManager.sanitizeContent(endSummary);
           if (!summaryCheck.safe) {
             this.memoryManager.auditLog('end_session', endAgentId, endSummary, endProjectId, true, summaryCheck.reason);
-            this.notificationPort.send(`⚠️ Neural write flagged — agent: ${endAgentId}, operation: end_session, reason: ${summaryCheck.reason}`);
+            this.notificationPort.send(`⚠️ Neural write flagged — agent: ${endAgentId}, operation: end_session, reason: ${summaryCheck.reason}`).catch(() => {});
             throw new Error(`Content flagged by sanitizer: ${summaryCheck.reason}`);
           }
           if (Array.isArray(endOpenItems)) {
@@ -1031,7 +1075,7 @@ export class NeuralMCPServer {
               const itemCheck = MemoryManager.sanitizeContent(item);
               if (!itemCheck.safe) {
                 this.memoryManager.auditLog('end_session', endAgentId, item, endProjectId, true, itemCheck.reason);
-                this.notificationPort.send(`⚠️ Neural write flagged — agent: ${endAgentId}, operation: end_session, reason: ${itemCheck.reason}`);
+                this.notificationPort.send(`⚠️ Neural write flagged — agent: ${endAgentId}, operation: end_session, reason: ${itemCheck.reason}`).catch(() => {});
                 throw new Error(`Content flagged by sanitizer: ${itemCheck.reason}`);
               }
             }
@@ -1048,6 +1092,17 @@ export class NeuralMCPServer {
           // Record learnings if provided
           if (Array.isArray(endLearnings)) {
             for (const learning of endLearnings) {
+              // NE-S6c fix: Sanitize learning content before recording
+              for (const [field, value] of [['context', learning.context], ['lesson', learning.lesson]] as const) {
+                if (value) {
+                  const check = MemoryManager.sanitizeContent(value);
+                  if (!check.safe) {
+                    this.memoryManager.auditLog('end_session_learning', endAgentId, value, field, true, check.reason);
+                    this.notificationPort.send(`⚠️ Neural write flagged — agent: ${endAgentId}, operation: end_session_learning, reason: ${check.reason}`).catch(() => {});
+                    throw new Error(`Content flagged by sanitizer: ${check.reason}`);
+                  }
+                }
+              }
               await this.memoryManager.recordLearning(
                 endAgentId,
                 learning.context,
@@ -1057,13 +1112,14 @@ export class NeuralMCPServer {
             }
           }
 
-          // Slack notification (non-blocking)
+          // Slack notification (non-fatal — never blocks or fails the tool)
           let endNotifStatus = 'skipped';
-          const endSlackMsg = `✅ ${endProjectId} session closed — ${endAgentId} — ${endSummary}`;
-          const endNotifResult = await this.notificationPort.send(endSlackMsg);
-          endNotifStatus = endNotifResult.sent ? 'sent' : 'failed';
-          if (!endNotifResult.sent && endNotifResult.error === 'SLACK_WEBHOOK_URL not configured') {
-            endNotifStatus = 'skipped';
+          try {
+            const endSlackMsg = `✅ ${endProjectId} session closed — ${endAgentId} — ${endSummary}`;
+            const endNotifResult = await this.notificationPort.send(endSlackMsg);
+            endNotifStatus = endNotifResult.sent ? 'sent' : (endNotifResult.error === 'SLACK_WEBHOOK_URL not configured' ? 'skipped' : 'failed');
+          } catch {
+            endNotifStatus = 'failed';
           }
 
           return {
@@ -1093,7 +1149,7 @@ export class NeuralMCPServer {
                 const check = MemoryManager.sanitizeContent(c);
                 if (!check.safe) {
                   this.memoryManager.auditLog('add_observation', agent, c, obs.entityName, true, check.reason);
-                  this.notificationPort.send(`⚠️ Neural write flagged — agent: ${agent}, operation: add_observation, reason: ${check.reason}`);
+                  this.notificationPort.send(`⚠️ Neural write flagged — agent: ${agent}, operation: add_observation, reason: ${check.reason}`).catch(() => {});
                   throw new Error(`Content flagged by sanitizer: ${check.reason}`);
                 }
               }
@@ -1247,7 +1303,7 @@ export class NeuralMCPServer {
           const msgSanitize = MemoryManager.sanitizeContent(content);
           if (!msgSanitize.safe) {
             this.memoryManager.auditLog('send_ai_message', senderAgentId, content, explicitTarget, true, msgSanitize.reason);
-            this.notificationPort.send(`⚠️ Neural write flagged — agent: ${senderAgentId}, operation: send_ai_message, reason: ${msgSanitize.reason}`);
+            this.notificationPort.send(`⚠️ Neural write flagged — agent: ${senderAgentId}, operation: send_ai_message, reason: ${msgSanitize.reason}`).catch(() => {});
             throw new Error(`Content flagged by sanitizer: ${msgSanitize.reason}`);
           }
 
