@@ -834,19 +834,26 @@ export class NeuralMCPServer {
           // Basic search for now, but structured for advanced features
           const searchResults = await this.memoryManager.search(query, { shared: true });
           
-          const enhancedResults = searchResults.slice(0, limit).map((result) => {
+          const enhancedResults = searchResults.slice(0, limit).map((result: any) => {
             const nameMatch = result.content?.name?.toLowerCase().includes(query.toLowerCase());
             const typeMatch = result.content?.type?.toLowerCase().includes(query.toLowerCase());
             const score = nameMatch ? 1.0 : typeMatch ? 0.8 : 0.6;
-            return {
+            const entry: any = {
               ...result,
               searchScore: score,
               searchType: searchType,
               memorySource: 'sqlite',
               semanticSimilarity: null
             };
-          }).sort((a, b) => b.searchScore - a.searchScore);
+            if (result.chunked) {
+              entry.chunked = true;
+              entry.contentSize = result.contentSize;
+              entry.totalChunks = result.totalChunks;
+            }
+            return entry;
+          }).sort((a: any, b: any) => b.searchScore - a.searchScore);
 
+          const hasChunked = enhancedResults.some((r: any) => r.chunked);
           return {
             content: [
               {
@@ -855,6 +862,7 @@ export class NeuralMCPServer {
                   query,
                   searchType,
                   totalResults: enhancedResults.length,
+                  ...(hasChunked ? { chunkedResults: enhancedResults.filter((r: any) => r.chunked).length } : {}),
                   results: enhancedResults,
                 }, null, 2),
               },
@@ -867,18 +875,24 @@ export class NeuralMCPServer {
           const { query, limit = 50 } = args;
           const searchType = 'graph';
           const searchResults = await this.memoryManager.search(query, { shared: true });
-          const enhancedResults = searchResults.slice(0, limit).map((result) => {
+          const enhancedResults = searchResults.slice(0, limit).map((result: any) => {
             const nameMatch = result.content?.name?.toLowerCase().includes(query.toLowerCase());
             const typeMatch = result.content?.type?.toLowerCase().includes(query.toLowerCase());
             const score = nameMatch ? 1.0 : typeMatch ? 0.8 : 0.6;
-            return {
+            const entry: any = {
               ...result,
               searchScore: score,
               searchType,
               memorySource: 'sqlite',
               semanticSimilarity: null
             };
-          }).sort((a, b) => b.searchScore - a.searchScore);
+            if (result.chunked) {
+              entry.chunked = true;
+              entry.contentSize = result.contentSize;
+              entry.totalChunks = result.totalChunks;
+            }
+            return entry;
+          }).sort((a: any, b: any) => b.searchScore - a.searchScore);
 
           // One-time deprecation log
           if (!(global as any)._deprecated_search_nodes_logged) {
@@ -1015,16 +1029,18 @@ export class NeuralMCPServer {
 
         case 'read_graph': {
           const entities = await this.memoryManager.search('', { shared: true });
-          const entitiesOnly = entities.filter(e => e.content?.type === 'entity');
-          const relationsOnly = entities.filter(e => e.content?.type === 'relation');
-          const observationsOnly = entities.filter(e => e.content?.type === 'observation');
+          const entitiesOnly = entities.filter((e: any) => e.content?.type === 'entity');
+          const relationsOnly = entities.filter((e: any) => e.content?.type === 'relation');
+          const observationsOnly = entities.filter((e: any) => e.content?.type === 'observation');
+          const chunkedCount = entities.filter((e: any) => e.chunked).length;
 
-          const graphData = {
+          const graphData: any = {
             timestamp: new Date().toISOString(),
             statistics: {
               nodeCount: entitiesOnly.length,
               edgeCount: relationsOnly.length,
-              observationCount: observationsOnly.length
+              observationCount: observationsOnly.length,
+              ...(chunkedCount > 0 ? { chunkedEntries: chunkedCount } : {})
             },
             graph: {
               entities: entitiesOnly,

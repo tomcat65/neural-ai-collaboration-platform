@@ -37,6 +37,7 @@ export class MemoryManager {
   public weaviateClient?: WeaviateClient;
   private isAdvancedSystemsEnabled: boolean = false;
   private isDualWriteEnabled: boolean = false;
+  readonly contentSizeThreshold: number = parseInt(process.env.CONTENT_SIZE_THRESHOLD || '51200', 10); // 50KB default
 
   constructor(dbPath: string = './data/unified-platform.db') {
     this.db = new Database(dbPath);
@@ -922,40 +923,69 @@ export class MemoryManager {
         }
       }
       
-      // Search shared_memory table directly
+      // Search shared_memory table with smart chunking for large content
       try {
-        const sharedStmt = this.db.prepare(`
-          SELECT id, memory_type, content, created_by, created_at 
-          FROM shared_memory 
-          WHERE LOWER(content) LIKE ? 
-          ORDER BY created_at DESC 
+        // Phase 1: Query with content size to identify large rows
+        const sizeStmt = this.db.prepare(`
+          SELECT id, memory_type, LENGTH(content) as content_size, created_by, created_at
+          FROM shared_memory
+          WHERE LOWER(content) LIKE ?
+          ORDER BY created_at DESC
           LIMIT 50
         `);
-        
-        const sharedRows = sharedStmt.all(`%${searchTerm}%`) as any[];
-        
-        for (const row of sharedRows) {
-          try {
-            const content = JSON.parse(row.content);
-            results.push({
-              id: row.id,
-              type: 'shared',
-              content: content,
-              relevance: 0.6,
-              source: row.created_by,
-              timestamp: new Date(row.created_at)
-            });
-          } catch (parseError) {
-            // If JSON parse fails, include raw content
-            results.push({
-              id: row.id,
-              type: 'shared',
-              content: { raw: row.content, type: row.memory_type },
-              relevance: 0.6,
-              source: row.created_by,
-              timestamp: new Date(row.created_at)
-            });
+        const sizeRows = sizeStmt.all(`%${searchTerm}%`) as any[];
+
+        // Phase 2: Fetch full content for small rows, truncated for large rows
+        const threshold = this.contentSizeThreshold;
+        const smallIds = sizeRows.filter(r => r.content_size <= threshold).map(r => r.id);
+        const largeRows = sizeRows.filter(r => r.content_size > threshold);
+
+        // Batch-fetch small rows with full content
+        if (smallIds.length > 0) {
+          const placeholders = smallIds.map(() => '?').join(',');
+          const fullStmt = this.db.prepare(
+            `SELECT id, memory_type, content, created_by, created_at FROM shared_memory WHERE id IN (${placeholders})`
+          );
+          const fullRows = fullStmt.all(...smallIds) as any[];
+          for (const row of fullRows) {
+            try {
+              const content = JSON.parse(row.content);
+              results.push({
+                id: row.id, type: 'shared', content, relevance: 0.6,
+                source: row.created_by, timestamp: new Date(row.created_at)
+              });
+            } catch {
+              results.push({
+                id: row.id, type: 'shared',
+                content: { raw: row.content, type: row.memory_type },
+                relevance: 0.6, source: row.created_by, timestamp: new Date(row.created_at)
+              });
+            }
           }
+        }
+
+        // For large rows, return metadata + truncated preview + chunk info
+        for (const row of largeRows) {
+          const chunkSize = this.contentSizeThreshold;
+          const totalChunks = Math.ceil(row.content_size / chunkSize);
+          // Fetch only the first chunk as preview
+          const previewStmt = this.db.prepare(
+            `SELECT SUBSTR(content, 1, ?) as preview, memory_type FROM shared_memory WHERE id = ?`
+          );
+          const preview = previewStmt.get(chunkSize, row.id) as any;
+          let previewContent: any;
+          try {
+            // Try to parse preview — may be incomplete JSON
+            previewContent = JSON.parse(preview?.preview || '{}');
+          } catch {
+            previewContent = { raw: preview?.preview, type: preview?.memory_type };
+          }
+          results.push({
+            id: row.id, type: 'shared',
+            content: previewContent,
+            relevance: 0.6, source: row.created_by, timestamp: new Date(row.created_at),
+            chunked: true, contentSize: row.content_size, totalChunks, chunkSize
+          });
         }
       } catch (dbError) {
         console.warn('🔍 Database search error for shared memory:', dbError);
@@ -1117,6 +1147,32 @@ export class MemoryManager {
     }
 
     return status;
+  }
+
+  /**
+   * Retrieve a specific chunk of a large content row from shared_memory.
+   * Used by callers when search results include chunked: true.
+   */
+  getContentChunk(id: string, chunkIndex: number): { chunk: string; chunkIndex: number; totalChunks: number; contentSize: number } {
+    const sizeRow = this.db.prepare(
+      'SELECT LENGTH(content) as content_size FROM shared_memory WHERE id = ?'
+    ).get(id) as any;
+    if (!sizeRow) throw new Error(`Entity ${id} not found`);
+
+    const contentSize = sizeRow.content_size;
+    const chunkSize = this.contentSizeThreshold;
+    const totalChunks = Math.ceil(contentSize / chunkSize);
+
+    if (chunkIndex < 0 || chunkIndex >= totalChunks) {
+      throw new Error(`Chunk index ${chunkIndex} out of range [0, ${totalChunks - 1}]`);
+    }
+
+    const offset = chunkIndex * chunkSize;
+    const row = this.db.prepare(
+      'SELECT SUBSTR(content, ?, ?) as chunk FROM shared_memory WHERE id = ?'
+    ).get(offset + 1, chunkSize, id) as any; // SUBSTR is 1-indexed
+
+    return { chunk: row.chunk, chunkIndex, totalChunks, contentSize };
   }
 
   async close(): Promise<void> {
