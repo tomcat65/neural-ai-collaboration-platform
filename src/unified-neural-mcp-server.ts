@@ -465,12 +465,17 @@ export class NeuralMCPServer {
     this.app.get('/ai-messages/:agentId', async (req, res) => {
       try {
         const { agentId } = req.params;
-        const { since, messageType, limit } = req.query as { since?: string; messageType?: string; limit?: string };
+        const { since, messageType, limit, unreadOnly, markAsRead } = req.query as {
+          since?: string; messageType?: string; limit?: string;
+          unreadOnly?: string; markAsRead?: string;
+        };
 
         const rawMessages = this.memoryManager.getMessages(agentId, {
           messageType,
           since,
           limit: limit ? parseInt(limit, 10) : 50,
+          unreadOnly: unreadOnly === 'true',
+          markAsRead: markAsRead === 'true',
         });
 
         const messages = rawMessages.map((msg: any) => ({
@@ -1155,13 +1160,15 @@ export class NeuralMCPServer {
         }
 
         case 'get_ai_messages': {
-          const { agentId: targetAgentId, limit = 50, messageType, since } = args;
+          const { agentId: targetAgentId, limit = 50, messageType, since, unreadOnly, markAsRead } = args;
 
           // P1: Use dedicated ai_messages table with indexed queries
           const rawMessages = this.memoryManager.getMessages(targetAgentId, {
             messageType,
             since,
             limit,
+            unreadOnly,
+            markAsRead,
           });
 
           // Transform to match existing response format for backward compatibility

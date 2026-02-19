@@ -1202,11 +1202,16 @@ export class MemoryManager {
       messageType?: string;
       since?: string;
       limit?: number;
+      unreadOnly?: boolean;
+      markAsRead?: boolean;
     } = {}
   ): any[] {
     const limit = options.limit || 50;
 
     try {
+      // Ensure read_at column exists (idempotent migration)
+      this.ensureReadAtColumn();
+
       let query = 'SELECT * FROM ai_messages WHERE to_agent = ?';
       const params: any[] = [agentId];
 
@@ -1218,17 +1223,50 @@ export class MemoryManager {
         query += ' AND created_at >= ?';
         params.push(options.since);
       }
+      if (options.unreadOnly) {
+        query += ' AND read_at IS NULL';
+      }
 
       query += ' ORDER BY created_at DESC LIMIT ?';
       params.push(limit);
 
-      return this.db.prepare(query).all(...params) as any[];
+      const messages = this.db.prepare(query).all(...params) as any[];
+
+      // Mark retrieved messages as read if requested
+      if (options.markAsRead && messages.length > 0) {
+        const ids = messages.map((m: any) => m.id);
+        const placeholders = ids.map(() => '?').join(',');
+        this.db.prepare(
+          `UPDATE ai_messages SET read_at = ? WHERE id IN (${placeholders}) AND read_at IS NULL`
+        ).run(new Date().toISOString(), ...ids);
+      }
+
+      return messages;
     } catch (err: any) {
       if (err.message?.includes('no such table')) {
         console.warn('⚠️ ai_messages table not found, falling back to search');
         return [];
       }
       throw err;
+    }
+  }
+
+  /**
+   * Ensure read_at column exists on ai_messages table (idempotent).
+   */
+  private _readAtColumnChecked = false;
+  private ensureReadAtColumn(): void {
+    if (this._readAtColumnChecked) return;
+    try {
+      const cols = this.db.prepare("PRAGMA table_info(ai_messages)").all() as any[];
+      const hasReadAt = cols.some((c: any) => c.name === 'read_at');
+      if (!hasReadAt) {
+        this.db.prepare("ALTER TABLE ai_messages ADD COLUMN read_at TEXT").run();
+        console.log('📬 Added read_at column to ai_messages');
+      }
+      this._readAtColumnChecked = true;
+    } catch {
+      // Table might not exist yet — skip
     }
   }
 

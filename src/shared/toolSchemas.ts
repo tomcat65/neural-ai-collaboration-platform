@@ -137,12 +137,14 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
       properties: {
         agentId: { type: 'string', description: 'AI agent ID to get messages for' },
         limit: { type: 'number', description: 'Maximum number of messages', default: 50 },
-        messageType: { 
-          type: 'string', 
+        messageType: {
+          type: 'string',
           enum: ['info', 'task', 'query', 'response', 'collaboration'],
           description: 'Filter by message type'
         },
-        since: { type: 'string', description: 'ISO timestamp to get messages since' }
+        since: { type: 'string', description: 'ISO timestamp to get messages since' },
+        unreadOnly: { type: 'boolean', description: 'Only return messages that have not been read yet', default: false },
+        markAsRead: { type: 'boolean', description: 'Mark returned messages as read after retrieval', default: false }
       },
       required: ['agentId']
     }
