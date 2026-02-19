@@ -40,6 +40,7 @@ Net result: -1,800 lines, 18 tools, zero data loss. See git log for details.
 - **User isolation: PER-TOOL** — user profiles are user-scoped within tenant
 - **Messages: TENANT + AGENT scoped** — filtered by (tenant_id, to_agent), NOT user-scoped
 - **Handoffs: TENANT + PROJECT scoped** — filtered by (tenant_id, project_id), NOT agent-scoped or user-scoped. Any agent within the tenant can read/write handoffs for a project. user_id is stamped on write for audit trail only.
+- **Tenant membership model: CANONICAL JOIN TABLE** — `tenant_memberships` is source of truth; `users.tenant_id` is compatibility shadow only during rollout
 - **Cache keys: TENANT-AWARE** — all in-memory caches keyed by tenantId:agentId composite
 - **Agent definitions: GLOBAL** — register_agent, set_agent_identity, get_agent_status are cross-tenant
 - **userId mismatch: REJECTED** — JWT callers providing mismatched args.userId get 403
@@ -66,11 +67,16 @@ Net result: -1,800 lines, 18 tools, zero data loss. See git log for details.
 - [ ] 900: Create users table, add tenant_id/user_id to ai_messages + session_handoffs, backfill, fix handoff uniqueness
 - AC:
   - users table created (id, tenant_id, display_name, timezone, locale, date_format, units, working_hours, last_seen_tz, prefs_version, created_at, updated_at)
+  - tenant_memberships created as canonical membership model (user_id, tenant_id, role)
+  - tenant_memberships unique constraint: (tenant_id, user_id)
+  - tenant_memberships indexes: user_id, (tenant_id, role)
   - ai_messages has tenant_id + user_id columns with index
   - session_handoffs has tenant_id + user_id columns with index
   - session_handoffs unique constraint updated: (tenant_id, project_id) WHERE active=1
   - All existing rows backfilled with tenant_id='default' (standardized naming)
   - Bootstrap user 'tommy' created (timezone=America/Chicago, locale=en-US)
+  - Bootstrap membership created: ('tommy', 'default', 'owner')
+  - users.tenant_id retained as deprecated read-only compatibility shadow
   - Migration is idempotent (safe to re-run)
   - Zero data loss — parity assertions: row counts match, no NULLs in tenant_id post-backfill
   - All existing contract tests still pass
@@ -85,21 +91,39 @@ Net result: -1,800 lines, 18 tools, zero data loss. See git log for details.
 ---
 
 ## Task 1000: RequestContext + Tenant-Scoped Tool Handlers [P1b]
-- [ ] 1000: Introduce trusted RequestContext, wire tenant_id into all data-touching handlers, fix cache keys
+- [ ] 1000: Introduce trusted RequestContext, wire tenant_id into all data-touching handlers, fix cache keys, and lock Auth0 claim mapping via provider-agnostic adapter
 - AC:
-  - RequestContext interface: { tenantId, userId, timezone, apiKeyId } — built by auth middleware
+  - RequestContext interface: { tenantId, userId, authType, apiKeyId, idpSub, roles, scopes, mfaLevel, timezoneHint } — built by auth middleware
+  - Provider-agnostic contracts implemented:
+    - AuthAdapter.verifyBearer(token) -> verified principal
+    - TenantResolver.resolve(principal, requestedTenant?) -> tenant/user/roles/scopes
+  - `tenant_memberships` exists before handler wiring (from Task 900 or a Task 1000 prereq migration)
   - _handleToolCall(name, args, context: RequestContext) — signature updated
+  - Auth0 JWT mapping implemented:
+    - sub -> idpSub
+    - https://neural-mcp.local/org_id -> tenant resolution input
+    - permissions + https://neural-mcp.local/roles -> scopes/roles
+    - https://neural-mcp.local/mfa_level -> mfaLevel
+  - Tenant resolution uses local membership model (tenant_memberships canonical), not args
+  - JIT upsert happens in neural middleware (user + membership sync) after JWT verification
+  - Unknown/unmapped org_id (namespaced claim) is rejected (no implicit fallback from args)
+  - Optional requested tenant override is allowed only when membership-validated
+  - JWKS endpoint/domain/issuer/audience are config-driven (not hardcoded)
+  - JWT verification uses local JWKS cache + refresh behavior (no per-request IdP round-trip)
   - All data-touching handlers use context.tenantId (NOT args) for DB queries
   - In-memory cache keys updated to tenantId:agentId composite (no cross-tenant leakage)
   - Handoffs are tenant-scoped only; user_id stamped for audit trail, NOT used as query predicate
   - Agent tools (register, identity, status) remain global
-  - Legacy API keys: tenantId='default', userId=null
+  - API key auth path remains neural-local (hashed key lookup), emits same RequestContext shape as JWT path
+  - Legacy API keys: tenantId='default', userId=null (until key migration complete)
   - X-User-Id header only accepted when ENABLE_DEV_HEADERS=1 (dev mode only)
   - Tool args CANNOT override trusted tenant/user context
   - Contract tests pass (default tenant implicitly)
   - New test: cross-tenant isolation (tenant1 data invisible to tenant2)
   - New test: args cannot spoof tenant context
   - New test: cache isolation (tenant1 cached data not returned for tenant2)
+  - New test: Auth0 JWT with unknown `https://neural-mcp.local/org_id` is rejected
+  - New test: requested tenant override without membership is rejected
 - Files:
   - touches: src/unified-neural-mcp-server.ts, src/unified-server/memory/index.ts, src/middleware/security.ts
   - creates: tests/contract-tenant-isolation.test.ts

@@ -17,10 +17,12 @@ import Database from 'better-sqlite3';
 interface MigrationResult {
   success: boolean;
   usersCreated: boolean;
+  tenantMembershipsCreated: boolean;
   columnsAdded: string[];
   indexUpdated: boolean;
   backfilledRows: { ai_messages: number; session_handoffs: number };
   bootstrapUser: boolean;
+  bootstrapMembership: boolean;
   error?: string;
 }
 
@@ -35,10 +37,12 @@ export function runMigration002(
   const result: MigrationResult = {
     success: false,
     usersCreated: false,
+    tenantMembershipsCreated: false,
     columnsAdded: [],
     indexUpdated: false,
     backfilledRows: { ai_messages: 0, session_handoffs: 0 },
     bootstrapUser: false,
+    bootstrapMembership: false,
   };
 
   try {
@@ -63,6 +67,22 @@ export function runMigration002(
       db.exec(`CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id)`);
       result.usersCreated = true;
       console.log('✅ users table created (or already exists)');
+
+      // ─── 1b. Create tenant_memberships table (canonical membership model) ───
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS tenant_memberships (
+          user_id TEXT NOT NULL,
+          tenant_id TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'member',
+          created_at DATETIME DEFAULT (datetime('now')),
+          updated_at DATETIME DEFAULT (datetime('now')),
+          UNIQUE (tenant_id, user_id)
+        )
+      `);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tenant_memberships_user ON tenant_memberships(user_id)`);
+      db.exec(`CREATE INDEX IF NOT EXISTS idx_tenant_memberships_tenant_role ON tenant_memberships(tenant_id, role)`);
+      result.tenantMembershipsCreated = true;
+      console.log('✅ tenant_memberships table created (or already exists)');
 
       // ─── 2. Add tenant_id + user_id to ai_messages ───
       const aiCols = db.prepare('PRAGMA table_info(ai_messages)').all() as any[];
@@ -148,6 +168,21 @@ export function runMigration002(
         console.log('ℹ️  Bootstrap user "tommy" already exists');
       }
 
+      // ─── 6b. Create bootstrap membership for tommy ───
+      const existingMembership = db.prepare(
+        `SELECT user_id FROM tenant_memberships WHERE user_id = 'tommy' AND tenant_id = 'default'`
+      ).get();
+      if (!existingMembership) {
+        db.prepare(`
+          INSERT INTO tenant_memberships (user_id, tenant_id, role)
+          VALUES ('tommy', 'default', 'owner')
+        `).run();
+        result.bootstrapMembership = true;
+        console.log('✅ Bootstrap membership (tommy, default, owner) created');
+      } else {
+        console.log('ℹ️  Bootstrap membership for tommy already exists');
+      }
+
       // ─── Parity assertions ───
       // Verify no NULL tenant_id in ai_messages after backfill
       const nullTenantAi = (db.prepare(
@@ -169,6 +204,12 @@ export function runMigration002(
       const userCount = (db.prepare(`SELECT COUNT(*) as cnt FROM users`).get() as any).cnt;
       if (userCount < 1) {
         throw new Error('Parity check failed: users table is empty after bootstrap');
+      }
+
+      // Verify tenant_memberships has at least the bootstrap membership
+      const membershipCount = (db.prepare(`SELECT COUNT(*) as cnt FROM tenant_memberships`).get() as any).cnt;
+      if (membershipCount < 1) {
+        throw new Error('Parity check failed: tenant_memberships table is empty after bootstrap');
       }
 
       console.log('✅ All parity assertions passed');

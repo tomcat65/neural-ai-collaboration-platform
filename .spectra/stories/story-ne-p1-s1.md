@@ -6,7 +6,7 @@
 ## Codex Findings Addressed: #3 (session_handoffs uniqueness), #9 (tenant naming inconsistency)
 
 ## Description
-Create `users` table in the main SQLite DB. Add `tenant_id` and `user_id` columns (nullable) to `ai_messages` and `session_handoffs`. Backfill all existing rows to tenant_id='default'. Create bootstrap user (Tommy). Update session_handoffs unique constraint to be tenant-scoped.
+Create `users` table in the main SQLite DB. Add `tenant_id` and `user_id` columns (nullable) to `ai_messages` and `session_handoffs`. Create canonical `tenant_memberships(user_id, tenant_id, role)` for multi-tenant authz. Backfill all existing rows to tenant_id='default'. Create bootstrap user (Tommy). Update session_handoffs unique constraint to be tenant-scoped.
 
 ## Naming Convention (codex #9)
 - Canonical tenant ID for legacy/default data: `'default'` (NOT `'tenant_default'`)
@@ -29,6 +29,21 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_users_tenant ON users(tenant_id);
+```
+- Note: `users.tenant_id` is a deprecated read-only compatibility shadow during rollout. Canonical tenancy membership lives in `tenant_memberships`.
+
+## Schema: tenant memberships (canonical)
+```sql
+CREATE TABLE IF NOT EXISTS tenant_memberships (
+  user_id TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'member',
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now')),
+  UNIQUE (tenant_id, user_id)
+);
+CREATE INDEX idx_tenant_memberships_user ON tenant_memberships(user_id);
+CREATE INDEX idx_tenant_memberships_tenant_role ON tenant_memberships(tenant_id, role);
 ```
 
 ## Schema: column additions
@@ -56,14 +71,21 @@ This prevents cross-tenant handoff collisions on the same project_id.
 - All existing ai_messages rows: tenant_id = 'default'
 - All existing session_handoffs rows: tenant_id = 'default'
 - Bootstrap user: id='tommy', tenant_id='default', display_name='Tommy', timezone='America/Chicago', locale='en-US'
+- Bootstrap membership: (`user_id`='tommy', `tenant_id`='default', `role`='owner') in `tenant_memberships`
 
 ## Acceptance Criteria
 - [ ] users table created with all columns + index
+- [ ] tenant_memberships created as canonical membership model with fields (user_id, tenant_id, role)
+- [ ] tenant_memberships has unique constraint on (tenant_id, user_id)
+- [ ] tenant_memberships has index on user_id
+- [ ] tenant_memberships has index on (tenant_id, role)
 - [ ] ai_messages has tenant_id + user_id columns with index
 - [ ] session_handoffs has tenant_id + user_id columns with index
 - [ ] session_handoffs unique constraint is now (tenant_id, project_id) WHERE active=1
 - [ ] All existing rows backfilled with tenant_id='default'
 - [ ] Bootstrap user 'tommy' created
+- [ ] Bootstrap membership for 'tommy' in tenant 'default' exists
+- [ ] users.tenant_id retained as deprecated read-only shadow (not canonical membership source)
 - [ ] Migration is idempotent (safe to re-run)
 - [ ] All existing contract tests still pass
 - [ ] Zero data loss on ai_messages and session_handoffs

@@ -322,6 +322,20 @@ export class MemoryManager {
       `);
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id)`);
 
+      // ─── tenant_memberships (canonical membership model) ───
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS tenant_memberships (
+          user_id TEXT NOT NULL,
+          tenant_id TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'member',
+          created_at DATETIME DEFAULT (datetime('now')),
+          updated_at DATETIME DEFAULT (datetime('now')),
+          UNIQUE (tenant_id, user_id)
+        )
+      `);
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_tenant_memberships_user ON tenant_memberships(user_id)`);
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_tenant_memberships_tenant_role ON tenant_memberships(tenant_id, role)`);
+
       // ─── Add tenant_id + user_id to ai_messages if missing ───
       const aiCols = this.db.prepare('PRAGMA table_info(ai_messages)').all() as any[];
       const aiColNames = aiCols.map((c: any) => c.name);
@@ -382,6 +396,18 @@ export class MemoryManager {
           VALUES ('tommy', 'default', 'Tommy', 'America/Chicago', 'en-US', 'YYYY-MM-DD', 'metric', '{"start":"09:00","end":"17:00"}')
         `).run();
         console.log('🔧 Migration 002: Bootstrap user "tommy" created');
+      }
+
+      // ─── Bootstrap membership (tommy, default, owner) ───
+      const existingMembership = this.db.prepare(
+        `SELECT user_id FROM tenant_memberships WHERE user_id = 'tommy' AND tenant_id = 'default'`
+      ).get();
+      if (!existingMembership) {
+        this.db.prepare(`
+          INSERT INTO tenant_memberships (user_id, tenant_id, role)
+          VALUES ('tommy', 'default', 'owner')
+        `).run();
+        console.log('🔧 Migration 002: Bootstrap membership (tommy, default, owner) created');
       }
 
     } catch (error) {
