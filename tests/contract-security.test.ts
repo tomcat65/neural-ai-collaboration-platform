@@ -106,26 +106,16 @@ describe('Security Contract Tests (NE-S6)', () => {
   // === Test 1: <neural_memory> wrapper tags ===
 
   describe('NE-S6a: neural_memory wrapper tags', () => {
-    it('get_agent_context response contains <neural_memory tags in unread messages', async () => {
+    it('get_agent_context returns unread message count, not full messages', async () => {
       const bundle = await mcpCall('get_agent_context', {
         agentId: testAgentId,
       });
 
-      expect(bundle.unreadMessages.length).toBeGreaterThan(0);
-
-      // Check that at least one unread message content has the wrapper
-      const hasWrapper = bundle.unreadMessages.some((m: any) =>
-        typeof m.content === 'string' && m.content.includes('<neural_memory')
-      );
-      expect(hasWrapper).toBe(true);
-
-      // Verify wrapper structure
-      const firstWrapped = bundle.unreadMessages.find((m: any) =>
-        typeof m.content === 'string' && m.content.includes('<neural_memory')
-      );
-      expect(firstWrapped.content).toContain('source="message"');
-      expect(firstWrapped.content).toContain('trust="agent"');
-      expect(firstWrapped.content).toContain('</neural_memory>');
+      // Phase 0: messages replaced with count + hint (agents pull via get_ai_messages)
+      expect(bundle.unreadMessages).toBeDefined();
+      expect(typeof bundle.unreadMessages.count).toBe('number');
+      expect(bundle.unreadMessages.count).toBeGreaterThan(0);
+      expect(bundle.unreadMessages.hint).toContain('get_ai_messages');
     });
 
     it('get_agent_context wraps identity learnings with trust="identity"', async () => {
@@ -451,16 +441,15 @@ describe('Security Contract Tests (NE-S6)', () => {
       expect(bundle.handoff).toBeNull();
     });
 
-    it('messages use trust="agent", not trust="verified"', async () => {
+    it('unreadMessages is count-only (no full message content leaked)', async () => {
       const bundle = await mcpCall('get_agent_context', {
         agentId: testAgentId,
       });
 
-      if (bundle.unreadMessages.length > 0) {
-        const msg = bundle.unreadMessages[0];
-        expect(msg.content).toContain('trust="agent"');
-        expect(msg.content).not.toContain('trust="verified"');
-      }
+      // Must be { count, hint }, not an array of message objects
+      expect(Array.isArray(bundle.unreadMessages)).toBe(false);
+      expect(typeof bundle.unreadMessages.count).toBe('number');
+      expect(bundle.unreadMessages.hint).toBeDefined();
     });
   });
 

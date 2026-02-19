@@ -1316,7 +1316,7 @@ export class MemoryManager {
       identity: { learnings: [] },
       project: null,
       handoff: null,
-      unreadMessages: [],
+      unreadMessages: { count: 0, hint: 'Use get_ai_messages(agentId) to retrieve' },
       guardrails: [],
       meta: { depth, tokenEstimate: 0 }
     };
@@ -1334,16 +1334,13 @@ export class MemoryManager {
       );
     }
 
-    // 2. Unread messages
+    // 2. Unread messages — count only (agents pull via get_ai_messages when needed)
     try {
-      bundle.unreadMessages = this.getMessages(agentId, { unreadOnly: true, limit: 20 }).map((m: any) => ({
-        id: m.id,
-        from: m.from_agent,
-        content: MemoryManager.wrapContent(m.content, 'message', m.from_agent || 'unknown', 'agent'),
-        type: m.message_type,
-        priority: m.priority,
-        timestamp: m.created_at,
-      }));
+      const unreadRows = this.getMessages(agentId, { unreadOnly: true, limit: 100 });
+      bundle.unreadMessages = {
+        count: unreadRows.length,
+        hint: 'Use get_ai_messages(agentId) to retrieve',
+      };
     } catch { /* ai_messages table may not exist */ }
 
     // 3. Guardrails — entities of type 'guardrail'
@@ -1421,7 +1418,7 @@ export class MemoryManager {
         const obsRows = this.db.prepare(
           `SELECT id, content, created_at FROM shared_memory
            WHERE memory_type = 'observation' AND LOWER(content) LIKE ?
-           AND created_at >= ? ORDER BY created_at DESC LIMIT 20`
+           AND created_at >= ? ORDER BY created_at DESC LIMIT 3`
         ).all(`%${projectId.toLowerCase()}%`, thirtyDaysAgo) as any[];
         bundle.project.recentObservations = obsRows.map((r: any) => {
           try {
