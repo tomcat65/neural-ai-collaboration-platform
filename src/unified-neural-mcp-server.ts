@@ -980,6 +980,7 @@ export class NeuralMCPServer {
               existing.sources = Array.from(new Set([...(existing.sources || []), result.memorySource]));
             }
           }
+          const dedupCount = dedupMap.size;
           const enhancedResults = Array.from(dedupMap.values()).slice(0, limit);
 
           const hasChunked = enhancedResults.some((r: any) => r.chunked);
@@ -992,7 +993,7 @@ export class NeuralMCPServer {
                   searchType,
                   totalResults: enhancedResults.length,
                   ...(hasChunked ? { chunkedResults: enhancedResults.filter((r: any) => r.chunked).length } : {}),
-                  deduplicated: scoredResults.length !== enhancedResults.length,
+                  deduplicated: scoredResults.length !== dedupCount,
                   preDeduplicationCount: scoredResults.length,
                   results: enhancedResults,
                 }, null, 2),
