@@ -941,7 +941,9 @@ export class NeuralMCPServer {
           // Basic search for now, but structured for advanced features (tenant-scoped)
           const searchResults = await this.memoryManager.search(query, { shared: true }, tenantId);
           
-          const scoredResults = searchResults.slice(0, limit).map((result: any) => {
+          // Score ALL results first, then dedup, then slice to limit
+          // (dedup before slice so highest-scoring duplicate is never lost)
+          const scoredResults = searchResults.map((result: any) => {
             const nameMatch = result.content?.name?.toLowerCase().includes(query.toLowerCase());
             const typeMatch = result.content?.type?.toLowerCase().includes(query.toLowerCase());
             const score = nameMatch ? 1.0 : typeMatch ? 0.8 : 0.6;
@@ -978,7 +980,7 @@ export class NeuralMCPServer {
               existing.sources = Array.from(new Set([...(existing.sources || []), result.memorySource]));
             }
           }
-          const enhancedResults = Array.from(dedupMap.values());
+          const enhancedResults = Array.from(dedupMap.values()).slice(0, limit);
 
           const hasChunked = enhancedResults.some((r: any) => r.chunked);
           return {
