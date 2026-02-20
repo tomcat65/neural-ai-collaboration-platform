@@ -156,24 +156,34 @@ export class WeaviateClient {
         whereFilter.tenantId = effectiveTenantId;
       }
 
+      // Build Weaviate where clause for tenant isolation
+      const tenantWhere = effectiveTenantId
+        ? { path: ['tenantId'], operator: 'Equal' as const, valueText: effectiveTenantId }
+        : undefined;
+
       let result: any;
       try {
         // Preferred: vector semantic search
-        result = await this.client.graphql
+        let builder = this.client.graphql
           .get()
           .withClassName(this.className)
-          .withFields('agentId memoryType content timestamp tags priority relationships _additional { id score }')
+          .withFields('agentId tenantId memoryType content timestamp tags priority relationships _additional { id score }')
           // @ts-ignore types for nearText depend on module
           .withNearText({ concepts: [query] })
-          .withLimit(searchLimit)
-          .do();
+          .withLimit(searchLimit);
+        if (tenantWhere) builder = builder.withWhere(tenantWhere);
+        result = await builder.do();
       } catch (e) {
         // Fallback: LIKE text search if vectorizer/module not available
+        const contentFilter = { path: ['content'], operator: 'Like' as const, valueText: `*${query}*` };
+        const combinedWhere = tenantWhere
+          ? { operator: 'And' as const, operands: [tenantWhere, contentFilter] }
+          : contentFilter;
         result = await this.client.graphql
           .get()
           .withClassName(this.className)
-          .withFields('agentId memoryType content timestamp tags priority relationships _additional { id }')
-          .withWhere({ path: ['content'], operator: 'Like', valueText: `*${query}*` })
+          .withFields('agentId tenantId memoryType content timestamp tags priority relationships _additional { id }')
+          .withWhere(combinedWhere)
           .withLimit(searchLimit)
           .do();
       }
@@ -181,6 +191,7 @@ export class WeaviateClient {
       return result.data.Get[this.className].map((item: any) => ({
         id: item._additional.id,
         agentId: item.agentId,
+        tenantId: item.tenantId || 'default',
         type: item.memoryType as MemoryType,
         content: item.content,
         timestamp: new Date(item.timestamp).getTime(), // Convert to number

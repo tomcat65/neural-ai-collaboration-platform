@@ -35,6 +35,9 @@ import {
 export class MemoryManager {
   private db: Database.Database;
   private memorySystem: MemorySystem;
+
+  /** Expose database reference for tenant resolver initialization */
+  getDb(): Database.Database { return this.db; }
   public weaviateClient?: WeaviateClient;
   private isAdvancedSystemsEnabled: boolean = false;
   private isDualWriteEnabled: boolean = false;
@@ -453,24 +456,28 @@ export class MemoryManager {
   }
 
   private loadMemoryFromDatabase(): void {
-    // Load individual memory
+    // Load individual memory with tenant-scoped composite cache keys
     const individualStmt = this.db.prepare(`
-      SELECT agent_id, memory_type, content, importance, tags, created_at, updated_at
+      SELECT agent_id, COALESCE(tenant_id, 'default') as tenant_id, memory_type, content, importance, tags, created_at, updated_at
       FROM individual_memory
       ORDER BY agent_id, importance DESC
     `);
 
     const individualRows = individualStmt.all() as any[];
-    const agentGroups = new Map<string, any[]>();
+    // Group by composite key tenantId:agentId for tenant isolation
+    const agentGroups = new Map<string, { agentId: string; rows: any[] }>();
 
     for (const row of individualRows) {
-      if (!agentGroups.has((row as any).agent_id)) {
-        agentGroups.set((row as any).agent_id, []);
+      const tenantId = row.tenant_id || 'default';
+      const agentId = row.agent_id;
+      const cacheKey = `${tenantId}:${agentId}`;
+      if (!agentGroups.has(cacheKey)) {
+        agentGroups.set(cacheKey, { agentId, rows: [] });
       }
-      agentGroups.get((row as any).agent_id)!.push(row);
+      agentGroups.get(cacheKey)!.rows.push(row);
     }
 
-    for (const [agentId, rows] of agentGroups) {
+    for (const [cacheKey, { agentId, rows }] of agentGroups) {
       const memory: IndividualMemory = {
         agentId,
         preferences: {} as AgentPreferences,
@@ -497,7 +504,7 @@ export class MemoryManager {
         }
       }
 
-      this.memorySystem.individual.set(agentId, memory);
+      this.memorySystem.individual.set(cacheKey, memory);
     }
 
     // Load shared memory
@@ -660,28 +667,30 @@ export class MemoryManager {
     });
   }
 
-  async store(agentId: string, memory: any, scope: 'individual' | 'shared', type: string): Promise<string> {
+  async store(agentId: string, memory: any, scope: 'individual' | 'shared', type: string, tenantId: string = 'default'): Promise<string> {
     const id = uuidv4();
-    
+
     // 1. Store in SQLite (primary storage)
     if (scope === 'individual') {
       const stmt = this.db.prepare(`
-        INSERT INTO individual_memory (id, agent_id, memory_type, content, importance, tags)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO individual_memory (id, agent_id, tenant_id, memory_type, content, importance, tags)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
       `);
-      
+
       stmt.run(
         id,
         agentId,
+        tenantId,
         type,
         JSON.stringify(memory),
         (memory && memory.importance) || 0.5,
         JSON.stringify((memory && memory.tags) || [])
       );
 
-      // Update in-memory cache
-      if (!this.memorySystem.individual.has(agentId)) {
-        this.memorySystem.individual.set(agentId, {
+      // Update in-memory cache (tenant-scoped cache key: tenantId:agentId)
+      const cacheKey = `${tenantId}:${agentId}`;
+      if (!this.memorySystem.individual.has(cacheKey)) {
+        this.memorySystem.individual.set(cacheKey, {
           agentId,
           preferences: {} as AgentPreferences,
           learnings: [],
@@ -690,7 +699,7 @@ export class MemoryManager {
         });
       }
 
-      const agentMemory = this.memorySystem.individual.get(agentId)!;
+      const agentMemory = this.memorySystem.individual.get(cacheKey)!;
       switch (type) {
         case 'preferences':
           agentMemory.preferences = memory;
@@ -708,12 +717,13 @@ export class MemoryManager {
       
     } else {
       const stmt = this.db.prepare(`
-        INSERT INTO shared_memory (id, memory_type, content, created_by, tags)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO shared_memory (id, tenant_id, memory_type, content, created_by, tags)
+        VALUES (?, ?, ?, ?, ?, ?)
       `);
 
       stmt.run(
         id,
+        tenantId,
         type,
         JSON.stringify(memory || {}),
         agentId,
@@ -745,20 +755,21 @@ export class MemoryManager {
 
     // 2. Store in advanced systems if available (skip ai_message — stored in dedicated table)
     if (this.isAdvancedSystemsEnabled && type !== 'ai_message') {
-      await this.storeInAdvancedSystems(id, agentId, memory, scope, type);
+      await this.storeInAdvancedSystems(id, agentId, memory, scope, type, tenantId);
     }
 
     console.log(`💾 Stored ${scope} memory (${type}) for agent ${agentId}${this.isAdvancedSystemsEnabled ? ' [Multi-DB]' : ' [SQLite]'}`);
     return id;
   }
 
-  private async storeInAdvancedSystems(id: string, agentId: string, memory: any, scope: string, type: string): Promise<void> {
+  private async storeInAdvancedSystems(id: string, agentId: string, memory: any, scope: string, type: string, tenantId: string = 'default'): Promise<void> {
     try {
-      // Store in Weaviate for semantic search
+      // Store in Weaviate for semantic search (tenant-scoped)
       if (this.weaviateClient) {
         await this.weaviateClient.storeMemory({
           id,
           agentId,
+          tenantId,
           type: type as any,
           content: typeof memory === 'string' ? memory : JSON.stringify(memory),
           timestamp: Date.now(),
@@ -960,7 +971,7 @@ export class MemoryManager {
     console.log(`🤝 Shared memory from ${fromAgent} to ${toAgent}`);
   }
 
-  async search(query: string, scope: MemoryScope | string): Promise<SearchResult[]> {
+  async search(query: string, scope: MemoryScope | string, tenantId: string = 'default'): Promise<SearchResult[]> {
     const results: SearchResult[] = [];
     const searchTerm = query.toLowerCase();
     
@@ -983,54 +994,25 @@ export class MemoryManager {
       searchScope = scope;
     }
 
-    // 2. Enhanced search with advanced systems
+    // 2. Enhanced search with advanced systems (tenant-scoped)
     if (this.isAdvancedSystemsEnabled) {
-      await this.searchInAdvancedSystems(query, searchScope, results);
+      await this.searchInAdvancedSystems(query, searchScope, results, tenantId);
     }
 
-    // Search in-memory data first
+    // NOTE: In-memory caches (memorySystem.individual) are NOT tenant-scoped.
+    // All search uses SQL paths below which ARE tenant-scoped.
     if (searchScope.individual) {
-      for (const [agentId, memory] of this.memorySystem.individual) {
-        // Search in learnings and private context
-        for (const learning of memory.learnings) {
-          if (learning.lesson.toLowerCase().includes(searchTerm) ||
-              learning.context.toLowerCase().includes(searchTerm)) {
-            results.push({
-              id: learning.id,
-              type: 'individual',
-              content: learning,
-              relevance: 0.8,
-              source: agentId,
-              timestamp: learning.timestamp
-            });
-          }
-        }
-
-        for (const context of memory.privateContext) {
-          if (context.content.toLowerCase().includes(searchTerm)) {
-            results.push({
-              id: context.id,
-              type: 'individual',
-              content: context,
-              relevance: context.importance,
-              source: agentId,
-              timestamp: context.createdAt
-            });
-          }
-        }
-      }
-      
-      // Search individual_memory table directly
+      // Search individual_memory table directly (tenant-scoped)
       try {
         const individualStmt = this.db.prepare(`
-          SELECT id, agent_id, memory_type, content, importance, created_at 
-          FROM individual_memory 
-          WHERE LOWER(content) LIKE ? 
-          ORDER BY importance DESC 
+          SELECT id, agent_id, memory_type, content, importance, created_at
+          FROM individual_memory
+          WHERE tenant_id = ? AND LOWER(content) LIKE ?
+          ORDER BY importance DESC
           LIMIT 50
         `);
-        
-        const individualRows = individualStmt.all(`%${searchTerm}%`) as any[];
+
+        const individualRows = individualStmt.all(tenantId, `%${searchTerm}%`) as any[];
         
         for (const row of individualRows) {
           try {
@@ -1061,47 +1043,20 @@ export class MemoryManager {
     }
 
     if (searchScope.shared) {
-      // Search in shared knowledge
-      for (const knowledge of this.memorySystem.shared.knowledge) {
-        if (knowledge.title.toLowerCase().includes(searchTerm) ||
-            knowledge.content.toLowerCase().includes(searchTerm)) {
-          results.push({
-            id: knowledge.id,
-            type: 'shared',
-            content: knowledge,
-            relevance: knowledge.confidence,
-            source: knowledge.source,
-            timestamp: knowledge.createdAt
-          });
-        }
-      }
+      // NOTE: In-memory caches (memorySystem.shared.knowledge, tasks) are NOT tenant-scoped.
+      // All search uses SQL paths below which ARE tenant-scoped.
 
-      // Search in tasks
-      for (const task of this.memorySystem.shared.tasks.tasks.values()) {
-        if (task.title.toLowerCase().includes(searchTerm) ||
-            task.description.toLowerCase().includes(searchTerm)) {
-          results.push({
-            id: task.id,
-            type: 'shared',
-            content: task,
-            relevance: 0.7,
-            source: task.createdBy,
-            timestamp: task.createdAt
-          });
-        }
-      }
-      
-      // Search shared_memory table with smart chunking for large content
+      // Search shared_memory table with smart chunking for large content (tenant-scoped)
       try {
         // Phase 1: Query with content size to identify large rows
         const sizeStmt = this.db.prepare(`
           SELECT id, memory_type, LENGTH(content) as content_size, created_by, created_at
           FROM shared_memory
-          WHERE LOWER(content) LIKE ?
+          WHERE tenant_id = ? AND LOWER(content) LIKE ?
           ORDER BY created_at DESC
           LIMIT 50
         `);
-        const sizeRows = sizeStmt.all(`%${searchTerm}%`) as any[];
+        const sizeRows = sizeStmt.all(tenantId, `%${searchTerm}%`) as any[];
 
         // Phase 2: Fetch full content for small rows, truncated for large rows
         const threshold = this.contentSizeThreshold;
@@ -1159,17 +1114,17 @@ export class MemoryManager {
         console.warn('🔍 Database search error for shared memory:', dbError);
       }
       
-      // Search shared_knowledge table directly
+      // Search shared_knowledge table directly (tenant-scoped)
       try {
         const knowledgeStmt = this.db.prepare(`
-          SELECT id, title, content, type, source, confidence, created_at 
-          FROM shared_knowledge 
-          WHERE LOWER(title) LIKE ? OR LOWER(content) LIKE ?
-          ORDER BY confidence DESC 
+          SELECT id, title, content, type, source, confidence, created_at
+          FROM shared_knowledge
+          WHERE tenant_id = ? AND (LOWER(title) LIKE ? OR LOWER(content) LIKE ?)
+          ORDER BY confidence DESC
           LIMIT 50
         `);
-        
-        const knowledgeRows = knowledgeStmt.all(`%${searchTerm}%`, `%${searchTerm}%`) as any[];
+
+        const knowledgeRows = knowledgeStmt.all(tenantId, `%${searchTerm}%`, `%${searchTerm}%`) as any[];
         
         for (const row of knowledgeRows) {
           results.push({
@@ -1192,17 +1147,17 @@ export class MemoryManager {
         console.warn('🔍 Database search error for shared knowledge:', dbError);
       }
       
-      // Search tasks table directly
+      // Search tasks table directly (tenant-scoped)
       try {
         const tasksStmt = this.db.prepare(`
-          SELECT id, title, description, status, created_by, created_at 
-          FROM tasks 
-          WHERE LOWER(title) LIKE ? OR LOWER(description) LIKE ?
-          ORDER BY created_at DESC 
+          SELECT id, title, description, status, created_by, created_at
+          FROM tasks
+          WHERE tenant_id = ? AND (LOWER(title) LIKE ? OR LOWER(description) LIKE ?)
+          ORDER BY created_at DESC
           LIMIT 50
         `);
-        
-        const taskRows = tasksStmt.all(`%${searchTerm}%`, `%${searchTerm}%`) as any[];
+
+        const taskRows = tasksStmt.all(tenantId, `%${searchTerm}%`, `%${searchTerm}%`) as any[];
         
         for (const row of taskRows) {
           results.push({
@@ -1238,13 +1193,16 @@ export class MemoryManager {
     return finalResults;
   }
 
-  private async searchInAdvancedSystems(query: string, scope: MemoryScope, results: SearchResult[]): Promise<void> {
+  private async searchInAdvancedSystems(query: string, scope: MemoryScope, results: SearchResult[], tenantId: string = 'default'): Promise<void> {
     try {
-      // 1. Semantic search with Weaviate
+      // 1. Semantic search with Weaviate (post-filtered by tenant)
       if (this.weaviateClient && scope.shared) {
-        console.log(`🔍 Performing semantic search with Weaviate: "${query}"`);
-        const weaviateResults = await this.weaviateClient.searchMemories(query);
-        
+        console.log(`🔍 Performing semantic search with Weaviate: "${query}" (tenant: ${tenantId})`);
+        const weaviateResults = await this.weaviateClient.searchMemories({
+          query,
+          tenantId,
+        });
+
         for (const wResult of weaviateResults) {
           results.push({
             id: wResult.id,
@@ -1272,15 +1230,17 @@ export class MemoryManager {
     return this.memorySystem;
   }
 
-  getAgentMemory(agentId: string): IndividualMemory | undefined {
-    return this.memorySystem.individual.get(agentId);
+  getAgentMemory(agentId: string, tenantId: string = 'default'): IndividualMemory | undefined {
+    // Cache key: tenantId:agentId for tenant isolation (no bare agentId fallback)
+    const cacheKey = `${tenantId}:${agentId}`;
+    return this.memorySystem.individual.get(cacheKey);
   }
 
   getSharedMemory(): SharedMemory {
     return this.memorySystem.shared;
   }
 
-  async recordLearning(agentId: string, context: string, lesson: string, confidence: number = 0.8): Promise<void> {
+  async recordLearning(agentId: string, context: string, lesson: string, confidence: number = 0.8, tenantId: string = 'default'): Promise<void> {
     const learning: LearningHistory = {
       id: uuidv4(),
       timestamp: new Date(),
@@ -1290,14 +1250,15 @@ export class MemoryManager {
       reinforcements: 1
     };
 
-    await this.store(agentId, learning, 'individual', 'learning');
+    await this.store(agentId, learning, 'individual', 'learning', tenantId);
   }
 
-  async updateAgentPreferences(agentId: string, preferences: Partial<AgentPreferences>): Promise<void> {
-    const currentMemory = this.memorySystem.individual.get(agentId);
+  async updateAgentPreferences(agentId: string, preferences: Partial<AgentPreferences>, tenantId: string = 'default'): Promise<void> {
+    const cacheKey = `${tenantId}:${agentId}`;
+    const currentMemory = this.memorySystem.individual.get(cacheKey);
     if (currentMemory) {
       currentMemory.preferences = { ...currentMemory.preferences, ...preferences };
-      await this.store(agentId, currentMemory.preferences, 'individual', 'preferences');
+      await this.store(agentId, currentMemory.preferences, 'individual', 'preferences', tenantId);
     }
   }
 
@@ -1427,7 +1388,8 @@ export class MemoryManager {
   getAgentContext(
     agentId: string,
     projectId?: string,
-    depth: 'hot' | 'warm' | 'cold' = projectId ? 'warm' : 'hot'
+    depth: 'hot' | 'warm' | 'cold' = projectId ? 'warm' : 'hot',
+    tenantId: string = 'default'
   ): any {
     const bundle: any = {
       identity: { learnings: [] },
@@ -1440,8 +1402,8 @@ export class MemoryManager {
 
     // --- HOT tier (always included) ---
 
-    // 1. Agent identity: learnings + preferences
-    const agentMem = this.memorySystem.individual.get(agentId);
+    // 1. Agent identity: learnings + preferences (tenant-scoped cache key, no bare agentId fallback)
+    const agentMem = this.memorySystem.individual.get(`${tenantId}:${agentId}`);
     if (agentMem) {
       bundle.identity.learnings = agentMem.learnings.slice(-20).map((l: any) => ({
         _wrapped: MemoryManager.wrapContent(JSON.stringify(l), 'learning', agentId, 'identity')
@@ -1451,25 +1413,25 @@ export class MemoryManager {
       );
     }
 
-    // 2. Unread messages — count only via SQL COUNT (no row limit ceiling)
+    // 2. Unread messages — count only via SQL COUNT (tenant-scoped)
     try {
       this.ensureReadAtColumn();
       const countRow = this.db.prepare(
-        'SELECT COUNT(*) as cnt FROM ai_messages WHERE to_agent = ? AND read_at IS NULL'
-      ).get(agentId) as any;
+        'SELECT COUNT(*) as cnt FROM ai_messages WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL'
+      ).get(agentId, tenantId) as any;
       bundle.unreadMessages = {
         count: countRow?.cnt ?? 0,
         hint: 'Use get_ai_messages(agentId) to retrieve',
       };
     } catch { /* ai_messages table may not exist */ }
 
-    // 3. Guardrails — entities of type 'guardrail'
+    // 3. Guardrails — entities of type 'guardrail' (tenant-scoped)
     try {
       const guardrailRows = this.db.prepare(
         `SELECT id, content, created_at FROM shared_memory
-         WHERE memory_type = 'entity' AND LOWER(content) LIKE '%"type":"guardrail"%'
+         WHERE tenant_id = ? AND memory_type = 'entity' AND LOWER(content) LIKE '%"type":"guardrail"%'
          ORDER BY created_at DESC LIMIT 10`
-      ).all() as any[];
+      ).all(tenantId) as any[];
       bundle.guardrails = guardrailRows.map((r: any) => {
         try {
           const parsed = JSON.parse(r.content);
@@ -1478,13 +1440,13 @@ export class MemoryManager {
       });
     } catch { /* ok */ }
 
-    // 4. HOT-tagged observations
+    // 4. HOT-tagged observations (tenant-scoped)
     try {
       const hotRows = this.db.prepare(
         `SELECT id, content, created_at FROM shared_memory
-         WHERE memory_type = 'observation' AND content LIKE '%[HOT]%'
+         WHERE tenant_id = ? AND memory_type = 'observation' AND content LIKE '%[HOT]%'
          ORDER BY created_at DESC LIMIT 20`
-      ).all() as any[];
+      ).all(tenantId) as any[];
       if (hotRows.length > 0) {
         if (!bundle.project) bundle.project = {};
         bundle.project.hotObservations = hotRows.map((r: any) => {
@@ -1496,9 +1458,9 @@ export class MemoryManager {
       }
     } catch { /* ok */ }
 
-    // 5. Handoff flag (filter consumed handoffs for context isolation)
+    // 5. Handoff flag (filter consumed handoffs for context isolation, tenant-scoped)
     if (projectId) {
-      const rawHandoff = this.getActiveHandoff(projectId);
+      const rawHandoff = this.getActiveHandoff(projectId, tenantId);
       const handoff = rawHandoff && !rawHandoff.consumedAt ? rawHandoff : null;
       if (handoff) {
         bundle.handoff = {
@@ -1517,13 +1479,13 @@ export class MemoryManager {
     if ((depth === 'warm' || depth === 'cold') && projectId) {
       if (!bundle.project) bundle.project = {};
 
-      // Project entity
+      // Project entity (tenant-scoped)
       try {
         const projRow = this.db.prepare(
           `SELECT id, content, created_at FROM shared_memory
-           WHERE memory_type = 'entity' AND LOWER(content) LIKE ?
+           WHERE tenant_id = ? AND memory_type = 'entity' AND LOWER(content) LIKE ?
            ORDER BY created_at DESC LIMIT 1`
-        ).get(`%"name":"${projectId.toLowerCase()}"%`) as any;
+        ).get(tenantId, `%"name":"${projectId.toLowerCase()}"%`) as any;
         if (projRow) {
           try {
             const projData = JSON.parse(projRow.content);
@@ -1534,14 +1496,14 @@ export class MemoryManager {
         }
       } catch { /* ok */ }
 
-      // Recent observations for project (30 days)
+      // Recent observations for project (30 days, tenant-scoped)
       try {
         const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString();
         const obsRows = this.db.prepare(
           `SELECT id, content, created_at FROM shared_memory
-           WHERE memory_type = 'observation' AND LOWER(content) LIKE ?
+           WHERE tenant_id = ? AND memory_type = 'observation' AND LOWER(content) LIKE ?
            AND created_at >= ? ORDER BY created_at DESC LIMIT 3`
-        ).all(`%${projectId.toLowerCase()}%`, thirtyDaysAgo) as any[];
+        ).all(tenantId, `%${projectId.toLowerCase()}%`, thirtyDaysAgo) as any[];
         bundle.project.recentObservations = obsRows.map((r: any) => {
           try {
             const parsed = JSON.parse(r.content);
@@ -1550,26 +1512,26 @@ export class MemoryManager {
         });
       } catch { /* ok */ }
 
-      // Recent decisions (last 5)
+      // Recent decisions (last 5, tenant-scoped)
       try {
         const decRows = this.db.prepare(
           `SELECT id, decision, reasoning, created_at FROM consensus_history
-           ORDER BY created_at DESC LIMIT 5`
-        ).all() as any[];
+           WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 5`
+        ).all(tenantId) as any[];
         bundle.project.recentDecisions = decRows.map((d: any) => ({
           _wrapped: MemoryManager.wrapContent(JSON.stringify(d), 'decision', projectId!, 'agent')
         }));
       } catch { /* ok */ }
     }
 
-    // --- COLD tier (everything) ---
+    // --- COLD tier (everything, tenant-scoped) ---
     if (depth === 'cold' && projectId) {
       try {
         const allObs = this.db.prepare(
           `SELECT id, content, created_at FROM shared_memory
-           WHERE memory_type = 'observation' AND LOWER(content) LIKE ?
+           WHERE tenant_id = ? AND memory_type = 'observation' AND LOWER(content) LIKE ?
            ORDER BY created_at DESC LIMIT 100`
-        ).all(`%${projectId.toLowerCase()}%`) as any[];
+        ).all(tenantId, `%${projectId.toLowerCase()}%`) as any[];
         bundle.project.allObservations = allObs.map((r: any) => {
           try {
             const parsed = JSON.parse(r.content);
@@ -1581,9 +1543,9 @@ export class MemoryManager {
       try {
         const allEntities = this.db.prepare(
           `SELECT id, content, created_at FROM shared_memory
-           WHERE memory_type = 'entity' AND LOWER(content) LIKE ?
+           WHERE tenant_id = ? AND memory_type = 'entity' AND LOWER(content) LIKE ?
            ORDER BY created_at DESC LIMIT 50`
-        ).all(`%${projectId.toLowerCase()}%`) as any[];
+        ).all(tenantId, `%${projectId.toLowerCase()}%`) as any[];
         bundle.project.allEntities = allEntities.map((r: any) => {
           try {
             const parsed = JSON.parse(r.content);
@@ -1622,11 +1584,11 @@ export class MemoryManager {
   /**
    * Get the active handoff flag for a project.
    */
-  getActiveHandoff(projectId: string): any | null {
+  getActiveHandoff(projectId: string, tenantId: string = 'default'): any | null {
     try {
       const row = this.db.prepare(
-        'SELECT * FROM session_handoffs WHERE project_id = ? AND active = 1'
-      ).get(projectId) as any;
+        'SELECT * FROM session_handoffs WHERE project_id = ? AND tenant_id = ? AND active = 1'
+      ).get(projectId, tenantId) as any;
       if (!row) return null;
       return {
         id: row.id,
@@ -1659,18 +1621,18 @@ export class MemoryManager {
    * Write a new handoff flag, deactivating any previous one for the same project.
    * Runs in a single transaction for atomicity.
    */
-  writeHandoff(projectId: string, fromAgent: string, summary: string, openItems?: string[]): string {
+  writeHandoff(projectId: string, fromAgent: string, summary: string, openItems?: string[], tenantId: string = 'default', userId?: string | null): string {
     const id = uuidv4();
     const txn = this.db.transaction(() => {
-      // Deactivate prior handoff
+      // Deactivate prior handoff (tenant-scoped)
       this.db.prepare(
-        'UPDATE session_handoffs SET active = 0 WHERE project_id = ? AND active = 1'
-      ).run(projectId);
-      // Insert new active handoff
+        'UPDATE session_handoffs SET active = 0 WHERE project_id = ? AND tenant_id = ? AND active = 1'
+      ).run(projectId, tenantId);
+      // Insert new active handoff with tenant_id and user_id (audit trail)
       this.db.prepare(
-        `INSERT INTO session_handoffs (id, project_id, from_agent, summary, open_items_json)
-         VALUES (?, ?, ?, ?, ?)`
-      ).run(id, projectId, fromAgent, summary, openItems ? JSON.stringify(openItems) : null);
+        `INSERT INTO session_handoffs (id, project_id, from_agent, summary, open_items_json, tenant_id, user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(id, projectId, fromAgent, summary, openItems ? JSON.stringify(openItems) : null, tenantId, userId || null);
     });
     txn();
     return id;
@@ -1680,13 +1642,13 @@ export class MemoryManager {
    * Ensure a project entity skeleton exists in shared_memory.
    * Returns the existing entity ID or creates a new one.
    */
-  ensureProjectEntity(agentId: string, projectId: string): string {
-    // Check if a project entity already exists
+  ensureProjectEntity(agentId: string, projectId: string, tenantId: string = 'default'): string {
+    // Check if a project entity already exists (tenant-scoped)
     const existing = this.db.prepare(
       `SELECT id FROM shared_memory
-       WHERE memory_type = 'entity' AND LOWER(content) LIKE ?
+       WHERE tenant_id = ? AND memory_type = 'entity' AND LOWER(content) LIKE ?
        LIMIT 1`
-    ).get(`%"name":"${projectId.toLowerCase()}"%`) as any;
+    ).get(tenantId, `%"name":"${projectId.toLowerCase()}"%`) as any;
 
     if (existing) return existing.id;
 
@@ -1701,9 +1663,9 @@ export class MemoryManager {
     };
 
     this.db.prepare(
-      `INSERT INTO shared_memory (id, memory_type, content, created_by, tags)
-       VALUES (?, 'entity', ?, ?, '["project"]')`
-    ).run(entityId, JSON.stringify(skeleton), agentId);
+      `INSERT INTO shared_memory (id, tenant_id, memory_type, content, created_by, tags)
+       VALUES (?, ?, 'entity', ?, ?, '["project"]')`
+    ).run(entityId, tenantId, JSON.stringify(skeleton), agentId);
 
     return entityId;
   }
@@ -1726,16 +1688,17 @@ export class MemoryManager {
     content: string,
     messageType: string = 'info',
     priority: string = 'normal',
-    metadata?: Record<string, any>
+    metadata?: Record<string, any>,
+    tenantId: string = 'default'
   ): Promise<string> {
     const id = uuidv4();
 
     try {
       const stmt = this.db.prepare(`
-        INSERT INTO ai_messages (id, from_agent, from_source, to_agent, content, message_type, priority, metadata)
-        VALUES (?, ?, 'direct', ?, ?, ?, ?, ?)
+        INSERT INTO ai_messages (id, from_agent, from_source, to_agent, content, message_type, priority, metadata, tenant_id)
+        VALUES (?, ?, 'direct', ?, ?, ?, ?, ?, ?)
       `);
-      stmt.run(id, from, to, content, messageType, priority, JSON.stringify(metadata || {}));
+      stmt.run(id, from, to, content, messageType, priority, JSON.stringify(metadata || {}), tenantId);
     } catch (err: any) {
       // Fallback: ai_messages table may not exist yet (pre-migration)
       if (err.message?.includes('no such table')) {
@@ -1753,7 +1716,7 @@ export class MemoryManager {
           timestamp: new Date().toISOString(),
           deliveryStatus: 'delivered',
           metadata: metadata || {},
-        }, 'shared', 'ai_message');
+        }, 'shared', 'ai_message', tenantId);
       }
       throw err;
     }
@@ -1764,6 +1727,7 @@ export class MemoryManager {
         await this.weaviateClient.storeMemory({
           id,
           agentId: from,
+          tenantId,
           type: 'ai_message' as any,
           content: content,
           timestamp: Date.now(),
@@ -1793,16 +1757,18 @@ export class MemoryManager {
       limit?: number;
       unreadOnly?: boolean;
       markAsRead?: boolean;
+      tenantId?: string;
     } = {}
   ): any[] {
     const limit = options.limit || 50;
+    const tenantId = options.tenantId || 'default';
 
     try {
       // Ensure read_at column exists (idempotent migration)
       this.ensureReadAtColumn();
 
-      let query = 'SELECT * FROM ai_messages WHERE to_agent = ?';
-      const params: any[] = [agentId];
+      let query = 'SELECT * FROM ai_messages WHERE to_agent = ? AND tenant_id = ?';
+      const params: any[] = [agentId, tenantId];
 
       if (options.messageType) {
         query += ' AND message_type = ?';

@@ -16,8 +16,13 @@ import {
   messageRateLimitMiddleware,
   validateBody,
   validateRawBody,
-  getRateLimiterStatus
+  getRateLimiterStatus,
+  setTenantResolver,
+  LocalTenantResolver,
+  DEFAULT_REQUEST_CONTEXT,
 } from './middleware/index.js';
+import type { RequestContext } from './middleware/index.js';
+import type { TenantRequest } from './middleware/index.js';
 import { metrics, sloMonitor, recordMCPLatency, startSLOMonitoring, correlationMiddleware, logger } from './observability/index.js';
 import { NotificationPort, SlackNotificationAdapter } from './notifications/index.js';
 
@@ -52,6 +57,14 @@ export class NeuralMCPServer {
     );
 
     this.notificationPort = new SlackNotificationAdapter();
+
+    // Initialize tenant resolver with DB reference for JWT auth
+    const resolver = new LocalTenantResolver(
+      this.memoryManager.getDb(),
+      process.env.AUTH0_CLAIMS_NAMESPACE || 'https://neural-mcp.local/'
+    );
+    setTenantResolver(resolver);
+
     this.setupToolHandlers();
     this.setupExpressServer();
     this.registerWithUnifiedServer();
@@ -307,7 +320,8 @@ export class NeuralMCPServer {
       try {
         const { toolName } = req.params;
         const args = req.body;
-        const result = await this._handleToolCall(toolName, args);
+        const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+        const result = await this._handleToolCall(toolName, args, context);
         res.json(result);
       } catch (error) {
         res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
@@ -370,9 +384,11 @@ export class NeuralMCPServer {
             result = await this._handleToolsList();
             break;
             
-          case 'tools/call':
-            result = await this._handleToolCall(params.name, params.arguments);
+          case 'tools/call': {
+            const mcpContext = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+            result = await this._handleToolCall(params.name, params.arguments, mcpContext);
             break;
+          }
             
           default:
             return res.json({
@@ -455,12 +471,15 @@ export class NeuralMCPServer {
         }
         console.log(`💬 AI Message: ${from || 'system'} → ${to}: ${actualMessage}`);
 
+        const reqContext = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
         const messageId = await this.memoryManager.storeMessage(
           from || 'system',
           to,
           actualMessage,
           type || 'direct',
-          'normal'
+          'normal',
+          undefined,
+          reqContext.tenantId
         );
 
         await this.publishEventToUnified('ai.message', {
@@ -492,12 +511,14 @@ export class NeuralMCPServer {
           unreadOnly?: string; markAsRead?: string;
         };
 
+        const msgReqContext = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
         const rawMessages = this.memoryManager.getMessages(agentId, {
           messageType,
           since,
           limit: limit ? parseInt(limit, 10) : 50,
           unreadOnly: unreadOnly === 'true',
           markAsRead: markAsRead === 'true',
+          tenantId: msgReqContext.tenantId,
         });
 
         const messages = rawMessages.map((msg: any) => ({
@@ -663,10 +684,10 @@ export class NeuralMCPServer {
       return await this._handleToolsList();
     });
 
-    // Handle tool calls
+    // Handle tool calls (MCP SDK transport — no HTTP request, use default context)
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args = {} } = request.params;
-      return await this._handleToolCall(name, args);
+      return await this._handleToolCall(name, args, DEFAULT_REQUEST_CONTEXT);
     });
   }
 
@@ -817,9 +838,10 @@ export class NeuralMCPServer {
     };
   }
 
-  private async _handleToolCall(name: string, args: any = {}) {
+  private async _handleToolCall(name: string, args: any = {}, context: RequestContext = DEFAULT_REQUEST_CONTEXT) {
     try {
       const agent = args.agentId || this.agentId;
+      const tenantId = context.tenantId;
 
       switch (name) {
         // === MEMORY & KNOWLEDGE MANAGEMENT ===
@@ -854,7 +876,7 @@ export class NeuralMCPServer {
               }
             };
 
-            const entityId = await this.memoryManager.store(agent, entityData, 'shared', 'entity');
+            const entityId = await this.memoryManager.store(agent, entityData, 'shared', 'entity', tenantId);
 
             // NE-S6b: Audit log
             this.memoryManager.auditLog('create_entity', agent, JSON.stringify(entityData), entity.name);
@@ -886,9 +908,9 @@ export class NeuralMCPServer {
 
         case 'search_entities': {
           const { query, searchType = 'hybrid', limit = 50 } = args;
-          
-          // Basic search for now, but structured for advanced features
-          const searchResults = await this.memoryManager.search(query, { shared: true });
+
+          // Basic search for now, but structured for advanced features (tenant-scoped)
+          const searchResults = await this.memoryManager.search(query, { shared: true }, tenantId);
           
           const enhancedResults = searchResults.slice(0, limit).map((result: any) => {
             const nameMatch = result.content?.name?.toLowerCase().includes(query.toLowerCase());
@@ -930,7 +952,7 @@ export class NeuralMCPServer {
           // Legacy alias for graph-only search. Prefer `search_entities` with searchType:'graph'.
           const { query, limit = 50 } = args;
           const searchType = 'graph';
-          const searchResults = await this.memoryManager.search(query, { shared: true });
+          const searchResults = await this.memoryManager.search(query, { shared: true }, tenantId);
           const enhancedResults = searchResults.slice(0, limit).map((result: any) => {
             const nameMatch = result.content?.name?.toLowerCase().includes(query.toLowerCase());
             const typeMatch = result.content?.type?.toLowerCase().includes(query.toLowerCase());
@@ -989,7 +1011,7 @@ export class NeuralMCPServer {
             }
           }
 
-          await this.memoryManager.recordLearning(targetAgent, context, lesson, confidence);
+          await this.memoryManager.recordLearning(targetAgent, context, lesson, confidence, tenantId);
           await this.publishEventToUnified('agent.learning.recorded', { agent: targetAgent, context, lesson, confidence });
           return { content: [{ type: 'text', text: JSON.stringify({ status: 'ok' }) }] };
         }
@@ -997,34 +1019,34 @@ export class NeuralMCPServer {
         case 'set_preferences': {
           const targetAgent = args.agentId || agent;
           const { preferences = {} } = args;
-          await this.memoryManager.updateAgentPreferences(targetAgent, preferences);
+          await this.memoryManager.updateAgentPreferences(targetAgent, preferences, tenantId);
           return { content: [{ type: 'text', text: JSON.stringify({ status: 'ok' }) }] };
         }
 
         case 'get_individual_memory': {
           const targetAgent = args.agentId || agent;
-          const mem = this.memoryManager.getAgentMemory(targetAgent);
+          const mem = this.memoryManager.getAgentMemory(targetAgent, tenantId);
           return { content: [{ type: 'text', text: JSON.stringify(mem, null, 2) }] };
         }
 
         // === SESSION PROTOCOL TOOLS ===
         case 'get_agent_context': {
           const { agentId: ctxAgentId, projectId, depth } = args;
-          const bundle = this.memoryManager.getAgentContext(ctxAgentId, projectId, depth);
+          const bundle = this.memoryManager.getAgentContext(ctxAgentId, projectId, depth, tenantId);
           return { content: [{ type: 'text', text: JSON.stringify(bundle, null, 2) }] };
         }
 
         case 'begin_session': {
           const { agentId: sessAgentId, projectId: sessProjectId } = args;
 
-          // Ensure project entity exists
-          this.memoryManager.ensureProjectEntity(sessAgentId, sessProjectId);
+          // Ensure project entity exists (tenant-scoped)
+          this.memoryManager.ensureProjectEntity(sessAgentId, sessProjectId, tenantId);
 
-          // Load warm context
-          const context = this.memoryManager.getAgentContext(sessAgentId, sessProjectId, 'warm');
+          // Load warm context (tenant-scoped)
+          const sessContext = this.memoryManager.getAgentContext(sessAgentId, sessProjectId, 'warm', tenantId);
 
-          // Get handoff from previous session (idempotency: only return unconsumed handoffs)
-          const rawHandoff = this.memoryManager.getActiveHandoff(sessProjectId);
+          // Get handoff from previous session (tenant-scoped, idempotency: only return unconsumed handoffs)
+          const rawHandoff = this.memoryManager.getActiveHandoff(sessProjectId, tenantId);
           const handoff = rawHandoff && !rawHandoff.consumedAt ? rawHandoff : null;
           const handoffResponse = handoff ? {
             _wrapped: MemoryManager.wrapContent(handoff.summary, 'handoff', sessProjectId, 'agent'),
@@ -1060,7 +1082,7 @@ export class NeuralMCPServer {
                 agentId: sessAgentId,
                 projectId: sessProjectId,
                 handoff: handoffResponse,
-                context: context,
+                context: sessContext,
                 notificationStatus,
               }, null, 2)
             }]
@@ -1094,9 +1116,9 @@ export class NeuralMCPServer {
             }
           }
 
-          // Write handoff flag (deactivates prior, inserts new)
+          // Write handoff flag (deactivates prior, inserts new — tenant-scoped)
           const handoffId = this.memoryManager.writeHandoff(
-            endProjectId, endAgentId, endSummary, endOpenItems
+            endProjectId, endAgentId, endSummary, endOpenItems, tenantId, context.userId
           );
 
           // NE-S6b: Audit log
@@ -1120,7 +1142,8 @@ export class NeuralMCPServer {
                 endAgentId,
                 learning.context,
                 learning.lesson,
-                learning.confidence || 0.8
+                learning.confidence || 0.8,
+                tenantId
               );
             }
           }
@@ -1181,7 +1204,7 @@ export class NeuralMCPServer {
               }
             };
 
-            const observationId = await this.memoryManager.store(agent, observationData, 'shared', 'observation');
+            const observationId = await this.memoryManager.store(agent, observationData, 'shared', 'observation', tenantId);
 
             // NE-S6b: Audit log
             this.memoryManager.auditLog('add_observation', agent, JSON.stringify(observationData), obs.entityName);
@@ -1235,7 +1258,7 @@ export class NeuralMCPServer {
               }
             };
 
-            const relationId = await this.memoryManager.store(agent, relationData, 'shared', 'relation');
+            const relationId = await this.memoryManager.store(agent, relationData, 'shared', 'relation', tenantId);
 
             // NE-S6b: Audit log
             this.memoryManager.auditLog('create_relation', agent, JSON.stringify(relationData), `${relation.from}->${relation.to}`);
@@ -1262,7 +1285,7 @@ export class NeuralMCPServer {
         }
 
         case 'read_graph': {
-          const entities = await this.memoryManager.search('', { shared: true });
+          const entities = await this.memoryManager.search('', { shared: true }, tenantId);
           const entitiesOnly = entities.filter((e: any) => e.content?.type === 'entity');
           const relationsOnly = entities.filter((e: any) => e.content?.type === 'relation');
           const observationsOnly = entities.filter((e: any) => e.content?.type === 'observation');
@@ -1373,7 +1396,8 @@ export class NeuralMCPServer {
               content,
               messageType,
               priority,
-              messageData.metadata
+              messageData.metadata,
+              tenantId
             );
             results.push({ to: targetAgentId, messageId });
 
@@ -1423,13 +1447,14 @@ export class NeuralMCPServer {
         case 'get_ai_messages': {
           const { agentId: targetAgentId, limit = 50, messageType, since, unreadOnly, markAsRead } = args;
 
-          // P1: Use dedicated ai_messages table with indexed queries
+          // P1: Use dedicated ai_messages table with indexed queries (tenant-scoped)
           const rawMessages = this.memoryManager.getMessages(targetAgentId, {
             messageType,
             since,
             limit,
             unreadOnly,
             markAsRead,
+            tenantId,
           });
 
           // Transform to match existing response format for backward compatibility
@@ -1493,6 +1518,7 @@ export class NeuralMCPServer {
             }
           };
 
+          // Agent registrations are GLOBAL (not tenant-scoped per isolation policy)
           const registrationId = await this.memoryManager.store(agent, agentData, 'shared', 'agent_registration');
 
           // Simulate agent registration with unified server
@@ -1555,6 +1581,7 @@ export class NeuralMCPServer {
             timestamp: new Date().toISOString()
           };
 
+          // Agent identity is GLOBAL (not tenant-scoped per isolation policy)
           const identityId = await this.memoryManager.store(previousAgentId, identityRecord, 'shared', 'agent_identity');
 
           console.log(`🪪 Agent identity update recorded: ${previousAgentId} → ${updatedAgentId}`);
