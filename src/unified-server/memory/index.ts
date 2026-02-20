@@ -1847,7 +1847,7 @@ export class MemoryManager {
           timestamp: new Date().toISOString(),
           deliveryStatus: 'delivered',
           metadata: metadata || {},
-        }, 'shared', 'ai_message', tenantId);
+        }, 'shared', 'ai_message', tenantId, context);
       }
       throw err;
     }
@@ -2227,9 +2227,9 @@ export class MemoryManager {
       if (row.owner_actor_type === 'system') {
         return { allowed: false, reason: 'System-owned row requires admin role' };
       }
-      // Row owned by a different user → rejected
-      if (row.owner_actor_id !== userId) {
-        return { allowed: false, reason: `Row owned by ${row.owner_actor_id}, not by caller ${userId}` };
+      // Row owned by a different actor type or different user → rejected
+      if (row.owner_actor_type !== 'jwt' || row.owner_actor_id !== userId) {
+        return { allowed: false, reason: `Row owned by ${row.owner_actor_type}:${row.owner_actor_id}, not by jwt:${userId}` };
       }
     }
     return { allowed: true };
