@@ -188,6 +188,61 @@ describe('Codex Follow-ups', () => {
     });
   });
 
+  // === b2) authorizeGraphMutation scope denial (unit-level) ===
+  describe('authorizeGraphMutation scope denial', () => {
+    it('API key context without graph:write scope is rejected', async () => {
+      const { MemoryManager } = await import('../src/unified-server/memory/index.js');
+
+      // Craft a RequestContext that represents a valid API key but lacks graph:write scope
+      const context = {
+        tenantId: 'test-tenant',
+        userId: null,
+        authType: 'api_key' as const,
+        apiKeyId: 'key-no-write',
+        roles: [] as string[],
+        scopes: ['read:graph'],  // no graph:write or *
+      };
+
+      // Call authorizeGraphMutation on the prototype (static-like, no DB needed)
+      const result = MemoryManager.prototype.authorizeGraphMutation('delete_entity', context);
+      expect(result.authorized).toBe(false);
+      expect(result.reason).toContain('graph:write');
+    });
+
+    it('API key context with graph:write scope is accepted', async () => {
+      const { MemoryManager } = await import('../src/unified-server/memory/index.js');
+
+      const context = {
+        tenantId: 'test-tenant',
+        userId: null,
+        authType: 'api_key' as const,
+        apiKeyId: 'key-with-write',
+        roles: [] as string[],
+        scopes: ['graph:write'],
+      };
+
+      const result = MemoryManager.prototype.authorizeGraphMutation('delete_entity', context);
+      expect(result.authorized).toBe(true);
+    });
+
+    it('JWT without admin/owner/member role is rejected', async () => {
+      const { MemoryManager } = await import('../src/unified-server/memory/index.js');
+
+      const context = {
+        tenantId: 'test-tenant',
+        userId: 'auth0|viewer',
+        authType: 'jwt' as const,
+        apiKeyId: null,
+        roles: ['viewer'],  // not admin, owner, or member
+        scopes: ['graph:write'],
+      };
+
+      const result = MemoryManager.prototype.authorizeGraphMutation('delete_entity', context);
+      expect(result.authorized).toBe(false);
+      expect(result.reason).toContain('admin');
+    });
+  });
+
   // === c) Tombstone table exists ===
   describe('Tombstone table (failed_weaviate_deletes)', () => {
     it('health endpoint confirms server is running (tombstone table created at init)', async () => {

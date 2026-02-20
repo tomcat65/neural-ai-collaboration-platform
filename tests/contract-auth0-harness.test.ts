@@ -227,6 +227,7 @@ describe('Member Ownership Enforcement (dev mode)', () => {
   const entityName = `_auth0_test_entity_${Date.now()}`;
 
   beforeAll(async () => {
+    if (!DEV_MODE) return; // skip setup when dev-mode tests won't run
     const health = await httpGet('/health');
     expect(health.status).toBe('healthy');
   });
