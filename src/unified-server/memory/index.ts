@@ -2118,14 +2118,12 @@ export class MemoryManager {
       return { authorized: true };
     }
 
-    // API key auth → authorized if scopes include '*' or 'graph:write',
-    // or empty scopes (legacy admin backward compat)
+    // API key auth → require explicit graph:write or * scope
     if (context.authType === 'api_key') {
-      if (
-        context.scopes.length === 0 ||
-        context.scopes.includes('*') ||
-        context.scopes.includes('graph:write')
-      ) {
+      const scopes = context.scopes || [];
+      const hasWrite = scopes.includes('*') || scopes.includes('graph:write');
+      const allowLegacy = process.env.ALLOW_LEGACY_GRAPH_MUTATIONS === '1';
+      if (hasWrite || (allowLegacy && scopes.length === 0)) {
         return { authorized: true };
       }
       return { authorized: false, reason: 'API key lacks graph:write scope' };
@@ -2233,6 +2231,11 @@ export class MemoryManager {
       }
     }
 
+    // Fire-and-forget: drain any pending tombstones while we're at it
+    if (weaviateFailures > 0) {
+      void this.retryFailedWeaviateDeletes(25).catch(() => {});
+    }
+
     return { deleted: result.changes, weaviateCleanup, weaviateFailures };
   }
 
@@ -2246,9 +2249,9 @@ export class MemoryManager {
     contentIndex: number | undefined,
     tenantId: string
   ): Promise<{ updated: boolean; weaviateReindexed: boolean }> {
-    // Fetch current row
+    // Fetch current row (constrained to observations only)
     const row = this.db.prepare(
-      'SELECT id, content, created_by FROM shared_memory WHERE id = ? AND tenant_id = ?'
+      "SELECT id, content, created_by FROM shared_memory WHERE id = ? AND tenant_id = ? AND memory_type = 'observation'"
     ).get(obsId, tenantId) as any;
     if (!row) throw new Error(`Observation ${obsId} not found`);
 
@@ -2273,10 +2276,11 @@ export class MemoryManager {
       updatedContentObj.contents = [newContent];
     }
 
-    // Update SQLite
-    this.db.prepare(
-      'UPDATE shared_memory SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
-    ).run(JSON.stringify(updatedContentObj), obsId);
+    // Update SQLite (tenant + type guard, verify exactly 1 row)
+    const upd = this.db.prepare(
+      "UPDATE shared_memory SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND tenant_id = ? AND memory_type = 'observation'"
+    ).run(JSON.stringify(updatedContentObj), obsId, tenantId);
+    if (upd.changes !== 1) throw new Error(`Observation ${obsId} not found`);
 
     // Weaviate: delete + reinsert for vector re-embedding
     let weaviateReindexed = false;
@@ -2304,6 +2308,8 @@ export class MemoryManager {
              VALUES (?, ?, ?, ?)`
           ).run(uuidv4(), obsId, tenantId, err?.message || 'unknown');
         } catch { /* non-fatal */ }
+        // Fire-and-forget: drain pending tombstones
+        void this.retryFailedWeaviateDeletes(25).catch(() => {});
       }
     }
 
@@ -2343,5 +2349,40 @@ export class MemoryManager {
     } catch (e: any) {
       console.error(`⚠️ Mutation audit log write failed (non-fatal): ${e.message}`);
     }
+  }
+
+  /**
+   * Retry failed Weaviate deletes from the tombstone queue.
+   * Processes oldest-first, removes on success, bumps retry_count on failure.
+   */
+  async retryFailedWeaviateDeletes(limit = 100): Promise<{ attempted: number; succeeded: number; failed: number }> {
+    if (!this.weaviateClient) return { attempted: 0, succeeded: 0, failed: 0 };
+
+    const rows = this.db.prepare(
+      `SELECT id, weaviate_id, tenant_id, retry_count
+       FROM failed_weaviate_deletes
+       ORDER BY failed_at ASC
+       LIMIT ?`
+    ).all(limit) as any[];
+
+    let succeeded = 0;
+    let failed = 0;
+    for (const row of rows) {
+      try {
+        await this.weaviateClient.deleteMemory(row.weaviate_id);
+        this.db.prepare('DELETE FROM failed_weaviate_deletes WHERE id = ?').run(row.id);
+        succeeded++;
+      } catch (err: any) {
+        failed++;
+        this.db.prepare(
+          `UPDATE failed_weaviate_deletes
+           SET retry_count = retry_count + 1,
+               last_error = ?,
+               failed_at = CURRENT_TIMESTAMP
+           WHERE id = ?`
+        ).run(err?.message || 'unknown', row.id);
+      }
+    }
+    return { attempted: rows.length, succeeded, failed };
   }
 }

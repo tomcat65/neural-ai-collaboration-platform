@@ -4,3 +4,4 @@ services:
   unified-neural-mcp:
     environment:
       - ENABLE_ADMIN_ENDPOINTS=1
+      - ALLOW_LEGACY_GRAPH_MUTATIONS=1
