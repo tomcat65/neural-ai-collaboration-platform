@@ -59,13 +59,15 @@ export function buildContextFromApiKey(
   apiKeyRecord?: ApiKeyRecord,
 ): RequestContext {
   if (tenant && apiKeyRecord) {
+    // Phase B: propagate isAdmin into roles so authorizeGraphMutation can check role-based access
+    const roles: string[] = apiKeyRecord.isAdmin ? ['admin'] : [];
     return {
       tenantId: tenant.id,
       userId: null, // API keys don't carry user identity (until key migration)
       authType: 'api_key',
       apiKeyId: apiKeyRecord.id,
       idpSub: null,
-      roles: [],
+      roles,
       scopes: apiKeyRecord.permissions || [],
       mfaLevel: null,
       timezoneHint: null,

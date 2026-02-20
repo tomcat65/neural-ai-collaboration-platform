@@ -479,7 +479,8 @@ export class NeuralMCPServer {
           type || 'direct',
           'normal',
           undefined,
-          reqContext.tenantId
+          reqContext.tenantId,
+          reqContext
         );
 
         await this.publishEventToUnified('ai.message', {
@@ -927,7 +928,7 @@ export class NeuralMCPServer {
               }
             };
 
-            const entityId = await this.memoryManager.store(agent, entityData, 'shared', 'entity', tenantId);
+            const entityId = await this.memoryManager.store(agent, entityData, 'shared', 'entity', tenantId, context);
 
             // NE-S6b: Audit log
             this.memoryManager.auditLog('create_entity', agent, JSON.stringify(entityData), entity.name);
@@ -1283,7 +1284,7 @@ export class NeuralMCPServer {
               }
             };
 
-            const observationId = await this.memoryManager.store(agent, observationData, 'shared', 'observation', tenantId);
+            const observationId = await this.memoryManager.store(agent, observationData, 'shared', 'observation', tenantId, context);
 
             // NE-S6b: Audit log
             this.memoryManager.auditLog('add_observation', agent, JSON.stringify(observationData), obs.entityName);
@@ -1337,7 +1338,7 @@ export class NeuralMCPServer {
               }
             };
 
-            const relationId = await this.memoryManager.store(agent, relationData, 'shared', 'relation', tenantId);
+            const relationId = await this.memoryManager.store(agent, relationData, 'shared', 'relation', tenantId, context);
 
             // NE-S6b: Audit log
             this.memoryManager.auditLog('create_relation', agent, JSON.stringify(relationData), `${relation.from}->${relation.to}`);
@@ -1476,7 +1477,8 @@ export class NeuralMCPServer {
               messageType,
               priority,
               messageData.metadata,
-              tenantId
+              tenantId,
+              context
             );
             results.push({ to: targetAgentId, messageId });
 
@@ -1881,6 +1883,18 @@ export class NeuralMCPServer {
           const observationRows = this.memoryManager.findObservationsByEntity(entityName, tenantId);
           const relationRows = this.memoryManager.findRelationsByEntity(entityName, tenantId);
 
+          // Phase B: member_provenance → enforce row-level ownership on all target rows
+          if (authResult.reason === 'member_provenance') {
+            const allRows = [...entityRows, ...observationRows, ...relationRows];
+            const ownerCheck = this.memoryManager.checkMemberOwnership(allRows, context);
+            if (!ownerCheck.allowed) {
+              return {
+                content: [{ type: 'text', text: JSON.stringify({ error: 'Unauthorized', message: ownerCheck.reason }) }],
+                isError: true,
+              };
+            }
+          }
+
           const allTargetIds = [
             ...entityRows.map((r: any) => r.id),
             ...observationRows.map((r: any) => r.id),
@@ -1971,6 +1985,17 @@ export class NeuralMCPServer {
             };
           }
 
+          // Phase B: member_provenance → enforce row-level ownership
+          if (authResult.reason === 'member_provenance') {
+            const ownerCheck = this.memoryManager.checkMemberOwnership(targetRows, context);
+            if (!ownerCheck.allowed) {
+              return {
+                content: [{ type: 'text', text: JSON.stringify({ error: 'Unauthorized', message: ownerCheck.reason }) }],
+                isError: true,
+              };
+            }
+          }
+
           const targetIds = targetRows.map((r: any) => r.id);
 
           if (dryRun) {
@@ -2030,6 +2055,20 @@ export class NeuralMCPServer {
             };
           }
 
+          // Phase B: member_provenance → fetch row and check ownership before updating
+          if (authResult.reason === 'member_provenance') {
+            const obsRow = this.memoryManager.getObservationRow(observationId, tenantId);
+            if (obsRow) {
+              const ownerCheck = this.memoryManager.checkMemberOwnership([obsRow], context);
+              if (!ownerCheck.allowed) {
+                return {
+                  content: [{ type: 'text', text: JSON.stringify({ error: 'Unauthorized', message: ownerCheck.reason }) }],
+                  isError: true,
+                };
+              }
+            }
+          }
+
           const updateResult = await this.memoryManager.updateObservationContent(
             observationId, newContent, contentIndex, tenantId
           );
@@ -2070,6 +2109,17 @@ export class NeuralMCPServer {
             return {
               content: [{ type: 'text', text: JSON.stringify({ status: 'no_match', entityName, matchedObservations: 0 }) }],
             };
+          }
+
+          // Phase B: member_provenance → enforce row-level ownership
+          if (authResult.reason === 'member_provenance') {
+            const ownerCheck = this.memoryManager.checkMemberOwnership(observationRows, context);
+            if (!ownerCheck.allowed) {
+              return {
+                content: [{ type: 'text', text: JSON.stringify({ error: 'Unauthorized', message: ownerCheck.reason }) }],
+                isError: true,
+              };
+            }
           }
 
           const targetIds = observationRows.map((r: any) => r.id);

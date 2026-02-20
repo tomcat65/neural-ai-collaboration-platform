@@ -304,6 +304,29 @@ export class MemoryManager {
       }
     } catch { /* ok — table may not exist yet at this point */ }
 
+    // Phase B: Add trusted provenance columns to shared_memory and ai_messages
+    try {
+      const smCols = this.db.prepare('PRAGMA table_info(shared_memory)').all() as any[];
+      const smColNames = smCols.map((c: any) => c.name);
+      if (!smColNames.includes('owner_actor_type')) {
+        this.db.exec('ALTER TABLE shared_memory ADD COLUMN owner_actor_type TEXT');
+      }
+      if (!smColNames.includes('owner_actor_id')) {
+        this.db.exec('ALTER TABLE shared_memory ADD COLUMN owner_actor_id TEXT');
+      }
+    } catch { /* ok — table may not exist yet */ }
+
+    try {
+      const amCols = this.db.prepare('PRAGMA table_info(ai_messages)').all() as any[];
+      const amColNames = amCols.map((c: any) => c.name);
+      if (!amColNames.includes('from_actor_type')) {
+        this.db.exec('ALTER TABLE ai_messages ADD COLUMN from_actor_type TEXT');
+      }
+      if (!amColNames.includes('from_actor_id')) {
+        this.db.exec('ALTER TABLE ai_messages ADD COLUMN from_actor_id TEXT');
+      }
+    } catch { /* ok — table may not exist yet (pre-migration) */ }
+
     // Migration: Add tenant_id column to existing tables if missing BEFORE creating tenant indexes
     this.migrateAddTenantColumn();
 
@@ -701,7 +724,7 @@ export class MemoryManager {
     });
   }
 
-  async store(agentId: string, memory: any, scope: 'individual' | 'shared', type: string, tenantId: string = 'default'): Promise<string> {
+  async store(agentId: string, memory: any, scope: 'individual' | 'shared', type: string, tenantId: string = 'default', context?: RequestContext): Promise<string> {
     const id = uuidv4();
 
     // 1. Store in SQLite (primary storage)
@@ -750,9 +773,11 @@ export class MemoryManager {
       }
       
     } else {
+      const ownerActorType = context?.authType || null;
+      const ownerActorId = (context?.userId || context?.apiKeyId || null);
       const stmt = this.db.prepare(`
-        INSERT INTO shared_memory (id, tenant_id, memory_type, content, created_by, tags)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO shared_memory (id, tenant_id, memory_type, content, created_by, tags, owner_actor_type, owner_actor_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       stmt.run(
@@ -761,7 +786,9 @@ export class MemoryManager {
         type,
         JSON.stringify(memory || {}),
         agentId,
-        JSON.stringify((memory && memory.tags) || [])
+        JSON.stringify((memory && memory.tags) || []),
+        ownerActorType,
+        ownerActorId
       );
 
       // DUAL-WRITE SHIM: Also write to canonical tables when enabled
@@ -1790,16 +1817,19 @@ export class MemoryManager {
     messageType: string = 'info',
     priority: string = 'normal',
     metadata?: Record<string, any>,
-    tenantId: string = 'default'
+    tenantId: string = 'default',
+    context?: RequestContext
   ): Promise<string> {
     const id = uuidv4();
+    const fromActorType = context?.authType || null;
+    const fromActorId = context?.userId || context?.apiKeyId || null;
 
     try {
       const stmt = this.db.prepare(`
-        INSERT INTO ai_messages (id, from_agent, from_source, to_agent, content, message_type, priority, metadata, tenant_id)
-        VALUES (?, ?, 'direct', ?, ?, ?, ?, ?, ?)
+        INSERT INTO ai_messages (id, from_agent, from_source, to_agent, content, message_type, priority, metadata, tenant_id, from_actor_type, from_actor_id)
+        VALUES (?, ?, 'direct', ?, ?, ?, ?, ?, ?, ?, ?)
       `);
-      stmt.run(id, from, to, content, messageType, priority, JSON.stringify(metadata || {}), tenantId);
+      stmt.run(id, from, to, content, messageType, priority, JSON.stringify(metadata || {}), tenantId, fromActorType, fromActorId);
     } catch (err: any) {
       // Fallback: ai_messages table may not exist yet (pre-migration)
       if (err.message?.includes('no such table')) {
@@ -2129,12 +2159,16 @@ export class MemoryManager {
       return { authorized: false, reason: 'API key lacks graph:write scope' };
     }
 
-    // JWT → require admin or owner role
+    // JWT → admin/owner role can mutate anything; member role can mutate own rows (provenance check)
     if (context.authType === 'jwt') {
       if (context.roles.includes('admin') || context.roles.includes('owner')) {
         return { authorized: true };
       }
-      return { authorized: false, reason: 'JWT caller requires admin or owner role for graph mutations' };
+      if (context.roles.includes('member') && context.userId) {
+        // Phase B: member can mutate rows they own (caller must verify row-level provenance)
+        return { authorized: true, reason: 'member_provenance' };
+      }
+      return { authorized: false, reason: 'JWT caller requires admin, owner, or member role for graph mutations' };
     }
 
     return { authorized: false, reason: 'Unknown auth type' };
@@ -2146,7 +2180,7 @@ export class MemoryManager {
    */
   findEntitiesByName(entityName: string, tenantId: string): any[] {
     return this.db.prepare(
-      `SELECT id, content, created_by, created_at FROM shared_memory
+      `SELECT id, content, created_by, created_at, owner_actor_type, owner_actor_id FROM shared_memory
        WHERE tenant_id = ? AND memory_type = 'entity'
        AND LOWER(json_extract(content, '$.name')) = LOWER(?)`
     ).all(tenantId, entityName) as any[];
@@ -2157,7 +2191,7 @@ export class MemoryManager {
    */
   findObservationsByEntity(entityName: string, tenantId: string): any[] {
     return this.db.prepare(
-      `SELECT id, content, created_by, created_at FROM shared_memory
+      `SELECT id, content, created_by, created_at, owner_actor_type, owner_actor_id FROM shared_memory
        WHERE tenant_id = ? AND memory_type = 'observation'
        AND LOWER(json_extract(content, '$.entityName')) = LOWER(?)`
     ).all(tenantId, entityName) as any[];
@@ -2168,11 +2202,46 @@ export class MemoryManager {
    */
   findRelationsByEntity(entityName: string, tenantId: string): any[] {
     return this.db.prepare(
-      `SELECT id, content, created_by, created_at FROM shared_memory
+      `SELECT id, content, created_by, created_at, owner_actor_type, owner_actor_id FROM shared_memory
        WHERE tenant_id = ? AND memory_type = 'relation'
        AND (LOWER(json_extract(content, '$.from')) = LOWER(?)
             OR LOWER(json_extract(content, '$.to')) = LOWER(?))`
     ).all(tenantId, entityName, entityName) as any[];
+  }
+
+  /**
+   * Phase B: Check if a member owns all target rows (row-level provenance enforcement).
+   * Returns { allowed: true } if all rows are owned by the member, or { allowed: false, reason }
+   * if any row is not owned, is legacy (no provenance), or is system-owned.
+   */
+  checkMemberOwnership(targetRows: any[], context: RequestContext): { allowed: boolean; reason?: string } {
+    const userId = context.userId;
+    if (!userId) return { allowed: false, reason: 'No userId in context for member ownership check' };
+
+    for (const row of targetRows) {
+      // Legacy rows without provenance → admin-only (safe default)
+      if (!row.owner_actor_type || !row.owner_actor_id) {
+        return { allowed: false, reason: 'Legacy row without provenance requires admin role' };
+      }
+      // System-owned rows → admin-only
+      if (row.owner_actor_type === 'system') {
+        return { allowed: false, reason: 'System-owned row requires admin role' };
+      }
+      // Row owned by a different user → rejected
+      if (row.owner_actor_id !== userId) {
+        return { allowed: false, reason: `Row owned by ${row.owner_actor_id}, not by caller ${userId}` };
+      }
+    }
+    return { allowed: true };
+  }
+
+  /**
+   * Fetch a single observation row by ID (for ownership check before update).
+   */
+  getObservationRow(obsId: string, tenantId: string): any | null {
+    return this.db.prepare(
+      "SELECT id, content, created_by, owner_actor_type, owner_actor_id FROM shared_memory WHERE id = ? AND tenant_id = ? AND memory_type = 'observation'"
+    ).get(obsId, tenantId) as any || null;
   }
 
   /**
@@ -2185,7 +2254,7 @@ export class MemoryManager {
     const escapedPatterns = containsAny.map(s => `%${MemoryManager.escapeLikePattern(s)}%`);
     const likeConditions = escapedPatterns.map(() => `LOWER(content) LIKE LOWER(?) ESCAPE '\\'`).join(' OR ');
 
-    const sql = `SELECT id, content, created_by, created_at FROM shared_memory
+    const sql = `SELECT id, content, created_by, created_at, owner_actor_type, owner_actor_id FROM shared_memory
        WHERE tenant_id = ? AND memory_type = 'observation'
        AND LOWER(json_extract(content, '$.entityName')) = LOWER(?)
        AND (${likeConditions})`;
@@ -2251,7 +2320,7 @@ export class MemoryManager {
   ): Promise<{ updated: boolean; weaviateReindexed: boolean }> {
     // Fetch current row (constrained to observations only)
     const row = this.db.prepare(
-      "SELECT id, content, created_by FROM shared_memory WHERE id = ? AND tenant_id = ? AND memory_type = 'observation'"
+      "SELECT id, content, created_by, owner_actor_type, owner_actor_id FROM shared_memory WHERE id = ? AND tenant_id = ? AND memory_type = 'observation'"
     ).get(obsId, tenantId) as any;
     if (!row) throw new Error(`Observation ${obsId} not found`);
 
