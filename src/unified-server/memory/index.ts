@@ -1389,15 +1389,18 @@ export class MemoryManager {
     agentId: string,
     projectId?: string,
     depth: 'hot' | 'warm' | 'cold' = projectId ? 'warm' : 'hot',
-    tenantId: string = 'default'
+    tenantId: string = 'default',
+    maxTokens: number = 4000,
+    userId?: string | null
   ): any {
     const bundle: any = {
       identity: { learnings: [] },
+      user: null,
       project: null,
       handoff: null,
       unreadMessages: { count: 0, hint: 'Use get_ai_messages(agentId) to retrieve' },
       guardrails: [],
-      meta: { depth, tokenEstimate: 0 }
+      meta: { depth, tokenEstimate: 0, truncated: false, sectionsDropped: [] }
     };
 
     // --- HOT tier (always included) ---
@@ -1411,6 +1414,24 @@ export class MemoryManager {
       bundle.identity._preferencesWrapped = MemoryManager.wrapContent(
         JSON.stringify(agentMem.preferences || {}), 'preferences', agentId, 'identity'
       );
+    }
+
+    // 1b. Task 1100: HOT tier user block (included when userId provided)
+    if (userId) {
+      const userProfile = this.getUserProfile(userId, tenantId);
+      if (userProfile) {
+        bundle.user = {
+          _wrapped: MemoryManager.wrapContent(JSON.stringify({
+            id: userProfile.id,
+            displayName: userProfile.displayName,
+            timezone: userProfile.timezone,
+            locale: userProfile.locale,
+            dateFormat: userProfile.dateFormat,
+            units: userProfile.units,
+            workingHours: userProfile.workingHours,
+          }), 'user_profile', userId, 'identity'),
+        };
+      }
     }
 
     // 2. Unread messages — count only via SQL COUNT (tenant-scoped)
@@ -1555,27 +1576,73 @@ export class MemoryManager {
       } catch { /* ok */ }
     }
 
-    // --- Context budget enforcement ---
-    const tokenEstimate = Math.ceil(JSON.stringify(bundle).length / 4);
-    bundle.meta.tokenEstimate = tokenEstimate;
+    // --- Task 1400: Priority-based token budget enforcement ---
+    // Priority order (lowest priority dropped first):
+    //   summary < messages < observations < guardrails < handoff < identity
+    const estimateTokens = () => Math.ceil(JSON.stringify(bundle).length / 4);
+    bundle.meta.tokenEstimate = estimateTokens();
 
-    if (tokenEstimate > 2000 && depth !== 'hot') {
-      // Truncate COLD first, then WARM; never truncate HOT
-      if (bundle.project?.allObservations) {
-        bundle.project.allObservations = bundle.project.allObservations.slice(0, 5);
-        bundle.meta.truncated = 'cold';
+    if (bundle.meta.tokenEstimate > maxTokens) {
+      bundle.meta.truncated = true;
+      const sectionsDropped: string[] = [];
+
+      // 1. Drop COLD observations + entities first (lowest priority bulk)
+      if (bundle.project?.allObservations && estimateTokens() > maxTokens) {
+        bundle.project.allObservations = bundle.project.allObservations.slice(0, 3);
+        if (estimateTokens() > maxTokens) {
+          delete bundle.project.allObservations;
+          sectionsDropped.push('allObservations');
+        }
       }
-      if (bundle.project?.allEntities) {
-        bundle.project.allEntities = bundle.project.allEntities.slice(0, 3);
+      if (bundle.project?.allEntities && estimateTokens() > maxTokens) {
+        delete bundle.project.allEntities;
+        sectionsDropped.push('allEntities');
       }
 
-      const afterCold = Math.ceil(JSON.stringify(bundle).length / 4);
-      if (afterCold > 2000 && bundle.project?.recentObservations) {
-        bundle.project.recentObservations = bundle.project.recentObservations.slice(0, 3);
-        bundle.meta.truncated = 'warm';
+      // 2. Drop project summary (low priority)
+      if (bundle.project?._summaryWrapped && estimateTokens() > maxTokens) {
+        delete bundle.project._summaryWrapped;
+        sectionsDropped.push('projectSummary');
       }
 
-      bundle.meta.tokenEstimate = Math.ceil(JSON.stringify(bundle).length / 4);
+      // 3. Drop recent decisions
+      if (bundle.project?.recentDecisions && estimateTokens() > maxTokens) {
+        delete bundle.project.recentDecisions;
+        sectionsDropped.push('recentDecisions');
+      }
+
+      // 4. Drop recent observations (warm tier)
+      if (bundle.project?.recentObservations && estimateTokens() > maxTokens) {
+        bundle.project.recentObservations = bundle.project.recentObservations.slice(0, 1);
+        if (estimateTokens() > maxTokens) {
+          delete bundle.project.recentObservations;
+          sectionsDropped.push('recentObservations');
+        }
+      }
+
+      // 5. Drop HOT observations
+      if (bundle.project?.hotObservations && estimateTokens() > maxTokens) {
+        delete bundle.project.hotObservations;
+        sectionsDropped.push('hotObservations');
+      }
+
+      // 6. Drop guardrails (higher priority than observations, but lower than handoff/identity)
+      if (bundle.guardrails?.length > 0 && estimateTokens() > maxTokens) {
+        bundle.guardrails = bundle.guardrails.slice(0, 2);
+        if (estimateTokens() > maxTokens) {
+          bundle.guardrails = [];
+          sectionsDropped.push('guardrails');
+        }
+      }
+
+      // 7. Trim identity learnings (never drop identity entirely)
+      if (bundle.identity?.learnings?.length > 5 && estimateTokens() > maxTokens) {
+        bundle.identity.learnings = bundle.identity.learnings.slice(-5);
+        sectionsDropped.push('learnings(trimmed)');
+      }
+
+      bundle.meta.sectionsDropped = sectionsDropped;
+      bundle.meta.tokenEstimate = estimateTokens();
     }
 
     return bundle;
@@ -1758,17 +1825,24 @@ export class MemoryManager {
       unreadOnly?: boolean;
       markAsRead?: boolean;
       tenantId?: string;
+      includeArchived?: boolean;
     } = {}
   ): any[] {
     const limit = options.limit || 50;
     const tenantId = options.tenantId || 'default';
 
     try {
-      // Ensure read_at column exists (idempotent migration)
+      // Ensure read_at + archived_at columns exist (idempotent migration)
       this.ensureReadAtColumn();
+      this.ensureArchivedAtColumn();
 
       let query = 'SELECT * FROM ai_messages WHERE to_agent = ? AND tenant_id = ?';
       const params: any[] = [agentId, tenantId];
+
+      // Task 1200: Exclude archived by default
+      if (!options.includeArchived) {
+        query += ' AND archived_at IS NULL';
+      }
 
       if (options.messageType) {
         query += ' AND message_type = ?';
@@ -1823,6 +1897,154 @@ export class MemoryManager {
     } catch {
       // Table might not exist yet — skip
     }
+  }
+
+  // ─── Task 1200: archived_at column migration ───
+  private _archivedAtColumnChecked = false;
+  private ensureArchivedAtColumn(): void {
+    if (this._archivedAtColumnChecked) return;
+    try {
+      const cols = this.db.prepare("PRAGMA table_info(ai_messages)").all() as any[];
+      const hasArchivedAt = cols.some((c: any) => c.name === 'archived_at');
+      if (!hasArchivedAt) {
+        this.db.prepare("ALTER TABLE ai_messages ADD COLUMN archived_at TEXT").run();
+        this.db.prepare("CREATE INDEX IF NOT EXISTS idx_ai_messages_archived ON ai_messages(archived_at)").run();
+        console.log('📦 Added archived_at column + index to ai_messages');
+      }
+      this._archivedAtColumnChecked = true;
+    } catch {
+      // Table might not exist yet — skip
+    }
+  }
+
+  /**
+   * Task 1200: Mark specific messages as read, or all unread messages for an agent.
+   * Returns count of messages marked.
+   */
+  markMessagesRead(
+    agentId: string,
+    messageIds?: string[],
+    tenantId: string = 'default'
+  ): number {
+    this.ensureReadAtColumn();
+    const now = new Date().toISOString();
+
+    if (messageIds && messageIds.length > 0) {
+      // Mark specific messages
+      const placeholders = messageIds.map(() => '?').join(',');
+      const result = this.db.prepare(
+        `UPDATE ai_messages SET read_at = ? WHERE id IN (${placeholders}) AND to_agent = ? AND tenant_id = ? AND read_at IS NULL`
+      ).run(now, ...messageIds, agentId, tenantId);
+      return result.changes;
+    } else {
+      // Mark all unread for this agent
+      const result = this.db.prepare(
+        `UPDATE ai_messages SET read_at = ? WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL`
+      ).run(now, agentId, tenantId);
+      return result.changes;
+    }
+  }
+
+  /**
+   * Task 1200: Archive messages older than N days for an agent.
+   * Returns count of messages archived.
+   */
+  archiveMessages(
+    agentId: string,
+    olderThanDays: number,
+    tenantId: string = 'default'
+  ): number {
+    this.ensureArchivedAtColumn();
+    const now = new Date().toISOString();
+    const cutoff = new Date(Date.now() - olderThanDays * 86400000).toISOString();
+
+    const result = this.db.prepare(
+      `UPDATE ai_messages SET archived_at = ? WHERE to_agent = ? AND tenant_id = ? AND created_at < ? AND archived_at IS NULL`
+    ).run(now, agentId, tenantId, cutoff);
+    return result.changes;
+  }
+
+  // ─── Task 1100: User Profile methods ───
+
+  /**
+   * Get a user profile by userId within a tenant.
+   */
+  getUserProfile(userId: string, tenantId: string = 'default'): any | null {
+    try {
+      const row = this.db.prepare(
+        'SELECT * FROM users WHERE id = ? AND tenant_id = ?'
+      ).get(userId, tenantId) as any;
+      if (!row) return null;
+      return {
+        id: row.id,
+        tenantId: row.tenant_id,
+        displayName: row.display_name,
+        timezone: row.timezone,
+        locale: row.locale,
+        dateFormat: row.date_format,
+        units: row.units,
+        workingHours: row.working_hours ? JSON.parse(row.working_hours) : null,
+        lastSeenTz: row.last_seen_tz,
+        prefsVersion: row.prefs_version,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Update a user profile. Merges provided fields, bumps prefs_version.
+   * Returns the updated profile.
+   */
+  updateUserProfile(
+    userId: string,
+    updates: {
+      displayName?: string;
+      timezone?: string;
+      locale?: string;
+      dateFormat?: string;
+      units?: string;
+      workingHours?: { start: string; end: string };
+    },
+    tenantId: string = 'default'
+  ): any | null {
+    const existing = this.getUserProfile(userId, tenantId);
+    if (!existing) return null;
+
+    const setClauses: string[] = [];
+    const params: any[] = [];
+
+    if (updates.displayName !== undefined) { setClauses.push('display_name = ?'); params.push(updates.displayName); }
+    if (updates.timezone !== undefined) { setClauses.push('timezone = ?'); params.push(updates.timezone); }
+    if (updates.locale !== undefined) { setClauses.push('locale = ?'); params.push(updates.locale); }
+    if (updates.dateFormat !== undefined) { setClauses.push('date_format = ?'); params.push(updates.dateFormat); }
+    if (updates.units !== undefined) { setClauses.push('units = ?'); params.push(updates.units); }
+    if (updates.workingHours !== undefined) { setClauses.push('working_hours = ?'); params.push(JSON.stringify(updates.workingHours)); }
+
+    if (setClauses.length === 0) return existing;
+
+    setClauses.push("prefs_version = prefs_version + 1");
+    setClauses.push("updated_at = datetime('now')");
+
+    const sql = `UPDATE users SET ${setClauses.join(', ')} WHERE id = ? AND tenant_id = ?`;
+    params.push(userId, tenantId);
+    this.db.prepare(sql).run(...params);
+
+    return this.getUserProfile(userId, tenantId);
+  }
+
+  /**
+   * Update last_seen_tz for a user (from X-User-Timezone header).
+   * Fire-and-forget; never throws.
+   */
+  updateLastSeenTz(userId: string, timezone: string, tenantId: string = 'default'): void {
+    try {
+      this.db.prepare(
+        `UPDATE users SET last_seen_tz = ?, updated_at = datetime('now') WHERE id = ? AND tenant_id = ?`
+      ).run(timezone, userId, tenantId);
+    } catch { /* non-fatal */ }
   }
 
   /**

@@ -144,7 +144,8 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
         },
         since: { type: 'string', description: 'ISO timestamp to get messages since' },
         unreadOnly: { type: 'boolean', description: 'Only return messages that have not been read yet', default: false },
-        markAsRead: { type: 'boolean', description: 'Mark returned messages as read after retrieval', default: false }
+        markAsRead: { type: 'boolean', description: 'Mark returned messages as read after retrieval', default: false },
+        includeArchived: { type: 'boolean', description: 'Include archived messages in results (excluded by default)', default: false }
       },
       required: ['agentId']
     }
@@ -227,7 +228,13 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
           type: 'string',
           enum: ['hot', 'warm', 'cold'],
           description: 'Context depth: hot (identity+messages+guardrails), warm (hot+project 30d), cold (everything). Defaults to warm if projectId provided, else hot.',
-        }
+        },
+        maxTokens: {
+          type: 'number',
+          description: 'Hard token budget ceiling. Context is trimmed by priority if exceeded. Default: 4000.',
+          default: 4000
+        },
+        userId: { type: 'string', description: 'Optional user ID to include HOT tier user profile block. Overridden by JWT userId when authenticated.' }
       },
       required: ['agentId']
     }
@@ -239,7 +246,13 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
       type: 'object',
       properties: {
         agentId: { type: 'string', description: 'Agent opening the session' },
-        projectId: { type: 'string', description: 'Project to open a session for' }
+        projectId: { type: 'string', description: 'Project to open a session for' },
+        maxTokens: {
+          type: 'number',
+          description: 'Hard token budget ceiling for the returned context. Default: 4000.',
+          default: 4000
+        },
+        userId: { type: 'string', description: 'Optional user ID for user-scoped context. Overridden by JWT userId when authenticated.' }
       },
       required: ['agentId', 'projectId']
     }
@@ -284,6 +297,71 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
         query: { type: 'string', description: 'The search query to match' }
       },
       required: ['query']
+    }
+  },
+  // Task 1100: User profile tools
+  get_user_profile: {
+    name: 'get_user_profile',
+    description: 'Get a user profile within the current tenant. Returns timezone, locale, preferences.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        userId: { type: 'string', description: 'User ID to retrieve profile for. Must match authenticated user (JWT) or be provided by service key.' }
+      },
+      required: ['userId']
+    }
+  },
+  update_user_profile: {
+    name: 'update_user_profile',
+    description: 'Update a user profile. Only the profile owner (or a service key) can update. Bumps prefs_version.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        userId: { type: 'string', description: 'User ID to update. Must match authenticated user (JWT) or be provided by service key.' },
+        displayName: { type: 'string', description: 'Display name' },
+        timezone: { type: 'string', description: 'IANA timezone string (e.g., America/Chicago)' },
+        locale: { type: 'string', description: 'Locale string (e.g., en-US)' },
+        dateFormat: { type: 'string', description: 'Date format preference' },
+        units: { type: 'string', description: 'Unit system (metric/imperial)' },
+        workingHours: {
+          type: 'object',
+          description: 'Working hours { start, end }',
+          properties: {
+            start: { type: 'string' },
+            end: { type: 'string' }
+          }
+        }
+      },
+      required: ['userId']
+    }
+  },
+  // Task 1200: Message lifecycle tools
+  mark_messages_read: {
+    name: 'mark_messages_read',
+    description: 'Mark specific messages or all unread messages for an agent as read',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'Agent whose messages to mark as read' },
+        messageIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Specific message IDs to mark as read. If omitted, marks all unread messages for the agent.'
+        }
+      },
+      required: ['agentId']
+    }
+  },
+  archive_messages: {
+    name: 'archive_messages',
+    description: 'Archive messages older than N days for an agent. Archived messages are excluded from get_ai_messages by default.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'Agent whose messages to archive' },
+        olderThanDays: { type: 'number', description: 'Archive messages older than this many days', default: 30 }
+      },
+      required: ['agentId', 'olderThanDays']
     }
   },
 };

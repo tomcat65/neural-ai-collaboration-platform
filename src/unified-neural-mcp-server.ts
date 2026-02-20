@@ -797,6 +797,30 @@ export class NeuralMCPServer {
           inputSchema: UnifiedToolSchemas.search_nodes.inputSchema
         },
 
+        // === USER PROFILE (Task 1100) ===
+        {
+          name: UnifiedToolSchemas.get_user_profile.name,
+          description: UnifiedToolSchemas.get_user_profile.description,
+          inputSchema: UnifiedToolSchemas.get_user_profile.inputSchema
+        },
+        {
+          name: UnifiedToolSchemas.update_user_profile.name,
+          description: UnifiedToolSchemas.update_user_profile.description,
+          inputSchema: UnifiedToolSchemas.update_user_profile.inputSchema
+        },
+
+        // === MESSAGE LIFECYCLE (Task 1200) ===
+        {
+          name: UnifiedToolSchemas.mark_messages_read.name,
+          description: UnifiedToolSchemas.mark_messages_read.description,
+          inputSchema: UnifiedToolSchemas.mark_messages_read.inputSchema
+        },
+        {
+          name: UnifiedToolSchemas.archive_messages.name,
+          description: UnifiedToolSchemas.archive_messages.description,
+          inputSchema: UnifiedToolSchemas.archive_messages.inputSchema
+        },
+
         // === INDIVIDUAL MEMORY ===
         {
           name: 'record_learning',
@@ -842,6 +866,11 @@ export class NeuralMCPServer {
     try {
       const agent = args.agentId || this.agentId;
       const tenantId = context.tenantId;
+
+      // Task 1100: Update last_seen_tz when user has a timezone hint
+      if (context.userId && context.timezoneHint) {
+        this.memoryManager.updateLastSeenTz(context.userId, context.timezoneHint, tenantId);
+      }
 
       switch (name) {
         // === MEMORY & KNOWLEDGE MANAGEMENT ===
@@ -912,7 +941,7 @@ export class NeuralMCPServer {
           // Basic search for now, but structured for advanced features (tenant-scoped)
           const searchResults = await this.memoryManager.search(query, { shared: true }, tenantId);
           
-          const enhancedResults = searchResults.slice(0, limit).map((result: any) => {
+          const scoredResults = searchResults.slice(0, limit).map((result: any) => {
             const nameMatch = result.content?.name?.toLowerCase().includes(query.toLowerCase());
             const typeMatch = result.content?.type?.toLowerCase().includes(query.toLowerCase());
             const score = nameMatch ? 1.0 : typeMatch ? 0.8 : 0.6;
@@ -920,7 +949,7 @@ export class NeuralMCPServer {
               ...result,
               searchScore: score,
               searchType: searchType,
-              memorySource: 'sqlite',
+              memorySource: result.source?.startsWith('weaviate:') ? 'weaviate' : 'sqlite',
               semanticSimilarity: null
             };
             if (result.chunked) {
@@ -930,6 +959,26 @@ export class NeuralMCPServer {
             }
             return entry;
           }).sort((a: any, b: any) => b.searchScore - a.searchScore);
+
+          // Task 1300: Dedup by (entity_name, tenant_id) — tenant already scoped by search
+          // Highest relevance score wins; source provenance preserved
+          const dedupMap = new Map<string, any>();
+          for (const result of scoredResults) {
+            const entityName = (result.content?.name || result.id || '').toLowerCase();
+            const existing = dedupMap.get(entityName);
+            if (!existing) {
+              result.sources = [result.memorySource];
+              dedupMap.set(entityName, result);
+            } else if (result.searchScore > existing.searchScore) {
+              // New result has higher score — replace, but keep provenance
+              result.sources = Array.from(new Set([...(existing.sources || []), result.memorySource]));
+              dedupMap.set(entityName, result);
+            } else {
+              // Existing wins — just merge source provenance
+              existing.sources = Array.from(new Set([...(existing.sources || []), result.memorySource]));
+            }
+          }
+          const enhancedResults = Array.from(dedupMap.values());
 
           const hasChunked = enhancedResults.some((r: any) => r.chunked);
           return {
@@ -941,6 +990,8 @@ export class NeuralMCPServer {
                   searchType,
                   totalResults: enhancedResults.length,
                   ...(hasChunked ? { chunkedResults: enhancedResults.filter((r: any) => r.chunked).length } : {}),
+                  deduplicated: scoredResults.length !== enhancedResults.length,
+                  preDeduplicationCount: scoredResults.length,
                   results: enhancedResults,
                 }, null, 2),
               },
@@ -1031,19 +1082,22 @@ export class NeuralMCPServer {
 
         // === SESSION PROTOCOL TOOLS ===
         case 'get_agent_context': {
-          const { agentId: ctxAgentId, projectId, depth } = args;
-          const bundle = this.memoryManager.getAgentContext(ctxAgentId, projectId, depth, tenantId);
+          const { agentId: ctxAgentId, projectId, depth, maxTokens, userId: ctxUserId } = args;
+          // Resolve userId: from RequestContext (JWT) or from args (service key callers)
+          const resolvedUserId = context.userId || ctxUserId || null;
+          const bundle = this.memoryManager.getAgentContext(ctxAgentId, projectId, depth, tenantId, maxTokens, resolvedUserId);
           return { content: [{ type: 'text', text: JSON.stringify(bundle, null, 2) }] };
         }
 
         case 'begin_session': {
-          const { agentId: sessAgentId, projectId: sessProjectId } = args;
+          const { agentId: sessAgentId, projectId: sessProjectId, maxTokens: sessMaxTokens } = args;
 
           // Ensure project entity exists (tenant-scoped)
           this.memoryManager.ensureProjectEntity(sessAgentId, sessProjectId, tenantId);
 
-          // Load warm context (tenant-scoped)
-          const sessContext = this.memoryManager.getAgentContext(sessAgentId, sessProjectId, 'warm', tenantId);
+          // Load warm context (tenant-scoped, with optional token budget and user context)
+          const sessUserId = context.userId || args.userId || null;
+          const sessContext = this.memoryManager.getAgentContext(sessAgentId, sessProjectId, 'warm', tenantId, sessMaxTokens, sessUserId);
 
           // Get handoff from previous session (tenant-scoped, idempotency: only return unconsumed handoffs)
           const rawHandoff = this.memoryManager.getActiveHandoff(sessProjectId, tenantId);
@@ -1445,7 +1499,7 @@ export class NeuralMCPServer {
         }
 
         case 'get_ai_messages': {
-          const { agentId: targetAgentId, limit = 50, messageType, since, unreadOnly, markAsRead } = args;
+          const { agentId: targetAgentId, limit = 50, messageType, since, unreadOnly, markAsRead, includeArchived } = args;
 
           // P1: Use dedicated ai_messages table with indexed queries (tenant-scoped)
           const rawMessages = this.memoryManager.getMessages(targetAgentId, {
@@ -1455,6 +1509,7 @@ export class NeuralMCPServer {
             unreadOnly,
             markAsRead,
             tenantId,
+            includeArchived,
           });
 
           // Transform to match existing response format for backward compatibility
@@ -1498,6 +1553,93 @@ export class NeuralMCPServer {
                 }, null, 2),
               },
             ],
+          };
+        }
+
+        // === USER PROFILE (Task 1100) ===
+        case 'get_user_profile': {
+          const { userId: profileUserId } = args;
+
+          // Enforce userId ownership for JWT callers (authType === 'jwt')
+          if (context.authType === 'jwt' && context.userId && profileUserId !== context.userId) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ error: 'Forbidden', code: 'USER_ID_MISMATCH', message: 'JWT callers cannot access other users profiles' }) }],
+              isError: true,
+            };
+          }
+
+          const profile = this.memoryManager.getUserProfile(profileUserId, tenantId);
+          if (!profile) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ error: 'Not Found', message: `User ${profileUserId} not found in tenant ${tenantId}` }) }],
+              isError: true,
+            };
+          }
+
+          return {
+            content: [{ type: 'text', text: JSON.stringify(profile, null, 2) }]
+          };
+        }
+
+        case 'update_user_profile': {
+          const { userId: updateUserId, displayName, timezone, locale, dateFormat, units, workingHours } = args;
+
+          // Enforce userId ownership for JWT callers
+          if (context.authType === 'jwt' && context.userId && updateUserId !== context.userId) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ error: 'Forbidden', code: 'USER_ID_MISMATCH', message: 'JWT callers cannot modify other users profiles' }) }],
+              isError: true,
+            };
+          }
+
+          const updatedProfile = this.memoryManager.updateUserProfile(
+            updateUserId,
+            { displayName, timezone, locale, dateFormat, units, workingHours },
+            tenantId
+          );
+
+          if (!updatedProfile) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ error: 'Not Found', message: `User ${updateUserId} not found in tenant ${tenantId}` }) }],
+              isError: true,
+            };
+          }
+
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ status: 'updated', profile: updatedProfile }, null, 2) }]
+          };
+        }
+
+        // === MESSAGE LIFECYCLE (Task 1200) ===
+        case 'mark_messages_read': {
+          const { agentId: markAgentId, messageIds } = args;
+          const markedCount = this.memoryManager.markMessagesRead(markAgentId, messageIds, tenantId);
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                status: 'ok',
+                agentId: markAgentId,
+                markedAsRead: markedCount,
+                scope: messageIds ? 'specific' : 'all_unread',
+              }, null, 2)
+            }]
+          };
+        }
+
+        case 'archive_messages': {
+          const { agentId: archiveAgentId, olderThanDays = 30 } = args;
+          const archivedCount = this.memoryManager.archiveMessages(archiveAgentId, olderThanDays, tenantId);
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                status: 'ok',
+                agentId: archiveAgentId,
+                archived: archivedCount,
+                olderThanDays,
+              }, null, 2)
+            }]
           };
         }
 
