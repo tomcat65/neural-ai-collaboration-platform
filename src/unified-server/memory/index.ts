@@ -106,6 +106,15 @@ export class MemoryManager {
         recordSQLiteFallback();
       }
 
+      // Startup tombstone drain: retry any failed Weaviate deletes from previous sessions
+      void this.retryFailedWeaviateDeletes(100).then((result) => {
+        if (result.attempted > 0) {
+          console.log(`🪦 Startup tombstone drain: ${result.succeeded}/${result.attempted} succeeded, ${result.failed} failed`);
+        }
+      }).catch((err) => {
+        console.warn('⚠️ Startup tombstone drain failed (non-fatal):', err);
+      });
+
     } catch (error) {
       console.warn('⚠️ Advanced memory systems initialization failed:', error);
       console.log('🔄 Falling back to SQLite-only mode');
