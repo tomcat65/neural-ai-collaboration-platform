@@ -22,6 +22,7 @@ import {
   ProjectArtifacts
 } from '../types/memory.js';
 import { WeaviateClient } from '../../memory/weaviate-client.js';
+import type { RequestContext } from '../../middleware/auth/types.js';
 import {
   setSystemConnected,
   recordSQLiteFallback,
@@ -269,6 +270,39 @@ export class MemoryManager {
       CREATE INDEX IF NOT EXISTS idx_audit_flagged
         ON neural_audit_log(flagged) WHERE flagged = 1
     `);
+
+    // Weaviate tombstone table for failed vector deletes (Phase A)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS failed_weaviate_deletes (
+        id TEXT PRIMARY KEY,
+        weaviate_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        failed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        retry_count INTEGER DEFAULT 0,
+        last_error TEXT
+      )
+    `);
+
+    // Idempotent ALTER: add mutation audit columns to neural_audit_log
+    try {
+      const auditCols = this.db.prepare('PRAGMA table_info(neural_audit_log)').all() as any[];
+      const auditColNames = auditCols.map((c: any) => c.name);
+      if (!auditColNames.includes('tenant_id')) {
+        this.db.exec("ALTER TABLE neural_audit_log ADD COLUMN tenant_id TEXT DEFAULT 'default'");
+      }
+      if (!auditColNames.includes('actor_type')) {
+        this.db.exec("ALTER TABLE neural_audit_log ADD COLUMN actor_type TEXT");
+      }
+      if (!auditColNames.includes('actor_id')) {
+        this.db.exec("ALTER TABLE neural_audit_log ADD COLUMN actor_id TEXT");
+      }
+      if (!auditColNames.includes('target_count')) {
+        this.db.exec("ALTER TABLE neural_audit_log ADD COLUMN target_count INTEGER");
+      }
+      if (!auditColNames.includes('reason')) {
+        this.db.exec("ALTER TABLE neural_audit_log ADD COLUMN reason TEXT");
+      }
+    } catch { /* ok — table may not exist yet at this point */ }
 
     // Migration: Add tenant_id column to existing tables if missing BEFORE creating tenant indexes
     this.migrateAddTenantColumn();
@@ -2058,6 +2092,256 @@ export class MemoryManager {
       return !!result;
     } catch {
       return false;
+    }
+  }
+
+  // ─── Phase A: Knowledge Graph Mutation Helpers ───
+
+  /**
+   * Escape special SQL LIKE characters in a pattern substring.
+   * Codex finding #7: escape % and _ before wrapping with %..%
+   */
+  static escapeLikePattern(s: string): string {
+    return s.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+  }
+
+  /**
+   * Authorize a graph mutation using ONLY the RequestContext (codex findings #1, #2).
+   * Never trusts tool args for identity.
+   */
+  authorizeGraphMutation(
+    action: string,
+    context: RequestContext
+  ): { authorized: boolean; reason?: string } {
+    // Dev auth → trusted
+    if (context.authType === 'dev') {
+      return { authorized: true };
+    }
+
+    // API key auth → authorized if scopes include '*' or 'graph:write',
+    // or empty scopes (legacy admin backward compat)
+    if (context.authType === 'api_key') {
+      if (
+        context.scopes.length === 0 ||
+        context.scopes.includes('*') ||
+        context.scopes.includes('graph:write')
+      ) {
+        return { authorized: true };
+      }
+      return { authorized: false, reason: 'API key lacks graph:write scope' };
+    }
+
+    // JWT → require admin or owner role
+    if (context.authType === 'jwt') {
+      if (context.roles.includes('admin') || context.roles.includes('owner')) {
+        return { authorized: true };
+      }
+      return { authorized: false, reason: 'JWT caller requires admin or owner role for graph mutations' };
+    }
+
+    return { authorized: false, reason: 'Unknown auth type' };
+  }
+
+  /**
+   * Find entity rows by name (case-insensitive, tenant-scoped).
+   * Codex finding #4: LOWER(json_extract()) for case-insensitive matching.
+   */
+  findEntitiesByName(entityName: string, tenantId: string): any[] {
+    return this.db.prepare(
+      `SELECT id, content, created_by, created_at FROM shared_memory
+       WHERE tenant_id = ? AND memory_type = 'entity'
+       AND LOWER(json_extract(content, '$.name')) = LOWER(?)`
+    ).all(tenantId, entityName) as any[];
+  }
+
+  /**
+   * Find observation rows for an entity (case-insensitive, tenant-scoped).
+   */
+  findObservationsByEntity(entityName: string, tenantId: string): any[] {
+    return this.db.prepare(
+      `SELECT id, content, created_by, created_at FROM shared_memory
+       WHERE tenant_id = ? AND memory_type = 'observation'
+       AND LOWER(json_extract(content, '$.entityName')) = LOWER(?)`
+    ).all(tenantId, entityName) as any[];
+  }
+
+  /**
+   * Find relation rows involving an entity (case-insensitive, tenant-scoped).
+   */
+  findRelationsByEntity(entityName: string, tenantId: string): any[] {
+    return this.db.prepare(
+      `SELECT id, content, created_by, created_at FROM shared_memory
+       WHERE tenant_id = ? AND memory_type = 'relation'
+       AND (LOWER(json_extract(content, '$.from')) = LOWER(?)
+            OR LOWER(json_extract(content, '$.to')) = LOWER(?))`
+    ).all(tenantId, entityName, entityName) as any[];
+  }
+
+  /**
+   * Find observations by containsAny substrings (case-insensitive, tenant-scoped).
+   * Codex finding #7: escapes % and _ in patterns.
+   */
+  findObservationsByContainsAny(entityName: string, containsAny: string[], tenantId: string): any[] {
+    if (containsAny.length === 0) return [];
+
+    const escapedPatterns = containsAny.map(s => `%${MemoryManager.escapeLikePattern(s)}%`);
+    const likeConditions = escapedPatterns.map(() => `LOWER(content) LIKE LOWER(?) ESCAPE '\\'`).join(' OR ');
+
+    const sql = `SELECT id, content, created_by, created_at FROM shared_memory
+       WHERE tenant_id = ? AND memory_type = 'observation'
+       AND LOWER(json_extract(content, '$.entityName')) = LOWER(?)
+       AND (${likeConditions})`;
+
+    return this.db.prepare(sql).all(tenantId, entityName, ...escapedPatterns) as any[];
+  }
+
+  /**
+   * Delete graph rows from SQLite in a transaction, then attempt Weaviate cleanup.
+   * Weaviate failures are tombstoned (codex finding #5).
+   */
+  async deleteGraphRows(ids: string[], tenantId: string): Promise<{ deleted: number; weaviateCleanup: number; weaviateFailures: number }> {
+    if (ids.length === 0) return { deleted: 0, weaviateCleanup: 0, weaviateFailures: 0 };
+
+    // SQLite transaction delete
+    const placeholders = ids.map(() => '?').join(',');
+    const txn = this.db.transaction(() => {
+      return this.db.prepare(
+        `DELETE FROM shared_memory WHERE id IN (${placeholders})`
+      ).run(...ids);
+    });
+    const result = txn();
+
+    // Weaviate cleanup (best-effort with tombstone on failure)
+    let weaviateCleanup = 0;
+    let weaviateFailures = 0;
+
+    if (this.weaviateClient) {
+      for (const id of ids) {
+        try {
+          await this.weaviateClient.deleteMemory(id);
+          weaviateCleanup++;
+        } catch (err: any) {
+          weaviateFailures++;
+          // Insert tombstone for retry
+          try {
+            this.db.prepare(
+              `INSERT OR IGNORE INTO failed_weaviate_deletes (id, weaviate_id, tenant_id, last_error)
+               VALUES (?, ?, ?, ?)`
+            ).run(uuidv4(), id, tenantId, err?.message || 'unknown');
+          } catch { /* tombstone write failure is truly non-fatal */ }
+        }
+      }
+    }
+
+    return { deleted: result.changes, weaviateCleanup, weaviateFailures };
+  }
+
+  /**
+   * Update observation content in SQLite and re-embed in Weaviate.
+   * Codex finding #5: delete+reinsert in Weaviate for vector re-embedding.
+   */
+  async updateObservationContent(
+    obsId: string,
+    newContent: string,
+    contentIndex: number | undefined,
+    tenantId: string
+  ): Promise<{ updated: boolean; weaviateReindexed: boolean }> {
+    // Fetch current row
+    const row = this.db.prepare(
+      'SELECT id, content, created_by FROM shared_memory WHERE id = ? AND tenant_id = ?'
+    ).get(obsId, tenantId) as any;
+    if (!row) throw new Error(`Observation ${obsId} not found`);
+
+    let updatedContentObj: any;
+    try {
+      updatedContentObj = JSON.parse(row.content);
+    } catch {
+      throw new Error(`Failed to parse observation content for ${obsId}`);
+    }
+
+    // Replace at contentIndex within contents array, or replace entire content field
+    if (contentIndex !== undefined && Array.isArray(updatedContentObj.contents)) {
+      if (contentIndex < 0 || contentIndex >= updatedContentObj.contents.length) {
+        throw new Error(`contentIndex ${contentIndex} out of range [0, ${updatedContentObj.contents.length - 1}]`);
+      }
+      updatedContentObj.contents[contentIndex] = newContent;
+    } else if (Array.isArray(updatedContentObj.contents) && updatedContentObj.contents.length > 0) {
+      // Replace first content element if no index specified
+      updatedContentObj.contents[0] = newContent;
+    } else {
+      // Fallback: set a contents array
+      updatedContentObj.contents = [newContent];
+    }
+
+    // Update SQLite
+    this.db.prepare(
+      'UPDATE shared_memory SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+    ).run(JSON.stringify(updatedContentObj), obsId);
+
+    // Weaviate: delete + reinsert for vector re-embedding
+    let weaviateReindexed = false;
+    if (this.weaviateClient) {
+      try {
+        await this.weaviateClient.deleteMemory(obsId);
+        await this.weaviateClient.storeMemory({
+          id: obsId,
+          agentId: row.created_by,
+          tenantId,
+          type: 'observation' as any,
+          content: JSON.stringify(updatedContentObj),
+          timestamp: Date.now(),
+          tags: [],
+          priority: 5,
+          relationships: [],
+          metadata: {},
+        });
+        weaviateReindexed = true;
+      } catch (err: any) {
+        // Tombstone for failed Weaviate operation
+        try {
+          this.db.prepare(
+            `INSERT OR IGNORE INTO failed_weaviate_deletes (id, weaviate_id, tenant_id, last_error)
+             VALUES (?, ?, ?, ?)`
+          ).run(uuidv4(), obsId, tenantId, err?.message || 'unknown');
+        } catch { /* non-fatal */ }
+      }
+    }
+
+    return { updated: true, weaviateReindexed };
+  }
+
+  /**
+   * Enhanced audit log for graph mutations (codex finding #6).
+   * Logs tenant_id, actor_type, actor_id, target count, and reason.
+   */
+  auditMutationOp(
+    operation: string,
+    context: RequestContext,
+    entityName: string,
+    targetIds: string[],
+    reason?: string
+  ): void {
+    try {
+      const id = uuidv4();
+      const hash = MemoryManager.contentHash(targetIds.join(','));
+      const actorId = context.userId || context.apiKeyId || 'system';
+      this.db.prepare(
+        `INSERT INTO neural_audit_log (id, operation, agent_id, entity_name, content_hash, flagged, flag_reason, tenant_id, actor_type, actor_id, target_count, reason)
+         VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?)`
+      ).run(
+        id,
+        operation,
+        actorId,
+        entityName,
+        hash,
+        context.tenantId,
+        context.authType,
+        actorId,
+        targetIds.length,
+        reason || null
+      );
+    } catch (e: any) {
+      console.error(`⚠️ Mutation audit log write failed (non-fatal): ${e.message}`);
     }
   }
 }

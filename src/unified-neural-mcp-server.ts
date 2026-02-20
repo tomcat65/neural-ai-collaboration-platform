@@ -721,6 +721,28 @@ export class NeuralMCPServer {
           inputSchema: UnifiedToolSchemas.read_graph.inputSchema,
         },
 
+        // === KNOWLEDGE GRAPH MUTATIONS (Phase A) ===
+        {
+          name: UnifiedToolSchemas.delete_entity.name,
+          description: UnifiedToolSchemas.delete_entity.description,
+          inputSchema: UnifiedToolSchemas.delete_entity.inputSchema,
+        },
+        {
+          name: UnifiedToolSchemas.remove_observations.name,
+          description: UnifiedToolSchemas.remove_observations.description,
+          inputSchema: UnifiedToolSchemas.remove_observations.inputSchema,
+        },
+        {
+          name: UnifiedToolSchemas.update_observation.name,
+          description: UnifiedToolSchemas.update_observation.description,
+          inputSchema: UnifiedToolSchemas.update_observation.inputSchema,
+        },
+        {
+          name: UnifiedToolSchemas.delete_observations_by_entity.name,
+          description: UnifiedToolSchemas.delete_observations_by_entity.description,
+          inputSchema: UnifiedToolSchemas.delete_observations_by_entity.inputSchema,
+        },
+
         // === AI AGENT COMMUNICATION ===
         {
           name: UnifiedToolSchemas.send_ai_message.name,
@@ -1830,6 +1852,259 @@ export class NeuralMCPServer {
                 }, null, 2),
               },
             ],
+          };
+        }
+
+        // === KNOWLEDGE GRAPH MUTATIONS (Phase A) ===
+        case 'delete_entity': {
+          const { entityName, dryRun = false, reason } = args;
+          const actor = context.userId || context.apiKeyId || agent;
+
+          // Authorization (codex finding #1: context only, never args)
+          const authResult = this.memoryManager.authorizeGraphMutation('delete_entity', context);
+          if (!authResult.authorized) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ error: 'Unauthorized', message: authResult.reason }) }],
+              isError: true,
+            };
+          }
+
+          // Find targets (tenant-scoped)
+          const entityRows = this.memoryManager.findEntitiesByName(entityName, tenantId);
+          if (entityRows.length === 0) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ error: 'Not Found', message: `Entity "${entityName}" not found in tenant ${tenantId}` }) }],
+              isError: true,
+            };
+          }
+
+          const observationRows = this.memoryManager.findObservationsByEntity(entityName, tenantId);
+          const relationRows = this.memoryManager.findRelationsByEntity(entityName, tenantId);
+
+          const allTargetIds = [
+            ...entityRows.map((r: any) => r.id),
+            ...observationRows.map((r: any) => r.id),
+            ...relationRows.map((r: any) => r.id),
+          ];
+
+          if (dryRun) {
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  dryRun: true,
+                  entityName,
+                  actor,
+                  targets: {
+                    entities: entityRows.length,
+                    observations: observationRows.length,
+                    relations: relationRows.length,
+                    totalRows: allTargetIds.length,
+                  },
+                  entityIds: entityRows.map((r: any) => r.id),
+                  observationIds: observationRows.map((r: any) => r.id),
+                  relationIds: relationRows.map((r: any) => r.id),
+                }, null, 2),
+              }],
+            };
+          }
+
+          // Execute cascade delete
+          const deleteResult = await this.memoryManager.deleteGraphRows(allTargetIds, tenantId);
+
+          // Audit (codex finding #6)
+          this.memoryManager.auditMutationOp('delete_entity', context, entityName, allTargetIds, reason);
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                status: 'deleted',
+                entityName,
+                actor,
+                reason: reason || null,
+                deleted: {
+                  entities: entityRows.length,
+                  observations: observationRows.length,
+                  relations: relationRows.length,
+                  totalRows: deleteResult.deleted,
+                },
+                weaviateCleanup: deleteResult.weaviateCleanup,
+                weaviateFailures: deleteResult.weaviateFailures,
+              }, null, 2),
+            }],
+          };
+        }
+
+        case 'remove_observations': {
+          const { entityName, observationIds, containsAny, dryRun = false, reason } = args;
+          const actor = context.userId || context.apiKeyId || agent;
+
+          // Authorization
+          const authResult = this.memoryManager.authorizeGraphMutation('remove_observations', context);
+          if (!authResult.authorized) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ error: 'Unauthorized', message: authResult.reason }) }],
+              isError: true,
+            };
+          }
+
+          // Find targets based on selector
+          let targetRows: any[] = [];
+          if (observationIds && observationIds.length > 0) {
+            // Find by entity + filter to specified IDs
+            const allObs = this.memoryManager.findObservationsByEntity(entityName, tenantId);
+            const idSet = new Set(observationIds);
+            targetRows = allObs.filter((r: any) => idSet.has(r.id));
+          } else if (containsAny && containsAny.length > 0) {
+            targetRows = this.memoryManager.findObservationsByContainsAny(entityName, containsAny, tenantId);
+          } else {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ error: 'Bad Request', message: 'Provide observationIds or containsAny selector' }) }],
+              isError: true,
+            };
+          }
+
+          if (targetRows.length === 0) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ status: 'no_match', entityName, matchedObservations: 0 }) }],
+            };
+          }
+
+          const targetIds = targetRows.map((r: any) => r.id);
+
+          if (dryRun) {
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  dryRun: true,
+                  entityName,
+                  actor,
+                  matchedObservations: targetIds.length,
+                  observationIds: targetIds,
+                }, null, 2),
+              }],
+            };
+          }
+
+          const deleteResult = await this.memoryManager.deleteGraphRows(targetIds, tenantId);
+          this.memoryManager.auditMutationOp('remove_observations', context, entityName, targetIds, reason);
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                status: 'removed',
+                entityName,
+                actor,
+                reason: reason || null,
+                removedObservations: deleteResult.deleted,
+                weaviateCleanup: deleteResult.weaviateCleanup,
+                weaviateFailures: deleteResult.weaviateFailures,
+              }, null, 2),
+            }],
+          };
+        }
+
+        case 'update_observation': {
+          const { observationId, contentIndex, newContent, reason } = args;
+          const actor = context.userId || context.apiKeyId || agent;
+
+          // Authorization
+          const authResult = this.memoryManager.authorizeGraphMutation('update_observation', context);
+          if (!authResult.authorized) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ error: 'Unauthorized', message: authResult.reason }) }],
+              isError: true,
+            };
+          }
+
+          // Sanitizer parity (codex finding #3)
+          const sanitizeResult = MemoryManager.sanitizeContent(newContent);
+          if (!sanitizeResult.safe) {
+            this.memoryManager.auditLog('update_observation', actor, newContent, observationId, true, sanitizeResult.reason);
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ error: 'Content Rejected', message: `Content flagged by sanitizer: ${sanitizeResult.reason}` }) }],
+              isError: true,
+            };
+          }
+
+          const updateResult = await this.memoryManager.updateObservationContent(
+            observationId, newContent, contentIndex, tenantId
+          );
+
+          this.memoryManager.auditMutationOp('update_observation', context, observationId, [observationId], reason);
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                status: 'updated',
+                observationId,
+                actor,
+                reason: reason || null,
+                updated: updateResult.updated,
+                weaviateReindexed: updateResult.weaviateReindexed,
+              }, null, 2),
+            }],
+          };
+        }
+
+        case 'delete_observations_by_entity': {
+          const { entityName, dryRun = false, reason } = args;
+          const actor = context.userId || context.apiKeyId || agent;
+
+          // Authorization
+          const authResult = this.memoryManager.authorizeGraphMutation('delete_observations_by_entity', context);
+          if (!authResult.authorized) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ error: 'Unauthorized', message: authResult.reason }) }],
+              isError: true,
+            };
+          }
+
+          const observationRows = this.memoryManager.findObservationsByEntity(entityName, tenantId);
+
+          if (observationRows.length === 0) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ status: 'no_match', entityName, matchedObservations: 0 }) }],
+            };
+          }
+
+          const targetIds = observationRows.map((r: any) => r.id);
+
+          if (dryRun) {
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  dryRun: true,
+                  entityName,
+                  actor,
+                  matchedObservations: targetIds.length,
+                  observationIds: targetIds,
+                }, null, 2),
+              }],
+            };
+          }
+
+          const deleteResult = await this.memoryManager.deleteGraphRows(targetIds, tenantId);
+          this.memoryManager.auditMutationOp('delete_observations_by_entity', context, entityName, targetIds, reason);
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                status: 'deleted',
+                entityName,
+                actor,
+                reason: reason || null,
+                deletedObservations: deleteResult.deleted,
+                weaviateCleanup: deleteResult.weaviateCleanup,
+                weaviateFailures: deleteResult.weaviateFailures,
+              }, null, 2),
+            }],
           };
         }
 

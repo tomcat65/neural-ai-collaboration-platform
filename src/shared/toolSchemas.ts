@@ -364,6 +364,71 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
       required: ['agentId', 'olderThanDays']
     }
   },
+
+  // === KNOWLEDGE GRAPH MUTATIONS (Phase A) ===
+  delete_entity: {
+    name: 'delete_entity',
+    description: 'Delete an entity and cascade-delete its observations and relations from the knowledge graph. Requires admin-equivalent authorization.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entityName: { type: 'string', description: 'Name of the entity to delete (case-insensitive match)' },
+        dryRun: { type: 'boolean', description: 'If true, return targets without executing deletion', default: false },
+        reason: { type: 'string', description: 'Reason for deletion (recorded in audit log)' },
+      },
+      required: ['entityName'],
+    },
+  },
+  remove_observations: {
+    name: 'remove_observations',
+    description: 'Remove specific observations from an entity by ID or content match. Requires admin-equivalent authorization.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entityName: { type: 'string', description: 'Entity the observations belong to (case-insensitive match)' },
+        observationIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Specific observation row IDs to remove',
+        },
+        containsAny: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Remove observations whose content contains any of these substrings (case-insensitive, special chars escaped)',
+        },
+        dryRun: { type: 'boolean', description: 'If true, return targets without executing deletion', default: false },
+        reason: { type: 'string', description: 'Reason for removal (recorded in audit log)' },
+      },
+      required: ['entityName'],
+    },
+  },
+  update_observation: {
+    name: 'update_observation',
+    description: 'Update the content of a specific observation. Runs sanitizer for parity with create/add paths. Requires admin-equivalent authorization.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        observationId: { type: 'string', description: 'Row ID of the observation to update' },
+        contentIndex: { type: 'number', description: 'Index within the contents array to replace (default: replaces entire content)' },
+        newContent: { type: 'string', description: 'New content string' },
+        reason: { type: 'string', description: 'Reason for update (recorded in audit log)' },
+      },
+      required: ['observationId', 'newContent'],
+    },
+  },
+  delete_observations_by_entity: {
+    name: 'delete_observations_by_entity',
+    description: 'Delete ALL observations for a given entity. Requires admin-equivalent authorization.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entityName: { type: 'string', description: 'Entity name whose observations to delete (case-insensitive match)' },
+        dryRun: { type: 'boolean', description: 'If true, return targets without executing deletion', default: false },
+        reason: { type: 'string', description: 'Reason for deletion (recorded in audit log)' },
+      },
+      required: ['entityName'],
+    },
+  },
 };
 
 export const getUnifiedToolDefinitions = (...names: (keyof typeof UnifiedToolSchemas)[]): ToolDefinition[] => {
