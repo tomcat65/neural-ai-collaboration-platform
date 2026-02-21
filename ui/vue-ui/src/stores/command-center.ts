@@ -289,9 +289,14 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     return res.json()
   }
 
+  let initialLoadDone = false
+
   async function fetchMessages() {
     try {
-      let url = '/api/recent-events?limit=50'
+      // First load: fetch 200 to capture older project history
+      // Incremental: fetch 50 (only new messages since cursor)
+      const limit = initialLoadDone ? 50 : 200
+      let url = `/api/recent-events?limit=${limit}`
       if (messageCursor) {
         url += `&since=${encodeURIComponent(messageCursor)}`
       }
@@ -319,6 +324,7 @@ export const useCommandCenterStore = defineStore('command-center', () => {
       }
       isConnected.value = true
       lastError.value = null
+      initialLoadDone = true
     } catch (e: any) {
       console.error('fetchMessages failed:', e)
       lastError.value = e.message
