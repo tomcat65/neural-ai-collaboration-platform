@@ -21,6 +21,7 @@ import { ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import type { ForceGraph3DInstance } from '3d-force-graph'
 import * as THREE from 'three'
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js'
+import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js'
 import { useBrainStore } from '@/stores/brain'
 import type { GraphNode } from '@/stores/brain'
 import { BrainShell } from './brain/BrainShell'
@@ -56,6 +57,10 @@ interface SatelliteEntry {
 }
 const satelliteEntries = new Map<string, SatelliteEntry>()
 
+// CSS2D label renderer (overlays WebGL canvas)
+let css2dRenderer: CSS2DRenderer | null = null
+const labelElements = new Map<string, HTMLDivElement>()
+
 // Brain shell + particle cloud (S4)
 let brainShell: BrainShell | null = null
 let particleCloud: ParticleCloud | null = null
@@ -71,30 +76,60 @@ const TYPE_COLORS: Record<string, string> = {
   person: '#ff6b35',    // molten orange
   feature: '#39ff14',   // neon green
   tool: '#bf5af2',      // vivid purple
-  concept: '#ff2d78'    // hot pink
+  concept: '#ff2d78',   // hot pink
+  task: '#ffd700',      // gold
+  story: '#ff9500',     // amber
+  agent: '#7df9ff',     // ice blue
+  context: '#a78bfa',   // soft violet
+  system: '#64748b'     // slate
 }
+const DEFAULT_COLOR = '#8b95a5' // muted steel for unknown types
 
 // Emissive intensity per type for glow
 const TYPE_EMISSIVE: Record<string, number> = {
-  project: 0.6,
-  person: 0.5,
-  feature: 0.5,
-  tool: 0.5,
-  concept: 0.5
+  project: 0.1,
+  person: 0.1,
+  feature: 0.1,
+  tool: 0.1,
+  concept: 0.1
 }
 
 function getNodeColor(node: GraphNode): string {
-  return TYPE_COLORS[node.entityType] ?? '#ffffff'
+  return TYPE_COLORS[node.entityType] ?? DEFAULT_COLOR
 }
 
 function getNodeRadius(node: GraphNode): number {
-  return Math.min(12, Math.max(3, Math.sqrt(node.observationCount) * 2))
+  const count = node.observationCount || 0
+  return Math.min(6, Math.max(2, Math.log2(count + 1) * 1.2))
+}
+
+/**
+ * Apply Fibonacci disk layout — golden angle sunflower pattern on z=0 plane.
+ * Returns nodes with fx/fy/fz set for fixed positioning.
+ */
+function applyFibonacciLayout(nodes: GraphNode[]): (GraphNode & { fx: number; fy: number; fz: number })[] {
+  const layoutRadius = 350
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5))
+  const nodeCount = nodes.length
+  return nodes.map((n, i) => {
+    const r = layoutRadius * (0.15 + 0.85 * Math.sqrt((i + 0.5) / nodeCount))
+    const theta = i * goldenAngle
+    return {
+      ...n,
+      fx: r * Math.cos(theta),
+      fy: r * Math.sin(theta),
+      fz: 0
+    }
+  })
 }
 
 function handleResize() {
   if (!graph || !containerRef.value) return
   graph.width(containerRef.value.clientWidth)
   graph.height(containerRef.value.clientHeight)
+  if (css2dRenderer) {
+    css2dRenderer.setSize(containerRef.value.clientWidth, containerRef.value.clientHeight)
+  }
 }
 
 /**
@@ -314,6 +349,19 @@ function updateLOD() {
     })
   }
 
+  // LOD-aware labels
+  for (const [name, labelDiv] of labelElements) {
+    if (newTier >= 2) {
+      labelDiv.style.opacity = '0'
+    } else if (newTier >= 1) {
+      // Medium distance: only show labels for entities with 5+ observations
+      const node = brainStore.nodes.find(n => n.name === name)
+      labelDiv.style.opacity = (node && (node.observationCount || 0) >= 5) ? '0.5' : '0'
+    } else {
+      labelDiv.style.opacity = '1'
+    }
+  }
+
   // Tier 2: hide particles
   if (particleCloud) {
     particleCloud.setVisible(newTier < 2)
@@ -360,43 +408,49 @@ onMounted(async () => {
 
   // Create brain shell and particle cloud before graph init so we can
   // reference shellRadius during force layout configuration.
-  brainShell = new BrainShell({ radius: 80 })
-  particleCloud = new ParticleCloud({ radius: 76 })
+  brainShell = new BrainShell({ radius: 40, baseOpacity: 0.02, edgeOpacity: 0.08 })
+  particleCloud = new ParticleCloud({ radius: 130, count: 250, opacity: 0.06 })
 
   graph = factory()(containerRef.value)
     .nodeId('name')
     .backgroundColor('#050510')
-    .linkCurvature(0.25)
+    .linkCurvature(0.15)
     .nodeThreeObject((node: object) => {
       const gNode = node as GraphNode
       const radius = getNodeRadius(gNode)
       const color = new THREE.Color(getNodeColor(gNode))
-      const emissiveIntensity = TYPE_EMISSIVE[gNode.entityType] ?? 0.4
-
-      // Glowing emissive sphere — bioluminescent feel
+      // Clean neon sphere — flat color, no light interaction
       const geometry = new THREE.SphereGeometry(radius, 24, 24)
-      const material = new THREE.MeshStandardMaterial({
+      const material = new THREE.MeshBasicMaterial({
         color: color,
-        emissive: color,
-        emissiveIntensity: emissiveIntensity,
         transparent: true,
-        opacity: 0.9,
-        roughness: 0.2,
-        metalness: 0.1
+        opacity: 0.92
       })
       const sphere = new THREE.Mesh(geometry, material)
 
       // Outer glow halo
-      const haloGeom = new THREE.SphereGeometry(radius * 1.6, 16, 16)
+      const haloGeom = new THREE.SphereGeometry(radius * 1.4, 16, 16)
       const haloMat = new THREE.MeshBasicMaterial({
         color: color,
         transparent: true,
-        opacity: 0.08,
+        opacity: 0.03,
         blending: THREE.AdditiveBlending,
         depthWrite: false
       })
       const halo = new THREE.Mesh(haloGeom, haloMat)
       sphere.add(halo)
+
+      // CSS2D label — crisp HTML text unaffected by bloom
+      const labelDiv = document.createElement('div')
+      labelDiv.className = 'node-label'
+      labelDiv.textContent = gNode.name.length > 20
+        ? gNode.name.slice(0, 20) + '\u2026'
+        : gNode.name
+      labelDiv.style.setProperty('--node-color', getNodeColor(gNode))
+      const label = new CSS2DObject(labelDiv)
+      label.position.set(0, radius + 6, 0)
+      sphere.add(label)
+      labelElements.set(gNode.name, labelDiv)
 
       return sphere
     })
@@ -405,7 +459,7 @@ onMounted(async () => {
       // Gradient-like link colors based on source type
       const l = link as { source: GraphNode | string }
       const srcName = typeof l.source === 'string' ? l.source : l.source?.entityType
-      const srcColor = srcName ? (TYPE_COLORS[srcName] ?? '#1a4a6e') : '#1a4a6e'
+      const srcColor = srcName ? (TYPE_COLORS[srcName] ?? '#1a3a5e') : '#1a3a5e'
       return srcColor
     })
     .linkWidth(0.4)
@@ -414,30 +468,20 @@ onMounted(async () => {
     .linkDirectionalParticleWidth(1.2)
     .linkDirectionalParticleSpeed(0.006)
     .linkDirectionalParticleColor(() => '#00e5ff')
-    .d3AlphaDecay(0.02) // slower decay for better brain-bounded settlement
-    .warmupTicks(100)    // S5: run 100 ticks of force simulation then freeze
-    .cooldownTicks(0)    // S5: freeze after warmup completes
-    .cooldownTime(5000)  // S5: auto-freeze after 5 seconds max
-    .graphData({
-      nodes: brainStore.nodes,
-      links: brainStore.links
-    })
+    .warmupTicks(0)
+    .cooldownTicks(0)
+    .cooldownTime(0)
 
-  // Constrain entity positions to 85% of shell radius on each tick
-  const shell = brainShell
-  graph.onEngineTick(() => {
-    if (!graph || !shell) return
-    const data = graph.graphData()
-    for (const node of data.nodes) {
-      const n = node as { x?: number; y?: number; z?: number }
-      if (n.x != null && n.y != null && n.z != null) {
-        const clamped = shell.clampToShell(n.x, n.y, n.z)
-        n.x = clamped.x
-        n.y = clamped.y
-        n.z = clamped.z
-      }
-    }
+  graph.graphData({
+    nodes: applyFibonacciLayout(brainStore.nodes),
+    links: brainStore.links
   })
+
+  // Position camera to look straight at the flat disk layout (z-axis viewing)
+  // Delay ensures we override the auto-fit that happens after graphData()
+  setTimeout(() => {
+    graph?.cameraPosition({ x: 0, y: 0, z: 500 }, { x: 0, y: 0, z: 0 }, 300)
+  }, 200)
 
   // Add brain shell and particle cloud to the Three.js scene
   const scene = graph.scene()
@@ -445,12 +489,12 @@ onMounted(async () => {
   scene.add(particleCloud.mesh)
 
   // Ambient + point lighting for emissive node materials
-  const ambientLight = new THREE.AmbientLight(0x111122, 0.5)
+  const ambientLight = new THREE.AmbientLight(0x111122, 0.6)
   scene.add(ambientLight)
-  const pointLight1 = new THREE.PointLight(0x00e5ff, 0.8, 500)
+  const pointLight1 = new THREE.PointLight(0x00e5ff, 0.3, 500)
   pointLight1.position.set(60, 60, 60)
   scene.add(pointLight1)
-  const pointLight2 = new THREE.PointLight(0xbf5af2, 0.5, 500)
+  const pointLight2 = new THREE.PointLight(0xbf5af2, 0.2, 500)
   pointLight2.position.set(-60, -40, -60)
   scene.add(pointLight2)
 
@@ -483,6 +527,11 @@ onMounted(async () => {
     // Only update particles if visible (LOD tier < 2)
     if (cloud.mesh.visible) {
       cloud.update(delta)
+    }
+
+    // Render CSS2D labels
+    if (css2dRenderer && graph) {
+      css2dRenderer.render(graph.scene(), graph.camera())
     }
 
     particleAnimId = requestAnimationFrame(animateParticles)
@@ -519,14 +568,23 @@ onMounted(async () => {
     }
   })
 
-  // Bloom post-processing — dramatic sci-fi glow
+  // Bloom post-processing — very subtle glow on brightest elements only
   const bloomPass = new UnrealBloomPass(
     new THREE.Vector2(containerRef.value.clientWidth, containerRef.value.clientHeight),
-    1.8,  // strength — rich, dramatic glow on nodes and shell edges
-    0.8,  // radius — wide spread for ethereal brain glow
-    0.12  // threshold — low enough to catch node halos and shell Fresnel
+    0.12,  // strength — subtle glow
+    0.3,   // radius — tight
+    0.7    // threshold — only very bright pixels bloom
   )
   graph.postProcessingComposer().addPass(bloomPass)
+
+  // CSS2DRenderer — overlays WebGL canvas for crisp HTML labels
+  css2dRenderer = new CSS2DRenderer()
+  css2dRenderer.setSize(containerRef.value.clientWidth, containerRef.value.clientHeight)
+  css2dRenderer.domElement.style.position = 'absolute'
+  css2dRenderer.domElement.style.top = '0'
+  css2dRenderer.domElement.style.left = '0'
+  css2dRenderer.domElement.style.pointerEvents = 'none'
+  containerRef.value.appendChild(css2dRenderer.domElement)
 
   // Initial size
   graph.width(containerRef.value.clientWidth)
@@ -536,13 +594,17 @@ onMounted(async () => {
   containerRef.value.addEventListener('mousemove', handleMouseMove)
 })
 
-// Watch for store data changes and update graph
+// Watch for store data changes and update graph (clear stale CSS2D labels)
 watch(
   () => [brainStore.nodes, brainStore.links],
   () => {
     if (!graph) return
+
+    // Clear stale label entries — nodeThreeObject will recreate them
+    labelElements.clear()
+
     graph.graphData({
-      nodes: brainStore.nodes,
+      nodes: applyFibonacciLayout(brainStore.nodes),
       links: brainStore.links
     })
   },
@@ -572,6 +634,8 @@ watch(
   (newId) => {
     if (newId === null) {
       removeAllSatellites()
+      // Reset camera to overview — orbit target back to origin
+      graph?.cameraPosition({ x: 0, y: 0, z: 500 }, { x: 0, y: 0, z: 0 }, 500)
     }
   }
 )
@@ -598,6 +662,13 @@ onBeforeUnmount(() => {
     particleCloud.dispose()
     particleCloud = null
   }
+
+  // Clean up CSS2D renderer
+  if (css2dRenderer && containerRef.value) {
+    containerRef.value.removeChild(css2dRenderer.domElement)
+    css2dRenderer = null
+  }
+  labelElements.clear()
 
   if (graph) {
     graph._destructor()
@@ -662,6 +733,23 @@ onBeforeUnmount(() => {
   padding: 4px 8px;
   border-radius: 4px;
   pointer-events: none;
+  user-select: none;
+}
+</style>
+
+<style>
+/* CSS2DRenderer labels — must be global (injected outside scoped boundary) */
+.node-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e8eaed;
+  background: rgba(5, 5, 16, 0.82);
+  padding: 2px 7px;
+  border-radius: 4px;
+  border-left: 3px solid var(--node-color, #8b95a5);
+  white-space: nowrap;
+  text-shadow: none;
+  transition: opacity 0.3s ease;
   user-select: none;
 }
 </style>

@@ -1,11 +1,17 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
-import { useDashboardStore } from '@/stores/dashboard'
+import { onMounted, onUnmounted } from 'vue'
+import { useRoute } from 'vue-router'
+import { useCommandCenterStore } from '@/stores/command-center'
 
-const dashboardStore = useDashboardStore()
+const route = useRoute()
+const ccStore = useCommandCenterStore()
 
 onMounted(() => {
-  dashboardStore.initialize()
+  ccStore.initialize()
+})
+
+onUnmounted(() => {
+  ccStore.destroy()
 })
 </script>
 
@@ -23,31 +29,33 @@ onMounted(() => {
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #0a0a0a;
-  color: #ffffff;
+  font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--cc-bg, #030712);
+  color: var(--cc-text, #e2e8f0);
   overflow-x: hidden;
+  font-size: calc(15px * var(--cc-font-scale, 1));
 }
 
 #app {
   min-height: 100vh;
 }
 
-/* Global scrollbar styling */
+/* Global scrollbar styling — cyan accent */
 ::-webkit-scrollbar {
   width: 8px;
+  height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--cc-scrollbar-track, rgba(255, 255, 255, 0.05));
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(16, 185, 129, 0.5);
+  background: var(--cc-scrollbar-thumb, rgba(34, 211, 238, 0.3));
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(16, 185, 129, 0.7);
+  background: var(--cc-scrollbar-hover, rgba(34, 211, 238, 0.5));
 }
 </style>

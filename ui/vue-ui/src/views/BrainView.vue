@@ -3,10 +3,14 @@
     <div class="brain-header">
       <router-link to="/" class="back-link">Back to Dashboard</router-link>
       <h1 class="brain-title">Neural Brain</h1>
+      <label class="zero-obs-toggle">
+        <input type="checkbox" v-model="brainStore.showZeroObs" />
+        Show 0-obs
+      </label>
       <div class="brain-status">
         <span v-if="brainStore.loading" class="status-loading">Loading graph...</span>
         <span v-else class="status-ready">
-          {{ brainStore.nodes.length }} entities | {{ brainStore.links.length }} relations
+          {{ brainStore.nodes.length }}/{{ brainStore.rawNodes.length }} entities | {{ brainStore.links.length }} relations
         </span>
       </div>
     </div>
@@ -27,6 +31,9 @@ const brainStore = useBrainStore()
 
 <style scoped>
 .brain-view {
+  position: fixed;
+  left: 0;
+  top: 0;
   display: flex;
   flex-direction: column;
   width: 100vw;
@@ -34,6 +41,7 @@ const brainStore = useBrainStore()
   background: #050510;
   color: #ffffff;
   overflow: hidden;
+  z-index: 100;
 }
 
 .brain-header {
@@ -73,6 +81,21 @@ const brainStore = useBrainStore()
   text-shadow: none;
   font-weight: 700;
   letter-spacing: 0.5px;
+}
+
+.zero-obs-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: #6b7280;
+  cursor: pointer;
+  user-select: none;
+}
+
+.zero-obs-toggle input {
+  accent-color: #00e5ff;
+  cursor: pointer;
 }
 
 .brain-status {

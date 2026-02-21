@@ -1,35 +1,75 @@
 @import './base.css';
 
+/* ── Command Center Theme Variables ─────────────────────────── */
+
+[data-theme="dark"] {
+  --cc-bg: #030712;
+  --cc-surface-1: #0a0f1a;
+  --cc-surface-2: #111827;
+  --cc-surface-3: #1a2332;
+  --cc-border: #1e293b;
+  --cc-text: #e2e8f0;
+  --cc-text-dim: #94a3b8;
+  --cc-text-muted: #64748b;
+  --cc-cyan: #22d3ee;
+  --cc-amber: #fbbf24;
+  --cc-red: #ef4444;
+  --cc-green: #34d399;
+  --cc-purple: #a78bfa;
+  --cc-cyan-dim: rgba(34, 211, 238, 0.15);
+  --cc-amber-dim: rgba(251, 191, 36, 0.15);
+  --cc-red-dim: rgba(239, 68, 68, 0.15);
+  --cc-green-dim: rgba(52, 211, 153, 0.15);
+  --cc-green-glow: rgba(16, 185, 129, 0.08);
+  --cc-green-glow-hover: rgba(16, 185, 129, 0.14);
+  --cc-green-border: rgba(52, 211, 153, 0.12);
+  --cc-scrollbar-track: rgba(255, 255, 255, 0.05);
+  --cc-scrollbar-thumb: rgba(34, 211, 238, 0.3);
+  --cc-scrollbar-hover: rgba(34, 211, 238, 0.5);
+}
+
+[data-theme="light"] {
+  --cc-bg: #f8fafc;
+  --cc-surface-1: #ffffff;
+  --cc-surface-2: #f1f5f9;
+  --cc-surface-3: #e2e8f0;
+  --cc-border: #cbd5e1;
+  --cc-text: #1e293b;
+  --cc-text-dim: #475569;
+  --cc-text-muted: #94a3b8;
+  --cc-cyan: #0891b2;
+  --cc-amber: #d97706;
+  --cc-red: #dc2626;
+  --cc-green: #059669;
+  --cc-purple: #7c3aed;
+  --cc-cyan-dim: rgba(8, 145, 178, 0.1);
+  --cc-amber-dim: rgba(217, 119, 6, 0.1);
+  --cc-red-dim: rgba(220, 38, 38, 0.1);
+  --cc-green-dim: rgba(5, 150, 105, 0.1);
+  --cc-green-glow: rgba(5, 150, 105, 0.06);
+  --cc-green-glow-hover: rgba(5, 150, 105, 0.12);
+  --cc-green-border: rgba(5, 150, 105, 0.15);
+  --cc-scrollbar-track: rgba(0, 0, 0, 0.05);
+  --cc-scrollbar-thumb: rgba(8, 145, 178, 0.3);
+  --cc-scrollbar-hover: rgba(8, 145, 178, 0.5);
+}
+
+/* ── Global Overrides ───────────────────────────────────────── */
+
 #app {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
   font-weight: normal;
 }
 
 a,
 .green {
   text-decoration: none;
-  color: hsla(160, 100%, 37%, 1);
+  color: var(--cc-cyan, hsla(160, 100%, 37%, 1));
   transition: 0.4s;
   padding: 3px;
 }
 
 @media (hover: hover) {
   a:hover {
-    background-color: hsla(160, 100%, 37%, 0.2);
-  }
-}
-
-@media (min-width: 1024px) {
-  body {
-    display: flex;
-    place-items: center;
-  }
-
-  #app {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    padding: 0 2rem;
+    background-color: var(--cc-cyan-dim, hsla(160, 100%, 37%, 0.2));
   }
 }

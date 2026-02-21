@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 
 export interface GraphNode {
   name: string
@@ -45,9 +45,65 @@ const MOCK_LINKS: GraphLink[] = [
   { source: 'three-js', target: 'brain-viz', relationType: 'powers' }
 ]
 
+// Prefixes that indicate test/artifact entities to filter out
+const TEST_PREFIXES = [
+  '_contract_test_',
+  '_session_test_',
+  'test_entity_',
+  'prov_rel_',
+  'cascade_test_',
+  'cascade_target_'
+]
+
+function isTestEntity(name: string | undefined): boolean {
+  if (!name) return true // nameless entities are noise — filter them out
+  const lower = name.toLowerCase()
+  return TEST_PREFIXES.some(prefix => lower.startsWith(prefix))
+}
+
+/** Deduplicate nodes by name (case-insensitive), keeping highest observationCount */
+function deduplicateNodes(nodes: GraphNode[]): GraphNode[] {
+  const best = new Map<string, GraphNode>()
+  for (const node of nodes) {
+    const key = node.name.toLowerCase()
+    const existing = best.get(key)
+    if (!existing || (node.observationCount || 0) > (existing.observationCount || 0)) {
+      best.set(key, node)
+    }
+  }
+  return Array.from(best.values())
+}
+
 export const useBrainStore = defineStore('brain', () => {
-  const nodes = ref<GraphNode[]>([])
-  const links = ref<GraphLink[]>([])
+  // Raw unfiltered data from API
+  const rawNodes = ref<GraphNode[]>([])
+  const rawLinks = ref<GraphLink[]>([])
+
+  // Filter controls
+  const showZeroObs = ref(false)
+
+  // Filtered + deduplicated nodes
+  const nodes = computed<GraphNode[]>(() => {
+    let filtered = rawNodes.value.filter(n => !isTestEntity(n.name))
+    filtered = deduplicateNodes(filtered)
+    if (!showZeroObs.value) {
+      filtered = filtered.filter(n => (n.observationCount || 0) > 0)
+    }
+    return filtered
+  })
+
+  // Filtered links — only keep links whose source+target survived filtering
+  // Use case-insensitive matching to align with case-insensitive deduplication
+  const links = computed<GraphLink[]>(() => {
+    const validNames = new Set(nodes.value.map(n => n.name.toLowerCase()))
+    return rawLinks.value.filter(l => {
+      const src = typeof l.source === 'string' ? l.source : (l.source as any)?.name ?? ''
+      const tgt = typeof l.target === 'string' ? l.target : (l.target as any)?.name ?? ''
+      if (!src || !tgt) return false
+      return validNames.has(src.toLowerCase()) && validNames.has(tgt.toLowerCase())
+    })
+  })
+
   const loading = ref(false)
   const error = ref<string | null>(null)
   const expandedEntityId = ref<string | null>(null)
@@ -76,12 +132,12 @@ export const useBrainStore = defineStore('brain', () => {
       }
 
       const data = await response.json()
-      nodes.value = data.nodes ?? []
-      links.value = data.links ?? []
+      rawNodes.value = data.nodes ?? []
+      rawLinks.value = data.links ?? []
     } catch (err) {
       console.warn('Graph API unavailable, using mock data:', err)
-      nodes.value = MOCK_NODES
-      links.value = MOCK_LINKS
+      rawNodes.value = MOCK_NODES
+      rawLinks.value = MOCK_LINKS
     } finally {
       loading.value = false
     }
@@ -148,8 +204,11 @@ export const useBrainStore = defineStore('brain', () => {
   }
 
   return {
+    rawNodes,
+    rawLinks,
     nodes,
     links,
+    showZeroObs,
     loading,
     error,
     expandedEntityId,
