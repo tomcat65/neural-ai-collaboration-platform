@@ -92,6 +92,31 @@ function isRealProject(name: string): boolean {
   return !TEST_ENTITY_PREFIXES.some((p) => name.startsWith(p))
 }
 
+// ── Entity → Agent Resolver ─────────────────────────────────
+// Maps graph entity types to the real messaging agent IDs they run as
+const ENTITY_TYPE_TO_AGENT: Record<string, string> = {
+  claude_code_subagent: 'claude-code',
+}
+
+// Static alias overrides for known graph entities → real agent IDs
+const ENTITY_ALIAS: Record<string, string> = {
+  'spectra-builder-agent': 'claude-code',
+  'spectra-verifier-agent': 'claude-code',
+  'spectra-planner-agent': 'claude-code',
+  'spectra-reviewer-agent': 'claude-code',
+  'spectra-auditor-agent': 'claude-code',
+}
+
+/** Resolve a graph entity to the real messaging agent ID it maps to */
+function resolveEntityToAgent(entityName: string, entityType: string): string | null {
+  // 1. Static alias (most specific)
+  if (ENTITY_ALIAS[entityName]) return ENTITY_ALIAS[entityName]
+  // 2. Entity type mapping
+  const typeLower = entityType.toLowerCase()
+  if (ENTITY_TYPE_TO_AGENT[typeLower]) return ENTITY_TYPE_TO_AGENT[typeLower]
+  return null
+}
+
 export interface ProjectInfo {
   name: string
   observationCount: number
@@ -114,6 +139,7 @@ export const useCommandCenterStore = defineStore('command-center', () => {
   const dismissedAttentionIds = ref<Set<string>>(new Set())
   const availableProjects = ref<ProjectInfo[]>([])
   const graphLinks = ref<GraphLink[]>([])  // relations from knowledge graph
+  const graphNodes = ref<{ name: string; entityType: string }[]>([])  // entity type lookups
 
   const isConnected = ref(false)
   const lastError = ref<string | null>(null)
@@ -162,6 +188,44 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     return related
   })
 
+  // ── Graph-first project participants (codex suggestion #1 + #2) ──
+  // Resolve USES_AGENT graph entities to real messaging agent IDs
+  // Returns Map<realAgentId, graphEntityNames[]>
+  const graphProjectParticipants = computed<Map<string, string[]>>(() => {
+    if (!activeProject.value) return new Map()
+    const proj = activeProject.value.toLowerCase()
+    const result = new Map<string, string[]>()
+
+    for (const link of graphLinks.value) {
+      if (link.relationType !== 'USES_AGENT') continue
+      const src = link.source.toLowerCase()
+      if (src !== proj && !src.includes(proj)) continue
+
+      const entityName = link.target
+      const node = graphNodes.value.find((n) => n.name === entityName)
+      const entityType = node?.entityType || ''
+      const resolved = resolveEntityToAgent(entityName, entityType)
+      if (resolved) {
+        const existing = result.get(resolved)
+        if (existing) existing.push(entityName)
+        else result.set(resolved, [entityName])
+      }
+    }
+    return result
+  })
+
+  // Latest project message per agent (codex suggestion #3)
+  const latestProjectMessageByAgent = computed<Map<string, Message>>(() => {
+    const map = new Map<string, Message>()
+    for (const m of filteredMessages.value) {
+      const existing = map.get(m.fromAgent)
+      if (!existing || m.createdAt > existing.createdAt) {
+        map.set(m.fromAgent, m)
+      }
+    }
+    return map
+  })
+
   /** Is this message genuinely ABOUT the active project? (not just a passing mention) */
   function isMessageAboutProject(m: Message, proj: string): boolean {
     const content = m.content.toLowerCase()
@@ -208,10 +272,17 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     return list
   })
 
-  // Agents derived from project-filtered messages
+  // Agents derived from graph (primary) + messages (augmented) — codex suggestion #1+#2
   const projectAgentNames = computed<Set<string>>(() => {
     if (!activeProject.value) return new Set()
     const names = new Set<string>()
+
+    // Graph-first: agents from USES_AGENT relations (authoritative)
+    for (const agentId of graphProjectParticipants.value.keys()) {
+      names.add(agentId)
+    }
+
+    // Message-augmented: agents from project-filtered messages
     for (const m of filteredMessages.value) {
       if (!m.fromAgent.startsWith('_')) names.add(m.fromAgent)
       if (!m.toAgent.startsWith('_')) names.add(m.toAgent)
@@ -407,8 +478,11 @@ export const useCommandCenterStore = defineStore('command-center', () => {
         `/api/graph-export?includeObservations=true`
       )
 
-      // Store graph links for project-context filtering
+      // Store graph links + nodes for project-context filtering and entity resolution
       graphLinks.value = data.links || []
+      graphNodes.value = (data.nodes || [])
+        .filter((n) => n.name)
+        .map((n) => ({ name: n.name, entityType: n.entityType }))
 
       // Build a map of latest observation per entity
       const obsMap = new Map<string, { content: string; updatedAt: Date }>()
@@ -517,6 +591,8 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     filteredKnowledge,
     projectAgentNames,
     projectRelatedEntities,
+    graphProjectParticipants,
+    latestProjectMessageByAgent,
     messageTypes,
     agentNames,
     attentionItems,

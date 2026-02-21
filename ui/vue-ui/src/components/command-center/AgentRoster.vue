@@ -19,6 +19,42 @@ function meta(agent: Agent) {
   return AGENT_META[agent.name] || AGENT_META[agent.id] || DEFAULT_META
 }
 
+/** Derive project-specific role from graph entity names */
+function projectRole(agent: Agent): string {
+  const entities = store.graphProjectParticipants.get(agent.name)
+  if (entities?.length) {
+    const proj = store.activeProject.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const roles = entities.map((e) => {
+      const role = e.toLowerCase()
+        .replace(new RegExp(`^${proj}-`), '')
+        .replace(/-agent$/, '')
+        .replace(/-/g, ' ')
+      return role.split(' ').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+    })
+    if (roles.length <= 2) return roles.join(', ')
+    return `${roles[0]}, ${roles[1]} +${roles.length - 2}`
+  }
+  return meta(agent).role
+}
+
+/** Is this agent graph-discovered (vs message-only)? */
+function isGraphAgent(agent: Agent): boolean {
+  return store.graphProjectParticipants.has(agent.name)
+}
+
+/** Truncate text with ellipsis */
+function truncate(text: string, max: number): string {
+  if (text.length <= max) return text
+  return text.slice(0, max).trimEnd() + '...'
+}
+
+/** Get last project message for an agent */
+function lastProjectMsg(agent: Agent): string | null {
+  const msg = store.latestProjectMessageByAgent.get(agent.name)
+  if (!msg) return null
+  return truncate(msg.content, 80)
+}
+
 const othersExpanded = ref(false)
 
 // When a project is active, show only agents involved in that project
@@ -27,7 +63,13 @@ const projectActive = computed(() => {
   const names = store.projectAgentNames
   return store.realAgents
     .filter((a) => names.has(a.name) || names.has(a.id))
-    .sort((a, b) => b.messageCount - a.messageCount)
+    .sort((a, b) => {
+      // Graph-discovered agents first, then by message count
+      const aGraph = isGraphAgent(a) ? 1 : 0
+      const bGraph = isGraphAgent(b) ? 1 : 0
+      if (bGraph !== aGraph) return bGraph - aGraph
+      return b.messageCount - a.messageCount
+    })
 })
 
 const sortedActive = computed(() => {
@@ -73,8 +115,12 @@ function selectAgent(agent: Agent) {
       >
         <span class="agent-avatar">{{ meta(agent).avatar }}</span>
         <div class="agent-info">
-          <span class="agent-name">{{ agent.displayName }}</span>
-          <span class="agent-role">{{ meta(agent).role }}</span>
+          <div class="agent-name-row">
+            <span class="agent-name">{{ agent.displayName }}</span>
+            <span v-if="store.activeProject && isGraphAgent(agent)" class="graph-badge" title="Graph-discovered participant">&#x1F517;</span>
+          </div>
+          <span class="agent-role">{{ store.activeProject ? projectRole(agent) : meta(agent).role }}</span>
+          <span v-if="store.activeProject && lastProjectMsg(agent)" class="agent-last-msg">{{ lastProjectMsg(agent) }}</span>
         </div>
         <div class="agent-right">
           <div class="agent-status-row">
@@ -206,9 +252,31 @@ function selectAgent(agent: Agent) {
   text-overflow: ellipsis;
 }
 
+.agent-name-row {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.graph-badge {
+  font-size: calc(0.6rem * var(--cc-font-scale, 1));
+  opacity: 0.7;
+}
+
 .agent-role {
   font-size: calc(0.62rem * var(--cc-font-scale, 1));
   color: var(--cc-text-muted);
+}
+
+.agent-last-msg {
+  font-size: calc(0.58rem * var(--cc-font-scale, 1));
+  color: var(--cc-text-muted);
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+  font-style: italic;
 }
 
 .agent-right {
