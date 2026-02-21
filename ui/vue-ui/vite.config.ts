@@ -35,10 +35,12 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: true,
+    chunkSizeWarningLimit: 1400, // three.js + 3d-force-graph chunk is ~1.3MB (expected)
     rollupOptions: {
       output: {
         manualChunks: {
-          vendor: ['vue', 'vue-router', 'pinia']
+          vendor: ['vue', 'vue-router', 'pinia'],
+          'three-graph': ['three', '3d-force-graph']
         }
       }
     }

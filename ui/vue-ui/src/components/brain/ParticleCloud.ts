@@ -110,6 +110,11 @@ export class ParticleCloud {
     this.mesh.instanceMatrix.needsUpdate = true
   }
 
+  /** Toggle visibility of the particle cloud (used by LOD system) */
+  setVisible(visible: boolean): void {
+    this.mesh.visible = visible
+  }
+
   dispose(): void {
     this.mesh.geometry.dispose()
     const mat = this.mesh.material

@@ -291,6 +291,30 @@ services:
       timeout: 10s
       retries: 5
 
+  # Vue UI Dashboard (Brain Visualization)
+  vue-dashboard:
+    build:
+      context: ./ui/vue-ui
+      dockerfile: Dockerfile
+      args:
+        API_UPSTREAM: neural-ai-server:3001
+        MCP_UPSTREAM: neural-ai-server:5174
+        WS_UPSTREAM: neural-ai-server:3002
+    container_name: neural-ai-vue-dashboard
+    ports:
+      - "5176:5176"
+    depends_on:
+      - neural-ai-server
+    networks:
+      - neural-ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5176/"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
   # Nginx Reverse Proxy & Load Balancer
   nginx:
     build:

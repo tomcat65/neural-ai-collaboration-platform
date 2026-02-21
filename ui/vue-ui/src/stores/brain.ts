@@ -54,6 +54,7 @@ export const useBrainStore = defineStore('brain', () => {
   const selectedEntity = ref<GraphNode | null>(null)
   const observations = ref<Observation[]>([])
   const observationsLoading = ref(false)
+  const showFps = ref(false)
 
   // Cache: entityName -> Observation[]
   const observationsCache = new Map<string, Observation[]>()
@@ -155,6 +156,7 @@ export const useBrainStore = defineStore('brain', () => {
     selectedEntity,
     observations,
     observationsLoading,
+    showFps,
     fetchGraph,
     fetchObservations,
     selectEntity,

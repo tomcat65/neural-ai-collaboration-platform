@@ -11,6 +11,8 @@
         {{ hoveredNode.entityType }}
       </span>
     </div>
+    <!-- Dev-only FPS counter -->
+    <div v-if="brainStore.showFps" class="fps-counter">{{ fpsDisplay }} FPS</div>
   </div>
 </template>
 
@@ -40,14 +42,28 @@ const tooltipStyle = reactive({
   top: '0px'
 })
 
-// Track satellite objects for cleanup
-const satelliteGroups = new Map<string, THREE.Group>()
+// FPS counter state
+const fpsDisplay = ref(0)
+let fpsFrameCount = 0
+let fpsLastTime = 0
+
+// Track satellite InstancedMesh + group for cleanup
+interface SatelliteEntry {
+  group: THREE.Group
+  instancedMesh: THREE.InstancedMesh
+  lineSegments: THREE.LineSegments
+  overflowSprite: THREE.Sprite | null
+}
+const satelliteEntries = new Map<string, SatelliteEntry>()
 
 // Brain shell + particle cloud (S4)
 let brainShell: BrainShell | null = null
 let particleCloud: ParticleCloud | null = null
 let particleAnimId: number | null = null
 let lastFrameTime = 0
+
+// LOD state
+let currentLodTier = 0 // 0 = full detail, 1 = medium, 2 = low
 
 const TYPE_COLORS: Record<string, string> = {
   project: '#06b6d4',
@@ -92,6 +108,7 @@ function animateCameraToNode(node: GraphNode & { x?: number; y?: number; z?: num
 
 /**
  * Create satellite spheres orbiting a given node to represent observations.
+ * Uses InstancedMesh for all satellites and LineSegments for connectors.
  * Capped at 8 visible satellites; overflow shown as "+N more" sprite.
  */
 function createSatellites(
@@ -115,8 +132,18 @@ function createSatellites(
   const maxSatellites = Math.min(observationCount, 8)
   const color = new THREE.Color(getNodeColor(node))
 
-  // Create satellite spheres
+  // InstancedMesh for all satellite spheres
   const satGeom = new THREE.SphereGeometry(1.2, 8, 8)
+  const satMat = new THREE.MeshBasicMaterial({
+    color: color.clone().lerp(new THREE.Color('#ffffff'), 0.3),
+    transparent: true,
+    opacity: 0.8
+  })
+  const instancedSatellites = new THREE.InstancedMesh(satGeom, satMat, maxSatellites)
+  const dummy = new THREE.Object3D()
+
+  // LineSegments for all connectors (2 points per satellite)
+  const linePositions = new Float32Array(maxSatellites * 6) // 2 vertices * 3 coords per satellite
 
   for (let i = 0; i < maxSatellites; i++) {
     const angle = (i / maxSatellites) * Math.PI * 2
@@ -124,31 +151,37 @@ function createSatellites(
     const sy = ny + Math.sin(angle) * orbitRadius
     const sz = nz
 
-    // Satellite sphere
-    const satMat = new THREE.MeshBasicMaterial({
-      color: color.clone().lerp(new THREE.Color('#ffffff'), 0.3),
-      transparent: true,
-      opacity: 0.8
-    })
-    const sphere = new THREE.Mesh(satGeom, satMat)
-    sphere.position.set(sx, sy, sz)
-    group.add(sphere)
+    // Set instance matrix
+    dummy.position.set(sx, sy, sz)
+    dummy.updateMatrix()
+    instancedSatellites.setMatrixAt(i, dummy.matrix)
 
-    // Thin line connecting satellite to parent
-    const lineGeom = new THREE.BufferGeometry().setFromPoints([
-      new THREE.Vector3(nx, ny, nz),
-      new THREE.Vector3(sx, sy, sz)
-    ])
-    const lineMat = new THREE.LineBasicMaterial({
-      color: color,
-      transparent: true,
-      opacity: 0.3
-    })
-    const line = new THREE.Line(lineGeom, lineMat)
-    group.add(line)
+    // Set line positions: from parent center to satellite position
+    const base = i * 6
+    linePositions[base] = nx
+    linePositions[base + 1] = ny
+    linePositions[base + 2] = nz
+    linePositions[base + 3] = sx
+    linePositions[base + 4] = sy
+    linePositions[base + 5] = sz
   }
 
+  instancedSatellites.instanceMatrix.needsUpdate = true
+  group.add(instancedSatellites)
+
+  // Create LineSegments for all connectors at once
+  const lineGeom = new THREE.BufferGeometry()
+  lineGeom.setAttribute('position', new THREE.BufferAttribute(linePositions, 3))
+  const lineMat = new THREE.LineBasicMaterial({
+    color: color,
+    transparent: true,
+    opacity: 0.3
+  })
+  const lineSegments = new THREE.LineSegments(lineGeom, lineMat)
+  group.add(lineSegments)
+
   // "+N more" label if overflow
+  let overflowSprite: THREE.Sprite | null = null
   if (observationCount > 8) {
     const overflow = observationCount - 8
     const canvas = document.createElement('canvas')
@@ -166,55 +199,105 @@ function createSatellites(
     }
     const texture = new THREE.CanvasTexture(canvas)
     const spriteMat = new THREE.SpriteMaterial({ map: texture, transparent: true })
-    const sprite = new THREE.Sprite(spriteMat)
-    sprite.position.set(nx, ny - orbitRadius - 5, nz)
-    sprite.scale.set(16, 6, 1)
-    group.add(sprite)
+    overflowSprite = new THREE.Sprite(spriteMat)
+    overflowSprite.position.set(nx, ny - orbitRadius - 5, nz)
+    overflowSprite.scale.set(16, 6, 1)
+    group.add(overflowSprite)
   }
 
   scene.add(group)
-  satelliteGroups.set(node.name, group)
+  satelliteEntries.set(node.name, {
+    group,
+    instancedMesh: instancedSatellites,
+    lineSegments,
+    overflowSprite
+  })
 }
 
 /**
  * Remove satellite objects for a given entity.
  */
 function removeSatellites(entityName: string) {
-  const group = satelliteGroups.get(entityName)
-  if (!group || !graph) return
+  const entry = satelliteEntries.get(entityName)
+  if (!entry || !graph) return
 
   const scene = graph.scene()
-  // Dispose geometries and materials
-  group.traverse((child) => {
-    if (child instanceof THREE.Mesh) {
-      child.geometry?.dispose()
-      if (child.material instanceof THREE.Material) {
-        child.material.dispose()
-      }
+
+  // Dispose instanced mesh
+  entry.instancedMesh.geometry.dispose()
+  if (entry.instancedMesh.material instanceof THREE.Material) {
+    entry.instancedMesh.material.dispose()
+  }
+
+  // Dispose line segments
+  entry.lineSegments.geometry.dispose()
+  if (entry.lineSegments.material instanceof THREE.Material) {
+    entry.lineSegments.material.dispose()
+  }
+
+  // Dispose overflow sprite if present
+  if (entry.overflowSprite) {
+    if (entry.overflowSprite.material instanceof THREE.SpriteMaterial && entry.overflowSprite.material.map) {
+      entry.overflowSprite.material.map.dispose()
     }
-    if (child instanceof THREE.Line) {
-      child.geometry?.dispose()
-      if (child.material instanceof THREE.Material) {
-        child.material.dispose()
-      }
-    }
-    if (child instanceof THREE.Sprite) {
-      if (child.material instanceof THREE.SpriteMaterial && child.material.map) {
-        child.material.map.dispose()
-      }
-      child.material.dispose()
-    }
-  })
-  scene.remove(group)
-  satelliteGroups.delete(entityName)
+    entry.overflowSprite.material.dispose()
+  }
+
+  scene.remove(entry.group)
+  satelliteEntries.delete(entityName)
 }
 
 /**
  * Remove all satellite groups from the scene.
  */
 function removeAllSatellites() {
-  for (const name of Array.from(satelliteGroups.keys())) {
+  for (const name of Array.from(satelliteEntries.keys())) {
     removeSatellites(name)
+  }
+}
+
+/**
+ * LOD (Level of Detail) system.
+ * Checks camera distance from origin and toggles visibility of scene elements.
+ * Tier 0: full detail (camera <= 500)
+ * Tier 1: hide satellites, reduce node detail (camera > 500)
+ * Tier 2: hide particles, simplify links (camera > 1000)
+ */
+function updateLOD() {
+  if (!graph) return
+
+  const camera = graph.camera()
+  const cameraDistance = camera.position.length()
+
+  let newTier = 0
+  if (cameraDistance > 1000) {
+    newTier = 2
+  } else if (cameraDistance > 500) {
+    newTier = 1
+  }
+
+  if (newTier === currentLodTier) return
+  currentLodTier = newTier
+
+  // Tier 1+: hide satellites
+  for (const entry of satelliteEntries.values()) {
+    entry.group.visible = newTier < 1
+  }
+
+  // Tier 2: hide particles
+  if (particleCloud) {
+    particleCloud.setVisible(newTier < 2)
+  }
+
+  // Tier 2: simplify links (reduce opacity)
+  if (graph) {
+    if (newTier >= 2) {
+      graph.linkOpacity(0.05)
+      graph.linkWidth(0.2)
+    } else {
+      graph.linkOpacity(0.2)
+      graph.linkWidth(0.5)
+    }
   }
 }
 
@@ -252,7 +335,11 @@ onMounted(async () => {
     .nodeVal((node: object) => getNodeRadius(node as GraphNode))
     .linkColor(() => 'rgba(255, 255, 255, 0.2)')
     .linkWidth(0.5)
+    .linkOpacity(0.2)
     .d3AlphaDecay(0.02) // slower decay for better brain-bounded settlement
+    .warmupTicks(100)    // S5: run 100 ticks of force simulation then freeze
+    .cooldownTicks(0)    // S5: freeze after warmup completes
+    .cooldownTime(5000)  // S5: auto-freeze after 5 seconds max
     .graphData({
       nodes: brainStore.nodes,
       links: brainStore.links
@@ -279,13 +366,31 @@ onMounted(async () => {
   scene.add(brainShell.mesh)
   scene.add(particleCloud.mesh)
 
-  // Start particle animation loop
+  // Start particle animation loop with LOD checks and FPS counter
   const cloud = particleCloud
   lastFrameTime = performance.now()
+  fpsLastTime = performance.now()
+  fpsFrameCount = 0
   function animateParticles(now: number) {
     const delta = Math.min((now - lastFrameTime) / 1000, 0.1) // cap delta to avoid big jumps
     lastFrameTime = now
-    cloud.update(delta)
+
+    // FPS counter (update display once per second)
+    fpsFrameCount++
+    if (now - fpsLastTime >= 1000) {
+      fpsDisplay.value = Math.round((fpsFrameCount * 1000) / (now - fpsLastTime))
+      fpsFrameCount = 0
+      fpsLastTime = now
+    }
+
+    // LOD update
+    updateLOD()
+
+    // Only update particles if visible (LOD tier < 2)
+    if (cloud.mesh.visible) {
+      cloud.update(delta)
+    }
+
     particleAnimId = requestAnimationFrame(animateParticles)
   }
   particleAnimId = requestAnimationFrame(animateParticles)
@@ -306,7 +411,7 @@ onMounted(async () => {
     emit('nodeClick', gNode)
   })
 
-  // Interaction: background click → collapse
+  // Interaction: background click -> collapse
   graph.onBackgroundClick(() => {
     brainStore.clearSelection()
     removeAllSatellites()
@@ -412,6 +517,8 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   position: relative;
+  overflow: hidden;
+  touch-action: none;
 }
 
 /* CSS Tooltip */
@@ -440,5 +547,22 @@ onBeforeUnmount(() => {
   text-transform: uppercase;
   letter-spacing: 0.5px;
   font-weight: 500;
+}
+
+/* Dev-only FPS counter */
+.fps-counter {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.7);
+  color: #00ff88;
+  font-family: 'Courier New', monospace;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 4px 8px;
+  border-radius: 4px;
+  pointer-events: none;
+  user-select: none;
 }
 </style>
