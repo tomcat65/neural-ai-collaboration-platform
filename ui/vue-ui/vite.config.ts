@@ -15,6 +15,11 @@ export default defineConfig({
     host: true,
     cors: true,
     proxy: {
+      '/api/graph-export': {
+        target: 'http://localhost:6174',
+        changeOrigin: true,
+        secure: false
+      },
       '/api': {
         target: 'http://localhost:3000',
         changeOrigin: true,

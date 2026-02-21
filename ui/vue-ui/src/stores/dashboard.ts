@@ -8,6 +8,7 @@ class WebSocketService {
   private reconnectDelay = 5000
   private maxReconnectAttempts = 10
   private reconnectAttempts = 0
+  attemptReconnect: () => void = () => {}
 
   connect() {
     const connectToWebSocket = () => {

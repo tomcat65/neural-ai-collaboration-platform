@@ -36,6 +36,11 @@ const routes = [
     path: '/collaboration',
     name: 'Collaboration',
     component: CollaborationDashboard
+  },
+  {
+    path: '/brain',
+    name: 'Brain',
+    component: () => import('../views/BrainView.vue')
   }
 ]
 

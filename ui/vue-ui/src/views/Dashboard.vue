@@ -31,6 +31,9 @@
       >
         {{ tab.icon }} {{ tab.name }}
       </button>
+      <router-link to="/brain" class="nav-tab brain-nav-link">
+        Neural Brain
+      </router-link>
     </div>
 
     <div class="dashboard-content">
@@ -273,6 +276,21 @@ onMounted(() => {
 .nav-tab.active {
   color: #10b981;
   border-bottom-color: #10b981;
+}
+
+.brain-nav-link {
+  text-decoration: none;
+  margin-left: auto;
+  background: rgba(139, 92, 246, 0.1);
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  border-radius: 8px;
+  color: #8b5cf6;
+  font-weight: 600;
+}
+
+.brain-nav-link:hover {
+  background: rgba(139, 92, 246, 0.2);
+  color: #a78bfa;
 }
 
 .dashboard-content {

@@ -232,6 +232,11 @@ const newTask = ref({
   estimatedEffort: 4
 })
 
+// Expose store properties for template access
+const connectionStatus = computed(() => collaborationStore.connectionStatus)
+const taskProgress = computed(() => collaborationStore.taskProgress)
+const agents = computed(() => collaborationStore.agents)
+
 // Computed properties
 const connectionStatusText = computed(() => {
   try {

@@ -2183,6 +2183,271 @@ export class MemoryManager {
     return { authorized: false, reason: 'Unknown auth type' };
   }
 
+  // ─── BV-S1: Graph Export Read Authorization + Data Access ───
+
+  /**
+   * Permission vocabulary for graph read operations:
+   *   graph:view              — topology (nodes + links). Minimum to access endpoint.
+   *   graph:observations:view — non-sensitive observations.
+   *   graph:sensitive:view    — agent-internal/system observations.
+   *   Legacy: graph:read, graph:write, * imply graph:view + graph:observations:view.
+   */
+  authorizeGraphRead(
+    context: RequestContext
+  ): { permissions: Set<string>; authorized: boolean; reason?: string } {
+    const permissions = new Set<string>();
+
+    // Dev auth → full passthrough
+    if (context.authType === 'dev') {
+      permissions.add('graph:view');
+      permissions.add('graph:observations:view');
+      permissions.add('graph:sensitive:view');
+      return { permissions, authorized: true };
+    }
+
+    // API key auth → check explicit scopes
+    if (context.authType === 'api_key') {
+      const scopes = context.scopes || [];
+      const allowLegacy = process.env.ALLOW_LEGACY_GRAPH_MUTATIONS === '1';
+
+      // Empty scopes with legacy passthrough
+      if (scopes.length === 0 && allowLegacy) {
+        permissions.add('graph:view');
+        permissions.add('graph:observations:view');
+        permissions.add('graph:sensitive:view');
+        return { permissions, authorized: true };
+      }
+
+      // Wildcard or legacy scopes imply view + observations:view
+      const hasWild = scopes.includes('*');
+      const hasLegacyRead = scopes.includes('graph:read');
+      const hasLegacyWrite = scopes.includes('graph:write');
+      if (hasWild || hasLegacyRead || hasLegacyWrite) {
+        permissions.add('graph:view');
+        permissions.add('graph:observations:view');
+      }
+
+      // Explicit scopes
+      if (scopes.includes('graph:view')) permissions.add('graph:view');
+      if (scopes.includes('graph:observations:view')) permissions.add('graph:observations:view');
+      if (scopes.includes('graph:sensitive:view')) permissions.add('graph:sensitive:view');
+
+      // Wildcard also grants sensitive
+      if (hasWild) permissions.add('graph:sensitive:view');
+
+      if (!permissions.has('graph:view')) {
+        return { permissions, authorized: false, reason: 'API key lacks graph:view scope' };
+      }
+      return { permissions, authorized: true };
+    }
+
+    // JWT → role-based mapping
+    if (context.authType === 'jwt') {
+      const roles = context.roles || [];
+      if (roles.includes('admin') || roles.includes('owner')) {
+        permissions.add('graph:view');
+        permissions.add('graph:observations:view');
+        permissions.add('graph:sensitive:view');
+        return { permissions, authorized: true };
+      }
+      if (roles.includes('member')) {
+        permissions.add('graph:view');
+        permissions.add('graph:observations:view');
+        return { permissions, authorized: true };
+      }
+      if (roles.includes('viewer')) {
+        permissions.add('graph:view');
+        return { permissions, authorized: true };
+      }
+      return { permissions, authorized: false, reason: 'JWT caller requires admin, owner, member, or viewer role' };
+    }
+
+    return { permissions, authorized: false, reason: 'Unknown auth type' };
+  }
+
+  /**
+   * Deterministic 4-step sensitivity classification for an observation row.
+   * contents is string[] — any match in any entry → entire observation is sensitive.
+   */
+  static classifyObservationSensitivity(
+    observationContent: { entityName: string; contents: string[]; messageType?: string; sensitive?: boolean }
+  ): boolean {
+    // Step 1: messageType field
+    if (observationContent.messageType) {
+      const mt = observationContent.messageType.toLowerCase();
+      if (mt === 'system' || mt === 'internal' || mt === 'coordination') return true;
+    }
+    // Step 2: entity metadata sensitive flag
+    if (observationContent.sensitive === true) return true;
+    // Step 3: content prefix check (case-insensitive, leading-whitespace-trimmed)
+    const contents = observationContent.contents || [];
+    for (const entry of contents) {
+      const trimmed = (typeof entry === 'string') ? entry.trimStart().toLowerCase() : '';
+      if (trimmed.startsWith('[system]') || trimmed.startsWith('[internal]')) return true;
+    }
+    // Step 4: default non-sensitive
+    return false;
+  }
+
+  /**
+   * Fetch graph data for export (tenant-scoped).
+   * Returns entities (nodes), relations (links), and optionally observations.
+   */
+  getGraphExport(options: {
+    tenantId: string;
+    limit: number;
+    cursor?: string;
+    includeObservations: boolean;
+    updatedSince?: string;
+    entityName?: string;
+    permissions: Set<string>;
+  }): {
+    nodes?: any[];
+    links?: any[];
+    observations?: any[];
+    nextCursor: string | null;
+    totals: { nodes?: number; links?: number; observations: number };
+  } {
+    const { tenantId, limit, cursor, includeObservations, updatedSince, entityName, permissions } = options;
+    const offset = cursor ? parseInt(Buffer.from(cursor, 'base64').toString('utf8'), 10) || 0 : 0;
+    const canSeeSensitive = permissions.has('graph:sensitive:view');
+
+    // entityName mode: observations-only
+    if (entityName) {
+      let obsQuery = `SELECT id, content, created_at FROM shared_memory
+        WHERE tenant_id = ? AND memory_type = 'observation'
+        AND json_extract(content, '$.entityName') = ?`;
+      const obsParams: any[] = [tenantId, entityName];
+      if (updatedSince) {
+        obsQuery += ' AND updated_at >= ?';
+        obsParams.push(updatedSince);
+      }
+      obsQuery += ' ORDER BY created_at ASC';
+
+      const allObs = this.db.prepare(obsQuery).all(...obsParams) as any[];
+      const observations = this.filterAndMapObservations(allObs, canSeeSensitive);
+
+      // Apply pagination to filtered observations
+      const paged = observations.slice(offset, offset + limit);
+      const nextOffset = offset + limit;
+      const nextCursor = nextOffset < observations.length
+        ? Buffer.from(String(nextOffset)).toString('base64')
+        : null;
+
+      return {
+        observations: paged,
+        nextCursor,
+        totals: { observations: observations.length },
+      };
+    }
+
+    // Full mode: nodes + links + optional observations
+    // Nodes (entities)
+    let entityQuery = `SELECT id, content, created_at FROM shared_memory
+      WHERE tenant_id = ? AND memory_type = 'entity'`;
+    const entityParams: any[] = [tenantId];
+    if (updatedSince) {
+      entityQuery += ' AND updated_at >= ?';
+      entityParams.push(updatedSince);
+    }
+    entityQuery += ' ORDER BY created_at ASC';
+
+    const entityRows = this.db.prepare(entityQuery).all(...entityParams) as any[];
+    const nodes = entityRows.map((row: any) => {
+      const content = JSON.parse(row.content);
+      // Count observations for this entity
+      const obsCount = (this.db.prepare(
+        `SELECT COUNT(*) as cnt FROM shared_memory
+         WHERE tenant_id = ? AND memory_type = 'observation'
+         AND json_extract(content, '$.entityName') = ?`
+      ).get(tenantId, content.name) as any)?.cnt || 0;
+
+      return {
+        name: content.name,
+        entityType: content.entityType || content.type,
+        observationCount: obsCount,
+        id: row.id,
+        createdAt: row.created_at,
+      };
+    });
+
+    // Links (relations)
+    let relQuery = `SELECT id, content, created_at FROM shared_memory
+      WHERE tenant_id = ? AND memory_type = 'relation'`;
+    const relParams: any[] = [tenantId];
+    if (updatedSince) {
+      relQuery += ' AND updated_at >= ?';
+      relParams.push(updatedSince);
+    }
+    relQuery += ' ORDER BY created_at ASC';
+
+    const relRows = this.db.prepare(relQuery).all(...relParams) as any[];
+    const links = relRows.map((row: any) => {
+      const content = JSON.parse(row.content);
+      return {
+        source: content.from,
+        target: content.to,
+        relationType: content.relationType,
+      };
+    });
+
+    // Observations (optional)
+    let observations: any[] | undefined;
+    let totalObs = 0;
+    if (includeObservations) {
+      let obsQuery = `SELECT id, content, created_at FROM shared_memory
+        WHERE tenant_id = ? AND memory_type = 'observation'`;
+      const obsParams: any[] = [tenantId];
+      if (updatedSince) {
+        obsQuery += ' AND updated_at >= ?';
+        obsParams.push(updatedSince);
+      }
+      obsQuery += ' ORDER BY created_at ASC';
+
+      const allObs = this.db.prepare(obsQuery).all(...obsParams) as any[];
+      const filtered = this.filterAndMapObservations(allObs, canSeeSensitive);
+      totalObs = filtered.length;
+      observations = filtered;
+    }
+
+    // Paginate the combined result by nodes
+    const pagedNodes = nodes.slice(offset, offset + limit);
+    const nextOffset = offset + limit;
+    const nextCursor = nextOffset < nodes.length
+      ? Buffer.from(String(nextOffset)).toString('base64')
+      : null;
+
+    return {
+      nodes: pagedNodes,
+      links,
+      observations,
+      nextCursor,
+      totals: {
+        nodes: nodes.length,
+        links: links.length,
+        observations: totalObs,
+      },
+    };
+  }
+
+  /**
+   * Filter observations by sensitivity and map to export shape.
+   */
+  private filterAndMapObservations(rows: any[], canSeeSensitive: boolean): any[] {
+    const result: any[] = [];
+    for (const row of rows) {
+      const content = JSON.parse(row.content);
+      const isSensitive = MemoryManager.classifyObservationSensitivity(content);
+      if (isSensitive && !canSeeSensitive) continue;
+      result.push({
+        entityName: content.entityName,
+        contents: content.contents || [],
+        createdAt: row.created_at,
+      });
+    }
+    return result;
+  }
+
   /**
    * Find entity rows by name (case-insensitive, tenant-scoped).
    * Codex finding #4: LOWER(json_extract()) for case-insensitive matching.

@@ -236,8 +236,8 @@ const connectWebSocket = () => {
       setTimeout(connectWebSocket, 5000)
     }
     
-    wsConnection.onerror = (error) => {
-      console.error('WebSocket error:', error)
+    wsConnection.onerror = (wsError) => {
+      console.error('WebSocket error:', wsError)
       isConnected.value = false
       loading.value = false
       error.value = 'Failed to connect to event stream'

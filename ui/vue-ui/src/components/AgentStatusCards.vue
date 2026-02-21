@@ -185,6 +185,7 @@ interface Agent {
   uptime: number
   lastActivity: string
   details?: any
+  agentId?: string
 }
 
 const searchQuery = ref('')

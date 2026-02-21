@@ -5,6 +5,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
+import { createHash } from 'crypto';
 import cors from 'cors';
 import helmet from 'helmet';
 import { MemoryManager } from './unified-server/memory/index.js';
@@ -541,6 +542,137 @@ export class NeuralMCPServer {
       } catch (error) {
         console.error('❌ Get messages error:', error);
         res.status(500).json({ error: 'Failed to get messages' });
+      }
+    });
+
+    // ─── BV-S1: Graph Export API ───
+    // ETag cache: Map<cacheKey, { etag, expiry }>
+    const etagCache = new Map<string, { etag: string; expiry: number }>();
+    const ETAG_TTL_MS = 30_000; // 30 seconds
+
+    this.app.get('/api/graph-export', async (req, res) => {
+      try {
+        const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+
+        // Authorize: must have graph:view at minimum
+        const authResult = this.memoryManager.authorizeGraphRead(context);
+        if (!authResult.authorized) {
+          res.status(403).json({ error: 'Forbidden', message: authResult.reason });
+          return;
+        }
+
+        const permissions = authResult.permissions;
+
+        // Parse query params
+        const cursor = req.query.cursor as string | undefined;
+        const rawLimit = parseInt(req.query.limit as string, 10) || 200;
+        const limit = Math.min(Math.max(rawLimit, 1), 1000); // clamp 1..1000
+        const includeObservations = req.query.includeObservations === 'true';
+        const updatedSince = req.query.updatedSince as string | undefined;
+        const entityName = req.query.entityName as string | undefined;
+
+        // Strict 403: includeObservations=true without graph:observations:view
+        if (includeObservations && !permissions.has('graph:observations:view')) {
+          res.status(403).json({
+            error: 'Forbidden',
+            message: 'graph:observations:view permission required for includeObservations=true',
+          });
+          return;
+        }
+
+        // Audit log
+        this.memoryManager.auditLog(
+          'graph_export',
+          context.userId || context.apiKeyId || 'unknown',
+          JSON.stringify({ includeObservations, entityName, limit, cursor: cursor || null }),
+          entityName
+        );
+
+        // Fetch data
+        const data = this.memoryManager.getGraphExport({
+          tenantId: context.tenantId,
+          limit,
+          cursor,
+          includeObservations,
+          updatedSince,
+          entityName,
+          permissions,
+        });
+
+        // Build response
+        const generatedAt = new Date().toISOString();
+        let responseBody: any;
+
+        if (entityName) {
+          // entityName mode: observations-only
+          responseBody = {
+            observations: data.observations || [],
+            totals: { observations: data.totals.observations },
+            generatedAt,
+          };
+          if (data.nextCursor) responseBody.nextCursor = data.nextCursor;
+        } else {
+          // Full mode
+          responseBody = {
+            nodes: data.nodes || [],
+            links: data.links || [],
+            nextCursor: data.nextCursor,
+            totals: data.totals,
+            generatedAt,
+          };
+          if (includeObservations) {
+            responseBody.observations = data.observations || [];
+          }
+        }
+
+        // Compute ETag: SHA-256 of canonical data + policy fingerprint
+        const permSorted = Array.from(permissions).sort().join(',');
+        const canonicalParts: string[] = [];
+        if (responseBody.nodes) {
+          for (const n of responseBody.nodes) {
+            canonicalParts.push(`n:${n.name}:${n.entityType}:${n.observationCount}`);
+          }
+        }
+        if (responseBody.links) {
+          for (const l of responseBody.links) {
+            canonicalParts.push(`l:${l.source}:${l.target}:${l.relationType}`);
+          }
+        }
+        if (responseBody.observations) {
+          for (const o of responseBody.observations) {
+            canonicalParts.push(`o:${o.entityName}:${JSON.stringify(o.contents)}`);
+          }
+        }
+        canonicalParts.push(`perms:${permSorted}`);
+
+        const hashInput = canonicalParts.join('|');
+        const now = Date.now();
+
+        // Check ETag cache
+        let etag: string;
+        const cacheKey = hashInput;
+        const cached = etagCache.get(cacheKey);
+        if (cached && cached.expiry > now) {
+          etag = cached.etag;
+        } else {
+          etag = `"${createHash('sha256').update(hashInput).digest('hex').slice(0, 32)}"`;
+          etagCache.set(cacheKey, { etag, expiry: now + ETAG_TTL_MS });
+        }
+
+        res.setHeader('ETag', etag);
+        res.setHeader('Cache-Control', 'private, max-age=30');
+
+        // Honor If-None-Match
+        const ifNoneMatch = req.headers['if-none-match'];
+        if (ifNoneMatch === etag) {
+          res.status(304).end();
+          return;
+        }
+
+        res.json(responseBody);
+      } catch (error) {
+        console.error('graph-export error:', error);
+        res.status(500).json({ error: 'Graph export failed' });
       }
     });
 
@@ -2291,6 +2423,16 @@ export class NeuralMCPServer {
 
   close() {
     this.memoryManager.close();
+  }
+
+  /** Expose Express app for testing (supertest). */
+  getExpressApp(): express.Application {
+    return this.app;
+  }
+
+  /** Expose MemoryManager for direct testing. */
+  getMemoryManager(): MemoryManager {
+    return this.memoryManager;
   }
 }
 
