@@ -2315,7 +2315,7 @@ export class MemoryManager {
 
     // entityName mode: observations-only
     if (entityName) {
-      let obsQuery = `SELECT id, content, created_at FROM shared_memory
+      let obsQuery = `SELECT id, content, created_at, updated_at FROM shared_memory
         WHERE tenant_id = ? AND memory_type = 'observation'
         AND json_extract(content, '$.entityName') = ?`;
       const obsParams: any[] = [tenantId, entityName];
@@ -2326,33 +2326,26 @@ export class MemoryManager {
       obsQuery += ' ORDER BY created_at ASC';
 
       const allObs = this.db.prepare(obsQuery).all(...obsParams) as any[];
-      const observations = this.filterAndMapObservations(allObs, canSeeSensitive);
+      const filtered = this.filterAndMapObservations(allObs, canSeeSensitive);
 
       // Apply pagination to filtered observations
-      const paged = observations.slice(offset, offset + limit);
+      const paged = filtered.observations.slice(offset, offset + limit);
       const nextOffset = offset + limit;
-      const nextCursor = nextOffset < observations.length
+      const nextCursor = nextOffset < filtered.observations.length
         ? Buffer.from(String(nextOffset)).toString('base64')
         : null;
-
-      // max(updated_at) for ETag stability
-      const maxUpdRow = this.db.prepare(
-        `SELECT MAX(updated_at) as max_upd FROM shared_memory
-         WHERE tenant_id = ? AND memory_type = 'observation'
-         AND json_extract(content, '$.entityName') = ?`
-      ).get(tenantId, entityName) as any;
 
       return {
         observations: paged,
         nextCursor,
-        totals: { observations: observations.length },
-        maxUpdatedAt: maxUpdRow?.max_upd || null,
+        totals: { observations: filtered.observations.length },
+        maxUpdatedAt: filtered.maxUpdatedAt || undefined,
       };
     }
 
     // Full mode: nodes + links + optional observations
     // Nodes (entities)
-    let entityQuery = `SELECT id, content, created_at FROM shared_memory
+    let entityQuery = `SELECT id, content, created_at, updated_at FROM shared_memory
       WHERE tenant_id = ? AND memory_type = 'entity'`;
     const entityParams: any[] = [tenantId];
     if (updatedSince) {
@@ -2362,6 +2355,8 @@ export class MemoryManager {
     entityQuery += ' ORDER BY created_at ASC';
 
     const entityRows = this.db.prepare(entityQuery).all(...entityParams) as any[];
+    const updTracker = { max: undefined as string | undefined };
+
     const nodes = entityRows.map((row: any) => {
       const content = JSON.parse(row.content);
       // Count observations for this entity
@@ -2370,6 +2365,11 @@ export class MemoryManager {
          WHERE tenant_id = ? AND memory_type = 'observation'
          AND json_extract(content, '$.entityName') = ?`
       ).get(tenantId, content.name) as any)?.cnt || 0;
+
+      // Track max updated_at from included entity rows
+      if (row.updated_at && (!updTracker.max || row.updated_at > updTracker.max)) {
+        updTracker.max = row.updated_at;
+      }
 
       return {
         name: content.name,
@@ -2381,7 +2381,7 @@ export class MemoryManager {
     });
 
     // Links (relations)
-    let relQuery = `SELECT id, content, created_at FROM shared_memory
+    let relQuery = `SELECT id, content, created_at, updated_at FROM shared_memory
       WHERE tenant_id = ? AND memory_type = 'relation'`;
     const relParams: any[] = [tenantId];
     if (updatedSince) {
@@ -2393,6 +2393,10 @@ export class MemoryManager {
     const relRows = this.db.prepare(relQuery).all(...relParams) as any[];
     const links = relRows.map((row: any) => {
       const content = JSON.parse(row.content);
+      // Track max updated_at from included relation rows
+      if (row.updated_at && (!updTracker.max || row.updated_at > updTracker.max)) {
+        updTracker.max = row.updated_at;
+      }
       return {
         source: content.from,
         target: content.to,
@@ -2404,7 +2408,7 @@ export class MemoryManager {
     let observations: any[] | undefined;
     let totalObs = 0;
     if (includeObservations) {
-      let obsQuery = `SELECT id, content, created_at FROM shared_memory
+      let obsQuery = `SELECT id, content, created_at, updated_at FROM shared_memory
         WHERE tenant_id = ? AND memory_type = 'observation'`;
       const obsParams: any[] = [tenantId];
       if (updatedSince) {
@@ -2415,8 +2419,12 @@ export class MemoryManager {
 
       const allObs = this.db.prepare(obsQuery).all(...obsParams) as any[];
       const filtered = this.filterAndMapObservations(allObs, canSeeSensitive);
-      totalObs = filtered.length;
-      observations = filtered;
+      totalObs = filtered.observations.length;
+      observations = filtered.observations;
+      // Include observation max in overall max
+      if (filtered.maxUpdatedAt && (!updTracker.max || filtered.maxUpdatedAt > updTracker.max)) {
+        updTracker.max = filtered.maxUpdatedAt;
+      }
     }
 
     // Paginate the combined result by nodes
@@ -2425,12 +2433,6 @@ export class MemoryManager {
     const nextCursor = nextOffset < nodes.length
       ? Buffer.from(String(nextOffset)).toString('base64')
       : null;
-
-    // max(updated_at) across all included rows for ETag stability
-    const maxUpdRow = this.db.prepare(
-      `SELECT MAX(updated_at) as max_upd FROM shared_memory
-       WHERE tenant_id = ? AND memory_type IN ('entity', 'relation', 'observation')`
-    ).get(tenantId) as any;
 
     return {
       nodes: pagedNodes,
@@ -2442,15 +2444,16 @@ export class MemoryManager {
         links: links.length,
         observations: totalObs,
       },
-      maxUpdatedAt: maxUpdRow?.max_upd || null,
+      maxUpdatedAt: updTracker.max,
     };
   }
 
   /**
    * Filter observations by sensitivity and map to export shape.
    */
-  private filterAndMapObservations(rows: any[], canSeeSensitive: boolean): any[] {
+  private filterAndMapObservations(rows: any[], canSeeSensitive: boolean): { observations: any[]; maxUpdatedAt: string | null } {
     const result: any[] = [];
+    let maxUpdatedAt: string | null = null;
     for (const row of rows) {
       const content = JSON.parse(row.content);
       const isSensitive = MemoryManager.classifyObservationSensitivity(content);
@@ -2460,8 +2463,11 @@ export class MemoryManager {
         contents: content.contents || [],
         createdAt: row.created_at,
       });
+      if (row.updated_at && (!maxUpdatedAt || row.updated_at > maxUpdatedAt)) {
+        maxUpdatedAt = row.updated_at;
+      }
     }
-    return result;
+    return { observations: result, maxUpdatedAt };
   }
 
   /**
