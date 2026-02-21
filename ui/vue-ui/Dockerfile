@@ -66,6 +66,7 @@ http {\n\
             proxy_set_header X-Real-IP $remote_addr;\n\
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\
             proxy_set_header X-Forwarded-Proto $scheme;\n\
+            proxy_set_header x-api-key NGINX_API_KEY_PLACEHOLDER;\n\
         }\n\
 \n\
         location /api/ {\n\
@@ -77,6 +78,7 @@ http {\n\
             proxy_set_header X-Real-IP $remote_addr;\n\
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\
             proxy_set_header X-Forwarded-Proto $scheme;\n\
+            proxy_set_header x-api-key NGINX_API_KEY_PLACEHOLDER;\n\
             proxy_cache_bypass $http_upgrade;\n\
         }\n\
 \n\
@@ -104,4 +106,4 @@ EXPOSE 5176
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:5176/ || exit 1
 
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["/bin/sh", "-c", "sed -i \"s|NGINX_API_KEY_PLACEHOLDER|${NEURAL_API_KEY:-}|g\" /etc/nginx/nginx.conf && nginx -g 'daemon off;'"]

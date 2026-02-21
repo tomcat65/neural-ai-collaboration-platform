@@ -1,7 +1,33 @@
-# Dev override — enables admin/debug endpoints
+# Dev override — enables admin/debug endpoints + Vue dashboard
 # Usage: docker compose -f docker-compose.unified-neural-mcp.yml -f docker-compose.unified-neural-mcp.dev.yml up
 services:
   unified-neural-mcp:
     environment:
       - ENABLE_ADMIN_ENDPOINTS=1
       - ALLOW_LEGACY_GRAPH_MUTATIONS=1
+
+  vue-dashboard:
+    build:
+      context: ../ui/vue-ui
+      dockerfile: Dockerfile
+      args:
+        API_UPSTREAM: unified-neural-mcp:6174
+        MCP_UPSTREAM: unified-neural-mcp:6174
+        WS_UPSTREAM: unified-neural-mcp:3004
+    container_name: neural-ai-vue-dashboard
+    ports:
+      - "5176:5176"
+    environment:
+      - NEURAL_API_KEY=${API_KEY}
+    depends_on:
+      unified-neural-mcp:
+        condition: service_healthy
+    networks:
+      - neural_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5176/"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
