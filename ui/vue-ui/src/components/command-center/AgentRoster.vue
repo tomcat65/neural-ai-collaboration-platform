@@ -55,7 +55,9 @@ function lastProjectMsg(agent: Agent): string | null {
   return truncate(msg.content, 80)
 }
 
+// Auto-expand "Other Agents" when no active agents exist
 const othersExpanded = ref(false)
+const autoExpandOthers = computed(() => sortedActive.value.length === 0)
 
 // When a project is active, show only agents involved in that project
 const projectActive = computed(() => {
@@ -134,11 +136,11 @@ function selectAgent(agent: Agent) {
       <!-- Collapsible Other Agents -->
       <template v-if="sortedOffline.length > 0">
         <div class="section-divider" @click="othersExpanded = !othersExpanded">
-          <span class="divider-chevron">{{ othersExpanded ? '\u25BE' : '\u25B8' }}</span>
+          <span class="divider-chevron">{{ (othersExpanded || autoExpandOthers) ? '\u25BE' : '\u25B8' }}</span>
           <span class="divider-label">Other Agents</span>
           <span class="divider-count">{{ sortedOffline.length }}</span>
         </div>
-        <template v-if="othersExpanded">
+        <template v-if="othersExpanded || autoExpandOthers">
           <div
             v-for="agent in sortedOffline"
             :key="agent.id"

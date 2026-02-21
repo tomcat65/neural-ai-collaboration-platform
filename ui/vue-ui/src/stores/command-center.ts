@@ -160,8 +160,8 @@ export const useCommandCenterStore = defineStore('command-center', () => {
   // ── Computed ────────────────────────────────────────────────
   const realAgents = computed(() => agents.value.filter((a) => a.isReal))
 
-  // Consider agents "active" if online OR seen within the last 2 hours
-  const ACTIVE_WINDOW_MS = 2 * 60 * 60 * 1000
+  // Consider agents "active" if online OR seen within the last 24 hours
+  const ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000
   const activeAgents = computed(() =>
     realAgents.value.filter(
       (a) => a.status === 'online' || Date.now() - a.lastSeen.getTime() < ACTIVE_WINDOW_MS
