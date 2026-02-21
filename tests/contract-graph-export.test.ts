@@ -7,7 +7,7 @@
  * Uses direct MemoryManager testing with in-memory SQLite where possible,
  * and supertest with a lightweight Express app for endpoint-level tests.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { MemoryManager } from '../src/unified-server/memory/index.js';
 import type { RequestContext } from '../src/middleware/auth/types.js';
 import { NeuralMCPServer } from '../src/unified-neural-mcp-server.js';
@@ -614,9 +614,9 @@ describe('/api/graph-export endpoint', () => {
     expect(res2.body.nodes[0].name).not.toBe(res1.body.nodes[0].name);
   });
 
-  // Test 10: ETag differs for same data with different roles
+  // Test 10: ETag differs for same data with different roles (policy fingerprint)
   it('ETag differs for same data with different roles (policy fingerprint)', async () => {
-    // First request: default (legacy passthrough → all perms)
+    // Request 1: full-perms API key (legacy passthrough)
     const res1 = await supertest(app)
       .get('/api/graph-export')
       .set('X-API-Key', API_KEY)
@@ -625,21 +625,27 @@ describe('/api/graph-export endpoint', () => {
     const etag1 = res1.headers['etag'];
     expect(etag1).toBeDefined();
 
-    // To test different roles, we need different effective permissions.
-    // With the same API key but different data content, ETag will differ.
-    // Since we can't easily change roles mid-test with the same app,
-    // we verify the ETag computation includes permissions by checking
-    // that requesting with observations vs without yields different ETags.
-    const res2 = await supertest(app)
-      .get('/api/graph-export?includeObservations=true')
-      .set('X-API-Key', API_KEY)
-      .expect(200);
+    // Request 2: spy authorizeGraphRead to return viewer-only permissions (same data, different perms)
+    const testMm = server.getMemoryManager();
+    const spy = vi.spyOn(testMm, 'authorizeGraphRead').mockReturnValue({
+      authorized: true,
+      permissions: new Set(['graph:view']),
+    });
 
-    const etag2 = res2.headers['etag'];
-    expect(etag2).toBeDefined();
+    try {
+      const res2 = await supertest(app)
+        .get('/api/graph-export')
+        .set('X-API-Key', API_KEY)
+        .expect(200);
 
-    // Different response content → different ETag
-    expect(etag1).not.toBe(etag2);
+      const etag2 = res2.headers['etag'];
+      expect(etag2).toBeDefined();
+
+      // Same topology data but different permission sets → different ETags
+      expect(etag1).not.toBe(etag2);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   // Test 11: ETag / 304 behavior
@@ -660,6 +666,48 @@ describe('/api/graph-export endpoint', () => {
       .expect(304);
 
     expect(res2.body).toEqual({}); // 304 has no body
+  });
+
+  // Test 12: endpoint-level 403 for includeObservations without graph:observations:view
+  it('returns 403 when includeObservations=true without graph:observations:view', async () => {
+    const testMm = server.getMemoryManager();
+    const spy = vi.spyOn(testMm, 'authorizeGraphRead').mockReturnValue({
+      authorized: true,
+      permissions: new Set(['graph:view']),
+    });
+
+    try {
+      const res = await supertest(app)
+        .get('/api/graph-export?includeObservations=true')
+        .set('X-API-Key', API_KEY)
+        .expect(403);
+
+      expect(res.body.error).toBe('Forbidden');
+      expect(res.body.message).toContain('graph:observations:view');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // Test 13: endpoint-level 403 for entityName mode without graph:observations:view
+  it('returns 403 for entityName mode without graph:observations:view', async () => {
+    const testMm = server.getMemoryManager();
+    const spy = vi.spyOn(testMm, 'authorizeGraphRead').mockReturnValue({
+      authorized: true,
+      permissions: new Set(['graph:view']),
+    });
+
+    try {
+      const res = await supertest(app)
+        .get('/api/graph-export?entityName=Alpha')
+        .set('X-API-Key', API_KEY)
+        .expect(403);
+
+      expect(res.body.error).toBe('Forbidden');
+      expect(res.body.message).toContain('graph:observations:view');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
@@ -808,8 +856,6 @@ describe('strict 403 for includeObservations', () => {
     expect(result.authorized).toBe(true);
     expect(result.permissions.has('graph:view')).toBe(true);
     expect(result.permissions.has('graph:observations:view')).toBe(false);
-
-    // The endpoint should return 403 when includeObservations=true and this permission is missing
-    // (tested at the endpoint level above; this verifies the permission state)
   });
+
 });

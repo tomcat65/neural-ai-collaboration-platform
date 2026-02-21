@@ -2307,6 +2307,7 @@ export class MemoryManager {
     observations?: any[];
     nextCursor: string | null;
     totals: { nodes?: number; links?: number; observations: number };
+    maxUpdatedAt?: string;
   } {
     const { tenantId, limit, cursor, includeObservations, updatedSince, entityName, permissions } = options;
     const offset = cursor ? parseInt(Buffer.from(cursor, 'base64').toString('utf8'), 10) || 0 : 0;
@@ -2334,10 +2335,18 @@ export class MemoryManager {
         ? Buffer.from(String(nextOffset)).toString('base64')
         : null;
 
+      // max(updated_at) for ETag stability
+      const maxUpdRow = this.db.prepare(
+        `SELECT MAX(updated_at) as max_upd FROM shared_memory
+         WHERE tenant_id = ? AND memory_type = 'observation'
+         AND json_extract(content, '$.entityName') = ?`
+      ).get(tenantId, entityName) as any;
+
       return {
         observations: paged,
         nextCursor,
         totals: { observations: observations.length },
+        maxUpdatedAt: maxUpdRow?.max_upd || null,
       };
     }
 
@@ -2417,6 +2426,12 @@ export class MemoryManager {
       ? Buffer.from(String(nextOffset)).toString('base64')
       : null;
 
+    // max(updated_at) across all included rows for ETag stability
+    const maxUpdRow = this.db.prepare(
+      `SELECT MAX(updated_at) as max_upd FROM shared_memory
+       WHERE tenant_id = ? AND memory_type IN ('entity', 'relation', 'observation')`
+    ).get(tenantId) as any;
+
     return {
       nodes: pagedNodes,
       links,
@@ -2427,6 +2442,7 @@ export class MemoryManager {
         links: links.length,
         observations: totalObs,
       },
+      maxUpdatedAt: maxUpdRow?.max_upd || null,
     };
   }
 

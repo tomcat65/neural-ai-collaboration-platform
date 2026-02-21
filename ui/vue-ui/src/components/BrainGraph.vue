@@ -295,9 +295,23 @@ function updateLOD() {
   if (newTier === currentLodTier) return
   currentLodTier = newTier
 
-  // Tier 1+: hide satellites
+  // Tier 1+: hide satellites + reduce node detail (hide halos, shrink geometry)
   for (const entry of satelliteEntries.values()) {
     entry.group.visible = newTier < 1
+  }
+
+  // Tier 1+: reduce node detail — hide outer halo via scene traversal
+  if (graph) {
+    const scene = graph.scene()
+    scene.traverse((child: THREE.Object3D) => {
+      // Halo meshes are children of node spheres with additive blending
+      if (child instanceof THREE.Mesh) {
+        const mat = child.material as THREE.MeshBasicMaterial
+        if (mat.blending === THREE.AdditiveBlending && mat.opacity <= 0.1 && child.parent?.type === 'Mesh') {
+          child.visible = newTier < 1
+        }
+      }
+    })
   }
 
   // Tier 2: hide particles
@@ -305,14 +319,20 @@ function updateLOD() {
     particleCloud.setVisible(newTier < 2)
   }
 
-  // Tier 2: simplify links (reduce opacity)
+  // Tier 2: simplify links (reduce opacity, hide directional particles)
   if (graph) {
     if (newTier >= 2) {
       graph.linkOpacity(0.05)
       graph.linkWidth(0.2)
+      graph.linkDirectionalParticles(0)
+    } else if (newTier >= 1) {
+      graph.linkOpacity(0.15)
+      graph.linkWidth(0.3)
+      graph.linkDirectionalParticles(1)
     } else {
-      graph.linkOpacity(0.2)
-      graph.linkWidth(0.5)
+      graph.linkOpacity(0.25)
+      graph.linkWidth(0.4)
+      graph.linkDirectionalParticles(3)
     }
   }
 }

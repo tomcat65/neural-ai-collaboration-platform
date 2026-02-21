@@ -571,11 +571,13 @@ export class NeuralMCPServer {
         const updatedSince = req.query.updatedSince as string | undefined;
         const entityName = req.query.entityName as string | undefined;
 
-        // Strict 403: includeObservations=true without graph:observations:view
-        if (includeObservations && !permissions.has('graph:observations:view')) {
+        // Strict 403: observations requested without graph:observations:view
+        // Applies to both includeObservations=true AND entityName mode (which always returns observations)
+        const needsObservationPerm = includeObservations || !!entityName;
+        if (needsObservationPerm && !permissions.has('graph:observations:view')) {
           res.status(403).json({
             error: 'Forbidden',
-            message: 'graph:observations:view permission required for includeObservations=true',
+            message: 'graph:observations:view permission required for observation access',
           });
           return;
         }
@@ -642,6 +644,9 @@ export class NeuralMCPServer {
           for (const o of responseBody.observations) {
             canonicalParts.push(`o:${o.entityName}:${JSON.stringify(o.contents)}`);
           }
+        }
+        if (data.maxUpdatedAt) {
+          canonicalParts.push(`upd:${data.maxUpdatedAt}`);
         }
         canonicalParts.push(`perms:${permSorted}`);
 
