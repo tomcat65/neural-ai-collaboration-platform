@@ -50,15 +50,31 @@ export class ParticleCloud {
     this.dummy = new THREE.Object3D()
     this.particles = []
 
+    // Color palette for particle variation — bioluminescent tones
+    const particleColors = [
+      new THREE.Color('#00e5ff'),  // electric cyan
+      new THREE.Color('#4488cc'),  // shell blue
+      new THREE.Color('#bf5af2'),  // purple
+      new THREE.Color('#39ff14'),  // neon green
+      new THREE.Color('#1a6b8a'),  // deep teal
+    ]
+
     // Initialise particles at random positions inside the sphere
     for (let i = 0; i < this.count; i++) {
       const pos = this.randomPositionInSphere()
+      // Vary particle size for depth — some closer (bigger), some distant (smaller)
+      const sizeVariation = 0.6 + Math.random() * 0.8
       this.dummy.position.set(pos.x, pos.y, pos.z)
+      this.dummy.scale.setScalar(sizeVariation)
       this.dummy.updateMatrix()
       this.mesh.setMatrixAt(i, this.dummy.matrix)
 
+      // Assign varied colors — mostly blue-cyan with occasional purple/green accents
+      const colorIdx = Math.random() < 0.7 ? (Math.random() < 0.5 ? 0 : 1) : Math.floor(Math.random() * particleColors.length)
+      this.mesh.setColorAt(i, particleColors[colorIdx])
+
       // Random slow drift velocity
-      const speed = 0.5 + Math.random() * 1.0
+      const speed = 0.3 + Math.random() * 0.8
       const dir = this.randomDirection()
       this.particles.push({
         vx: dir.x * speed,
@@ -68,6 +84,7 @@ export class ParticleCloud {
     }
 
     this.mesh.instanceMatrix.needsUpdate = true
+    if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true
   }
 
   /** Advance particle positions by `delta` seconds */

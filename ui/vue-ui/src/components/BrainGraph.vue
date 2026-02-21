@@ -65,12 +65,22 @@ let lastFrameTime = 0
 // LOD state
 let currentLodTier = 0 // 0 = full detail, 1 = medium, 2 = low
 
+// Bioluminescent neon palette — vivid, sci-fi, striking
 const TYPE_COLORS: Record<string, string> = {
-  project: '#06b6d4',
-  person: '#f97316',
-  feature: '#10b981',
-  tool: '#8b5cf6',
-  concept: '#ec4899'
+  project: '#00e5ff',   // electric cyan
+  person: '#ff6b35',    // molten orange
+  feature: '#39ff14',   // neon green
+  tool: '#bf5af2',      // vivid purple
+  concept: '#ff2d78'    // hot pink
+}
+
+// Emissive intensity per type for glow
+const TYPE_EMISSIVE: Record<string, number> = {
+  project: 0.6,
+  person: 0.5,
+  feature: 0.5,
+  tool: 0.5,
+  concept: 0.5
 }
 
 function getNodeColor(node: GraphNode): string {
@@ -132,12 +142,17 @@ function createSatellites(
   const maxSatellites = Math.min(observationCount, 8)
   const color = new THREE.Color(getNodeColor(node))
 
-  // InstancedMesh for all satellite spheres
-  const satGeom = new THREE.SphereGeometry(1.2, 8, 8)
-  const satMat = new THREE.MeshBasicMaterial({
-    color: color.clone().lerp(new THREE.Color('#ffffff'), 0.3),
+  // InstancedMesh for all satellite spheres — glowing orbs
+  const satGeom = new THREE.SphereGeometry(1.4, 12, 12)
+  const satColor = color.clone().lerp(new THREE.Color('#ffffff'), 0.3)
+  const satMat = new THREE.MeshStandardMaterial({
+    color: satColor,
+    emissive: satColor,
+    emissiveIntensity: 0.6,
     transparent: true,
-    opacity: 0.8
+    opacity: 0.85,
+    roughness: 0.3,
+    metalness: 0.0
   })
   const instancedSatellites = new THREE.InstancedMesh(satGeom, satMat, maxSatellites)
   const dummy = new THREE.Object3D()
@@ -175,7 +190,8 @@ function createSatellites(
   const lineMat = new THREE.LineBasicMaterial({
     color: color,
     transparent: true,
-    opacity: 0.3
+    opacity: 0.4,
+    blending: THREE.AdditiveBlending
   })
   const lineSegments = new THREE.LineSegments(lineGeom, lineMat)
   group.add(lineSegments)
@@ -329,13 +345,55 @@ onMounted(async () => {
 
   graph = factory()(containerRef.value)
     .nodeId('name')
-    .backgroundColor('#0a0a0a')
+    .backgroundColor('#050510')
     .linkCurvature(0.25)
-    .nodeColor((node: object) => getNodeColor(node as GraphNode))
+    .nodeThreeObject((node: object) => {
+      const gNode = node as GraphNode
+      const radius = getNodeRadius(gNode)
+      const color = new THREE.Color(getNodeColor(gNode))
+      const emissiveIntensity = TYPE_EMISSIVE[gNode.entityType] ?? 0.4
+
+      // Glowing emissive sphere — bioluminescent feel
+      const geometry = new THREE.SphereGeometry(radius, 24, 24)
+      const material = new THREE.MeshStandardMaterial({
+        color: color,
+        emissive: color,
+        emissiveIntensity: emissiveIntensity,
+        transparent: true,
+        opacity: 0.9,
+        roughness: 0.2,
+        metalness: 0.1
+      })
+      const sphere = new THREE.Mesh(geometry, material)
+
+      // Outer glow halo
+      const haloGeom = new THREE.SphereGeometry(radius * 1.6, 16, 16)
+      const haloMat = new THREE.MeshBasicMaterial({
+        color: color,
+        transparent: true,
+        opacity: 0.08,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false
+      })
+      const halo = new THREE.Mesh(haloGeom, haloMat)
+      sphere.add(halo)
+
+      return sphere
+    })
     .nodeVal((node: object) => getNodeRadius(node as GraphNode))
-    .linkColor(() => 'rgba(255, 255, 255, 0.2)')
-    .linkWidth(0.5)
-    .linkOpacity(0.2)
+    .linkColor((link: object) => {
+      // Gradient-like link colors based on source type
+      const l = link as { source: GraphNode | string }
+      const srcName = typeof l.source === 'string' ? l.source : l.source?.entityType
+      const srcColor = srcName ? (TYPE_COLORS[srcName] ?? '#1a4a6e') : '#1a4a6e'
+      return srcColor
+    })
+    .linkWidth(0.4)
+    .linkOpacity(0.25)
+    .linkDirectionalParticles(3)          // Neural impulse particles flowing along links
+    .linkDirectionalParticleWidth(1.2)
+    .linkDirectionalParticleSpeed(0.006)
+    .linkDirectionalParticleColor(() => '#00e5ff')
     .d3AlphaDecay(0.02) // slower decay for better brain-bounded settlement
     .warmupTicks(100)    // S5: run 100 ticks of force simulation then freeze
     .cooldownTicks(0)    // S5: freeze after warmup completes
@@ -366,6 +424,16 @@ onMounted(async () => {
   scene.add(brainShell.mesh)
   scene.add(particleCloud.mesh)
 
+  // Ambient + point lighting for emissive node materials
+  const ambientLight = new THREE.AmbientLight(0x111122, 0.5)
+  scene.add(ambientLight)
+  const pointLight1 = new THREE.PointLight(0x00e5ff, 0.8, 500)
+  pointLight1.position.set(60, 60, 60)
+  scene.add(pointLight1)
+  const pointLight2 = new THREE.PointLight(0xbf5af2, 0.5, 500)
+  pointLight2.position.set(-60, -40, -60)
+  scene.add(pointLight2)
+
   // Start particle animation loop with LOD checks and FPS counter
   const cloud = particleCloud
   lastFrameTime = performance.now()
@@ -385,6 +453,12 @@ onMounted(async () => {
 
     // LOD update
     updateLOD()
+
+    // Animate brain shell — breathing pulse + very slow rotation
+    if (brainShell) {
+      brainShell.updateTime(now * 0.001) // seconds
+      brainShell.mesh.rotation.y += delta * 0.015 // very slow rotation
+    }
 
     // Only update particles if visible (LOD tier < 2)
     if (cloud.mesh.visible) {
@@ -425,12 +499,12 @@ onMounted(async () => {
     }
   })
 
-  // Add bloom post-processing — refined for shell edge glow, node glow, subtle particles
+  // Bloom post-processing — dramatic sci-fi glow
   const bloomPass = new UnrealBloomPass(
     new THREE.Vector2(containerRef.value.clientWidth, containerRef.value.clientHeight),
-    1.2,  // strength (slightly lower: shell edges + nodes glow, particles stay subtle)
-    0.6,  // radius (wider spread for softer brain glow)
-    0.15  // threshold (just above particle opacity so particles don't over-bloom)
+    1.8,  // strength — rich, dramatic glow on nodes and shell edges
+    0.8,  // radius — wide spread for ethereal brain glow
+    0.12  // threshold — low enough to catch node halos and shell Fresnel
   )
   graph.postProcessingComposer().addPass(bloomPass)
 
@@ -521,32 +595,37 @@ onBeforeUnmount(() => {
   touch-action: none;
 }
 
-/* CSS Tooltip */
+/* CSS Tooltip — glassmorphism */
 .node-tooltip {
   position: absolute;
   pointer-events: none;
   z-index: 30;
-  background: rgba(10, 10, 15, 0.92);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 6px;
-  padding: 6px 10px;
+  background: rgba(8, 8, 20, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(0, 229, 255, 0.2);
+  border-radius: 8px;
+  padding: 8px 14px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   white-space: nowrap;
+  box-shadow: 0 4px 20px rgba(0, 229, 255, 0.1), inset 0 0 20px rgba(0, 229, 255, 0.02);
 }
 
 .tooltip-name {
-  color: #ffffff;
+  color: #f0f4ff;
   font-size: 0.85rem;
   font-weight: 600;
+  text-shadow: 0 0 8px rgba(0, 229, 255, 0.3);
 }
 
 .tooltip-type {
   font-size: 0.7rem;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  font-weight: 500;
+  letter-spacing: 0.8px;
+  font-weight: 600;
+  text-shadow: 0 0 6px currentColor;
 }
 
 /* Dev-only FPS counter */

@@ -31,7 +31,7 @@ const brainStore = useBrainStore()
   flex-direction: column;
   width: 100vw;
   height: 100vh;
-  background: #0a0a0a;
+  background: #050510;
   color: #ffffff;
   overflow: hidden;
 }
@@ -41,8 +41,10 @@ const brainStore = useBrainStore()
   align-items: center;
   gap: 20px;
   padding: 12px 24px;
-  background: rgba(0, 0, 0, 0.5);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(5, 5, 16, 0.8);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(0, 229, 255, 0.1);
   flex-shrink: 0;
   z-index: 10;
 }
@@ -64,10 +66,13 @@ const brainStore = useBrainStore()
 .brain-title {
   margin: 0;
   font-size: 1.4rem;
-  background: linear-gradient(45deg, #06b6d4, #8b5cf6);
+  background: linear-gradient(135deg, #00e5ff, #bf5af2, #ff2d78);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+  text-shadow: none;
+  font-weight: 700;
+  letter-spacing: 0.5px;
 }
 
 .brain-status {

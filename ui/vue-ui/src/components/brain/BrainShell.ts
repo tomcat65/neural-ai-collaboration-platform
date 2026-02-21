@@ -205,7 +205,8 @@ export class BrainShell {
         uColor: { value: color },
         uBaseOpacity: { value: cfg.baseOpacity },
         uEdgeOpacity: { value: cfg.edgeOpacity },
-        fresnelPower: { value: cfg.fresnelPower }
+        fresnelPower: { value: cfg.fresnelPower },
+        uTime: { value: 0.0 }
       },
       transparent: true,
       depthWrite: false,
@@ -215,6 +216,11 @@ export class BrainShell {
     this.mesh = new THREE.Mesh(geometry, this.material)
     // Render behind everything else
     this.mesh.renderOrder = -1
+  }
+
+  /** Update time uniform for animated Fresnel pulse */
+  updateTime(time: number): void {
+    this.material.uniforms.uTime.value = time
   }
 
   /** Constrain a position vector to 85% of the shell radius */

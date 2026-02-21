@@ -71,11 +71,11 @@ const PAGE_SIZE = 20
 const displayCount = ref(PAGE_SIZE)
 
 const TYPE_COLORS: Record<string, string> = {
-  project: '#06b6d4',
-  person: '#f97316',
-  feature: '#10b981',
-  tool: '#8b5cf6',
-  concept: '#ec4899'
+  project: '#00e5ff',
+  person: '#ff6b35',
+  feature: '#39ff14',
+  tool: '#bf5af2',
+  concept: '#ff2d78'
 }
 
 const typeColor = computed(() => {
@@ -127,14 +127,17 @@ watch(
   position: absolute;
   top: 0;
   right: 0;
-  width: 360px;
+  width: 380px;
   height: 100%;
-  background: rgba(15, 15, 20, 0.95);
-  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(8, 8, 18, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-left: 1px solid rgba(0, 229, 255, 0.15);
   display: flex;
   flex-direction: column;
   z-index: 20;
   overflow: hidden;
+  box-shadow: -8px 0 40px rgba(0, 0, 0, 0.5), -2px 0 20px rgba(0, 229, 255, 0.05);
 }
 
 .panel-close {
@@ -165,20 +168,23 @@ watch(
 .entity-name {
   margin: 0 0 8px;
   font-size: 1.3rem;
-  color: #ffffff;
+  color: #f0f4ff;
   word-break: break-word;
   padding-right: 30px;
+  text-shadow: 0 0 12px rgba(0, 229, 255, 0.2);
 }
 
 .type-badge {
   display: inline-block;
-  padding: 3px 10px;
+  padding: 4px 12px;
   border-radius: 12px;
-  font-size: 0.75rem;
-  font-weight: 600;
+  font-size: 0.72rem;
+  font-weight: 700;
   color: #ffffff;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.8px;
+  box-shadow: 0 0 12px currentColor;
+  text-shadow: 0 0 6px currentColor;
 }
 
 .entity-meta {
@@ -231,11 +237,17 @@ watch(
 }
 
 .observation-card {
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(0, 229, 255, 0.08);
   border-radius: 8px;
   padding: 12px;
   margin-bottom: 8px;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.observation-card:hover {
+  border-color: rgba(0, 229, 255, 0.2);
+  background: rgba(0, 229, 255, 0.04);
 }
 
 .obs-content {
