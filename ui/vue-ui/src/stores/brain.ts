@@ -15,6 +15,12 @@ export interface GraphLink {
   relationType: string
 }
 
+export interface Observation {
+  entityName: string
+  contents: string[]
+  createdAt?: string
+}
+
 const MOCK_NODES: GraphNode[] = [
   { name: 'neural-mcp', entityType: 'project', observationCount: 12, id: '1', createdAt: '2026-01-15T10:00:00Z' },
   { name: 'tommy', entityType: 'person', observationCount: 8, id: '2', createdAt: '2026-01-15T10:01:00Z' },
@@ -45,6 +51,12 @@ export const useBrainStore = defineStore('brain', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
   const expandedEntityId = ref<string | null>(null)
+  const selectedEntity = ref<GraphNode | null>(null)
+  const observations = ref<Observation[]>([])
+  const observationsLoading = ref(false)
+
+  // Cache: entityName -> Observation[]
+  const observationsCache = new Map<string, Observation[]>()
 
   const fetchGraph = async () => {
     loading.value = true
@@ -74,12 +86,78 @@ export const useBrainStore = defineStore('brain', () => {
     }
   }
 
+  const fetchObservations = async (entityName: string) => {
+    // Check cache first
+    const cached = observationsCache.get(entityName)
+    if (cached) {
+      observations.value = cached
+      return
+    }
+
+    observationsLoading.value = true
+    try {
+      const response = await fetch(
+        `/api/graph-export?includeObservations=true&entityName=${encodeURIComponent(entityName)}`
+      )
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
+      const data = await response.json()
+      const obs: Observation[] = data.observations ?? []
+      observationsCache.set(entityName, obs)
+      observations.value = obs
+    } catch (err) {
+      console.warn('Observations API unavailable, using mock data:', err)
+      // Mock observations for dev/demo
+      const mockObs: Observation[] = Array.from(
+        { length: Math.min(12, Math.max(1, Math.floor(Math.random() * 15))) },
+        (_, i) => ({
+          entityName,
+          contents: [`Observation ${i + 1} for ${entityName}`],
+          createdAt: new Date(Date.now() - i * 86400000).toISOString()
+        })
+      )
+      observationsCache.set(entityName, mockObs)
+      observations.value = mockObs
+    } finally {
+      observationsLoading.value = false
+    }
+  }
+
+  const selectEntity = (node: GraphNode | null) => {
+    if (!node || expandedEntityId.value === node.name) {
+      // Collapse: click same entity or click background
+      expandedEntityId.value = null
+      selectedEntity.value = null
+      observations.value = []
+      return
+    }
+
+    expandedEntityId.value = node.name
+    selectedEntity.value = node
+    fetchObservations(node.name)
+  }
+
+  const clearSelection = () => {
+    expandedEntityId.value = null
+    selectedEntity.value = null
+    observations.value = []
+  }
+
   return {
     nodes,
     links,
     loading,
     error,
     expandedEntityId,
-    fetchGraph
+    selectedEntity,
+    observations,
+    observationsLoading,
+    fetchGraph,
+    fetchObservations,
+    selectEntity,
+    clearSelection
   }
 })

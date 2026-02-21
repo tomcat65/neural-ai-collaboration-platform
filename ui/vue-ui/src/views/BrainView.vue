@@ -12,12 +12,14 @@
     </div>
     <div class="brain-canvas">
       <BrainGraph />
+      <BrainDetailsPanel />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import BrainGraph from '@/components/BrainGraph.vue'
+import BrainDetailsPanel from '@/components/BrainDetailsPanel.vue'
 import { useBrainStore } from '@/stores/brain'
 
 const brainStore = useBrainStore()
