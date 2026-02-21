@@ -109,10 +109,11 @@ const ENTITY_ALIAS: Record<string, string> = {
 
 /** Resolve a graph entity to the real messaging agent ID it maps to */
 function resolveEntityToAgent(entityName: string, entityType: string): string | null {
-  // 1. Static alias (most specific)
-  if (ENTITY_ALIAS[entityName]) return ENTITY_ALIAS[entityName]
-  // 2. Entity type mapping
+  const nameLower = entityName.toLowerCase()
   const typeLower = entityType.toLowerCase()
+  // 1. Static alias (most specific) — case-insensitive
+  if (ENTITY_ALIAS[nameLower]) return ENTITY_ALIAS[nameLower]
+  // 2. Entity type mapping — case-insensitive
   if (ENTITY_TYPE_TO_AGENT[typeLower]) return ENTITY_TYPE_TO_AGENT[typeLower]
   return null
 }
@@ -197,18 +198,24 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     const result = new Map<string, string[]>()
 
     for (const link of graphLinks.value) {
-      if (link.relationType !== 'USES_AGENT') continue
+      if (link.relationType.toLowerCase() !== 'uses_agent') continue
       const src = link.source.toLowerCase()
       if (src !== proj && !src.includes(proj)) continue
 
       const entityName = link.target
-      const node = graphNodes.value.find((n) => n.name === entityName)
+      const node = graphNodes.value.find((n) => n.name.toLowerCase() === entityName.toLowerCase())
       const entityType = node?.entityType || ''
       const resolved = resolveEntityToAgent(entityName, entityType)
       if (resolved) {
         const existing = result.get(resolved)
-        if (existing) existing.push(entityName)
-        else result.set(resolved, [entityName])
+        // Deduplicate entity names (duplicate graph edges)
+        if (existing) {
+          if (!existing.some((e) => e.toLowerCase() === entityName.toLowerCase())) {
+            existing.push(entityName)
+          }
+        } else {
+          result.set(resolved, [entityName])
+        }
       }
     }
     return result
