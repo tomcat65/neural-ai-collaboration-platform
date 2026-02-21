@@ -136,14 +136,15 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
       type: 'object',
       properties: {
         agentId: { type: 'string', description: 'AI agent ID to get messages for' },
-        limit: { type: 'number', description: 'Maximum number of messages', default: 50 },
+        limit: { type: 'number', description: 'Maximum number of messages (server hard cap: 20)', default: 5 },
         messageType: {
           type: 'string',
           enum: ['info', 'task', 'query', 'response', 'collaboration'],
           description: 'Filter by message type'
         },
         since: { type: 'string', description: 'ISO timestamp to get messages since' },
-        unreadOnly: { type: 'boolean', description: 'Only return messages that have not been read yet', default: false },
+        unreadOnly: { type: 'boolean', description: 'Only return unread messages', default: true },
+        compact: { type: 'boolean', description: 'Return summaries only without full content (use get_message_detail for full content)', default: true },
         markAsRead: { type: 'boolean', description: 'Mark returned messages as read after retrieval', default: false },
         includeArchived: { type: 'boolean', description: 'Include archived messages in results (excluded by default)', default: false }
       },
@@ -333,6 +334,20 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
         }
       },
       required: ['userId']
+    }
+  },
+  // Message Hygiene: Single message detail retrieval
+  get_message_detail: {
+    name: 'get_message_detail',
+    description: 'Retrieve the full content of a single message by ID. Use after scanning compact message list from get_ai_messages.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        messageId: { type: 'string', description: 'The message ID to retrieve full content for' },
+        agentId: { type: 'string', description: 'Agent ID (recipient) — required to prove recipient identity' },
+        markAsRead: { type: 'boolean', description: 'Mark this message as read after retrieval', default: true }
+      },
+      required: ['messageId', 'agentId']
     }
   },
   // Task 1200: Message lifecycle tools

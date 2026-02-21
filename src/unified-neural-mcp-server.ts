@@ -517,10 +517,11 @@ export class NeuralMCPServer {
         const rawMessages = this.memoryManager.getMessages(agentId, {
           messageType,
           since,
-          limit: limit ? parseInt(limit, 10) : 50,
+          limit: limit ? Math.max(1, Math.min(parseInt(limit, 10), 20)) : 5,
           unreadOnly: unreadOnly === 'true',
           markAsRead: markAsRead === 'true',
           tenantId: msgReqContext.tenantId,
+          compact: false, // HTTP route always returns full content
         });
 
         const messages = rawMessages.map((msg: any) => ({
@@ -891,6 +892,11 @@ export class NeuralMCPServer {
           name: UnifiedToolSchemas.get_ai_messages.name,
           description: UnifiedToolSchemas.get_ai_messages.description,
           inputSchema: UnifiedToolSchemas.get_ai_messages.inputSchema
+        },
+        {
+          name: UnifiedToolSchemas.get_message_detail.name,
+          description: UnifiedToolSchemas.get_message_detail.description,
+          inputSchema: UnifiedToolSchemas.get_message_detail.inputSchema
         },
         {
           name: UnifiedToolSchemas.register_agent.name,
@@ -1291,6 +1297,27 @@ export class NeuralMCPServer {
           // NE-S6b: Audit log
           this.memoryManager.auditLog('begin_session', sessAgentId, sessProjectId, sessProjectId);
 
+          // Message Hygiene: Include top-5 unread message summaries + true unread count
+          const unreadSummaries = this.memoryManager.getMessages(sessAgentId, {
+            unreadOnly: true,
+            limit: 5,
+            tenantId,
+            compact: true,
+          }).map((msg: any) => ({
+            id: msg.id,
+            from: msg.from_agent,
+            messageType: msg.message_type,
+            priority: msg.priority,
+            timestamp: msg.created_at,
+            summary: msg.summary || '(no summary)',
+          }));
+
+          // True unread count via separate COUNT query
+          let totalUnread = unreadSummaries.length;
+          try {
+            totalUnread = this.memoryManager.countUnreadMessages(sessAgentId, tenantId);
+          } catch { /* ai_messages table may not exist */ }
+
           return {
             content: [{
               type: 'text',
@@ -1300,6 +1327,12 @@ export class NeuralMCPServer {
                 projectId: sessProjectId,
                 handoff: handoffResponse,
                 context: sessContext,
+                unreadMessages: {
+                  count: totalUnread,
+                  showing: unreadSummaries.length,
+                  summaries: unreadSummaries,
+                  hint: totalUnread > 5 ? `${totalUnread - 5} more unread — use get_ai_messages(agentId) to retrieve` : 'Use get_message_detail(messageId) for full content',
+                },
                 notificationStatus,
               }, null, 2)
             }]
@@ -1663,7 +1696,11 @@ export class NeuralMCPServer {
         }
 
         case 'get_ai_messages': {
-          const { agentId: targetAgentId, limit = 50, messageType, since, unreadOnly, markAsRead, includeArchived } = args;
+          const { agentId: targetAgentId, messageType, since, markAsRead, includeArchived } = args;
+          const compact = args.compact !== false; // default true
+          const unreadOnly = args.unreadOnly !== false; // default true
+          // Server-side hard cap: 20 messages max, floor of 1
+          const limit = Math.max(1, Math.min(args.limit ?? 5, 20));
 
           // P1: Use dedicated ai_messages table with indexed queries (tenant-scoped)
           const rawMessages = this.memoryManager.getMessages(targetAgentId, {
@@ -1674,26 +1711,35 @@ export class NeuralMCPServer {
             markAsRead,
             tenantId,
             includeArchived,
+            compact,
           });
 
-          // Transform to match existing response format for backward compatibility
-          const formattedMessages = rawMessages.map((msg: any) => ({
-            id: msg.id,
-            type: 'shared',
-            content: {
-              from: msg.from_agent,
-              to: msg.to_agent,
-              content: msg.content,
-              messageType: msg.message_type,
-              priority: msg.priority,
+          // Transform to response format — compact mode omits full content
+          const formattedMessages = rawMessages.map((msg: any) => {
+            const base: any = {
+              id: msg.id,
+              type: 'shared',
+              content: {
+                from: msg.from_agent,
+                to: msg.to_agent,
+                messageType: msg.message_type,
+                priority: msg.priority,
+                timestamp: msg.created_at,
+                deliveryStatus: 'delivered',
+              },
+              relevance: 0.6,
+              source: msg.from_agent,
               timestamp: msg.created_at,
-              deliveryStatus: 'delivered',
-              metadata: msg.metadata ? JSON.parse(msg.metadata)?.original || msg.metadata : {},
-            },
-            relevance: 0.6,
-            source: msg.from_agent,
-            timestamp: msg.created_at,
-          }));
+            };
+            if (compact) {
+              // Summary only — agent uses get_message_detail for full content
+              base.content.summary = msg.summary || MemoryManager.generateSummary(msg.content || '');
+            } else {
+              base.content.content = msg.content;
+              base.content.metadata = msg.metadata ? JSON.parse(msg.metadata)?.original || msg.metadata : {};
+            }
+            return base;
+          });
 
           return {
             content: [
@@ -1703,9 +1749,12 @@ export class NeuralMCPServer {
                   agentId: targetAgentId,
                   totalMessages: formattedMessages.length,
                   returnedMessages: formattedMessages.length,
+                  compact,
+                  hint: compact ? 'Use get_message_detail(messageId) for full content' : undefined,
                   filters: {
                     messageType: messageType || 'all',
                     since: since || 'beginning',
+                    unreadOnly,
                     limit
                   },
                   messages: formattedMessages,
@@ -1717,6 +1766,46 @@ export class NeuralMCPServer {
                 }, null, 2),
               },
             ],
+          };
+        }
+
+        // === MESSAGE DETAIL (Message Hygiene) ===
+        case 'get_message_detail': {
+          const { messageId: detailMsgId, agentId: detailAgentId } = args;
+          const detailMarkRead = args.markAsRead !== false; // default true
+
+          if (!detailMsgId) {
+            throw new Error('Missing required field: messageId');
+          }
+          if (!detailAgentId) {
+            throw new Error('Missing required field: agentId (recipient identity required)');
+          }
+
+          // Tenant + agent scoping to prevent cross-boundary reads
+          const msg = await this.memoryManager.getMessageById(detailMsgId, detailMarkRead, tenantId, detailAgentId);
+          if (!msg) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ error: 'Message not found', messageId: detailMsgId }) }],
+              isError: true,
+            };
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                id: msg.id,
+                from: msg.from_agent,
+                to: msg.to_agent,
+                content: msg.content,
+                messageType: msg.message_type,
+                priority: msg.priority,
+                timestamp: msg.created_at,
+                readAt: msg.read_at,
+                summary: msg.summary,
+                metadata: msg.metadata ? JSON.parse(msg.metadata) : {},
+              }, null, 2),
+            }],
           };
         }
 

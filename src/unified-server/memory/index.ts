@@ -482,6 +482,30 @@ export class MemoryManager {
     } catch (error) {
       console.warn('⚠️ Migration 002 (users + tenant columns) encountered an issue:', error);
     }
+
+    // Composite index for read path — created after migrations to guarantee columns exist
+    try {
+      this.ensureReadAtColumn();
+      this.ensureArchivedAtColumn();
+      this.ensureSummaryColumn();
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_ai_messages_read_path ON ai_messages(tenant_id, to_agent, archived_at, read_at, created_at DESC)`);
+      // Backfill NULL summaries for existing rows
+      const nullCount = (this.db.prepare(
+        `SELECT COUNT(*) as cnt FROM ai_messages WHERE summary IS NULL AND content IS NOT NULL`
+      ).get() as any)?.cnt ?? 0;
+      if (nullCount > 0) {
+        const rows = this.db.prepare(
+          `SELECT id, content FROM ai_messages WHERE summary IS NULL AND content IS NOT NULL`
+        ).all() as any[];
+        const updateStmt = this.db.prepare(`UPDATE ai_messages SET summary = ? WHERE id = ?`);
+        for (const row of rows) {
+          updateStmt.run(MemoryManager.generateSummary(row.content), row.id);
+        }
+        console.log(`📋 Backfilled summaries for ${rows.length} existing messages`);
+      }
+    } catch {
+      // ai_messages table may not exist yet
+    }
   }
 
   private createIndexes(): void {
@@ -1832,13 +1856,35 @@ export class MemoryManager {
     const id = uuidv4();
     const fromActorType = context?.authType || null;
     const fromActorId = context?.userId || context?.apiKeyId || null;
+    const summary = MemoryManager.generateSummary(content);
+
+    // Write-side auto-split: offload large messages to entity observation
+    let storedContent = content;
+    if (content.length > 3000) {
+      const entityName = `msg-detail-${id}`;
+      try {
+        await this.store(from, {
+          name: entityName,
+          type: 'message_detail',
+          observations: [content],
+          createdBy: from,
+          timestamp: new Date().toISOString(),
+        }, 'shared', 'entity', tenantId, context);
+        storedContent = `Full content stored as entity "${entityName}". Use search_entities("${entityName}") or get_message_detail("${id}") to retrieve.`;
+        console.log(`📦 Auto-split oversized message (${content.length} chars) → entity ${entityName}`);
+      } catch {
+        // If entity creation fails, store full content as fallback
+        storedContent = content;
+      }
+    }
 
     try {
+      this.ensureSummaryColumn();
       const stmt = this.db.prepare(`
-        INSERT INTO ai_messages (id, from_agent, from_source, to_agent, content, message_type, priority, metadata, tenant_id, from_actor_type, from_actor_id)
-        VALUES (?, ?, 'direct', ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO ai_messages (id, from_agent, from_source, to_agent, content, message_type, priority, metadata, tenant_id, from_actor_type, from_actor_id, summary)
+        VALUES (?, ?, 'direct', ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
-      stmt.run(id, from, to, content, messageType, priority, JSON.stringify(metadata || {}), tenantId, fromActorType, fromActorId);
+      stmt.run(id, from, to, storedContent, messageType, priority, JSON.stringify(metadata || {}), tenantId, fromActorType, fromActorId, summary);
     } catch (err: any) {
       // Fallback: ai_messages table may not exist yet (pre-migration)
       if (err.message?.includes('no such table')) {
@@ -1899,17 +1945,24 @@ export class MemoryManager {
       markAsRead?: boolean;
       tenantId?: string;
       includeArchived?: boolean;
+      compact?: boolean;
     } = {}
   ): any[] {
-    const limit = options.limit || 50;
+    const limit = options.limit || 5;
     const tenantId = options.tenantId || 'default';
+    const compact = options.compact !== false; // default true
 
     try {
-      // Ensure read_at + archived_at columns exist (idempotent migration)
+      // Ensure read_at + archived_at + summary columns exist (idempotent migration)
       this.ensureReadAtColumn();
       this.ensureArchivedAtColumn();
+      this.ensureSummaryColumn();
 
-      let query = 'SELECT * FROM ai_messages WHERE to_agent = ? AND tenant_id = ?';
+      // Compact mode: exclude full content column to reduce token consumption
+      const columns = compact
+        ? 'id, from_agent, to_agent, message_type, priority, created_at, read_at, archived_at, summary, metadata'
+        : '*';
+      let query = `SELECT ${columns} FROM ai_messages WHERE to_agent = ? AND tenant_id = ?`;
       const params: any[] = [agentId, tenantId];
 
       // Task 1200: Exclude archived by default
@@ -1954,6 +2007,70 @@ export class MemoryManager {
   }
 
   /**
+   * Get a single message by ID with full content.
+   * Used by get_message_detail tool for the scan-then-detail workflow.
+   */
+  async getMessageById(
+    messageId: string,
+    markAsRead: boolean = true,
+    tenantId: string = 'default',
+    agentId?: string
+  ): Promise<any | null> {
+    try {
+      this.ensureReadAtColumn();
+      this.ensureSummaryColumn();
+      // Scope by tenant + recipient to prevent cross-tenant/cross-agent reads
+      let query = 'SELECT * FROM ai_messages WHERE id = ? AND tenant_id = ?';
+      const params: any[] = [messageId, tenantId];
+      if (agentId) {
+        query += ' AND to_agent = ?';
+        params.push(agentId);
+      }
+      const msg = this.db.prepare(query).get(...params) as any;
+      if (!msg) return null;
+      if (markAsRead && !msg.read_at) {
+        this.db.prepare('UPDATE ai_messages SET read_at = ? WHERE id = ? AND read_at IS NULL')
+          .run(new Date().toISOString(), messageId);
+      }
+      // Resolve auto-split pointer: if content references an entity, fetch the full content
+      const pointerMatch = msg.content?.match(/^Full content stored as entity "([^"]+)"/);
+      if (pointerMatch) {
+        const entityName = pointerMatch[1];
+        try {
+          const results = await this.search(entityName, 'shared', tenantId);
+          const entity = results.find((r: any) => r?.content?.name === entityName);
+          if (entity?.content?.observations?.length) {
+            msg.content = entity.content.observations[0];
+            msg._resolvedFrom = entityName;
+          }
+        } catch {
+          // If entity lookup fails, return the pointer as-is
+        }
+      }
+      return msg;
+    } catch (err: any) {
+      if (err.message?.includes('no such table')) return null;
+      throw err;
+    }
+  }
+
+  /**
+   * Count unread, non-archived messages for an agent within a tenant.
+   */
+  countUnreadMessages(agentId: string, tenantId: string = 'default'): number {
+    try {
+      this.ensureReadAtColumn();
+      this.ensureArchivedAtColumn();
+      const row = this.db.prepare(
+        'SELECT COUNT(*) as cnt FROM ai_messages WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL'
+      ).get(agentId, tenantId) as any;
+      return row?.cnt ?? 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
    * Ensure read_at column exists on ai_messages table (idempotent).
    */
   private _readAtColumnChecked = false;
@@ -1970,6 +2087,35 @@ export class MemoryManager {
     } catch {
       // Table might not exist yet — skip
     }
+  }
+
+  // ─── Message Hygiene: summary column migration ───
+  private _summaryColumnChecked = false;
+  private ensureSummaryColumn(): void {
+    if (this._summaryColumnChecked) return;
+    try {
+      const cols = this.db.prepare("PRAGMA table_info(ai_messages)").all() as any[];
+      const hasSummary = cols.some((c: any) => c.name === 'summary');
+      if (!hasSummary) {
+        this.db.prepare("ALTER TABLE ai_messages ADD COLUMN summary TEXT").run();
+        console.log('📋 Added summary column to ai_messages');
+      }
+      this._summaryColumnChecked = true;
+    } catch {
+      // Table might not exist yet — skip
+    }
+  }
+
+  /**
+   * Generate a summary for a message on write.
+   * Short messages (<=200 chars): summary = content.
+   * Longer: first line truncated to 120 chars + approx token count.
+   */
+  static generateSummary(content: string): string {
+    if (content.length <= 200) return content;
+    const firstLine = content.split('\n')[0].slice(0, 120);
+    const approxTokens = Math.ceil(content.length / 4);
+    return `${firstLine} [~${approxTokens} tokens]`;
   }
 
   // ─── Task 1200: archived_at column migration ───
