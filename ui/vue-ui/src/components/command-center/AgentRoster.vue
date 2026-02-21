@@ -21,13 +21,24 @@ function meta(agent: Agent) {
 
 const othersExpanded = ref(false)
 
-const sortedActive = computed(() =>
-  [...store.activeAgents].sort((a, b) => b.messageCount - a.messageCount)
-)
+// When a project is active, show only agents involved in that project
+const projectActive = computed(() => {
+  if (!store.activeProject) return []
+  const names = store.projectAgentNames
+  return store.realAgents
+    .filter((a) => names.has(a.name) || names.has(a.id))
+    .sort((a, b) => b.messageCount - a.messageCount)
+})
 
-const sortedOffline = computed(() =>
-  [...store.offlineAgents].sort((a, b) => b.messageCount - a.messageCount)
-)
+const sortedActive = computed(() => {
+  if (store.activeProject) return projectActive.value
+  return [...store.activeAgents].sort((a, b) => b.messageCount - a.messageCount)
+})
+
+const sortedOffline = computed(() => {
+  if (store.activeProject) return [] // hide when project-scoped
+  return [...store.offlineAgents].sort((a, b) => b.messageCount - a.messageCount)
+})
 
 function timeAgo(date: Date): string {
   const seconds = Math.floor((Date.now() - date.getTime()) / 1000)
@@ -49,7 +60,7 @@ function selectAgent(agent: Agent) {
 <template>
   <div class="agent-roster">
     <div class="panel-header">
-      <span class="panel-title"><span class="header-icon">&#x1F916;</span> Active Agents</span>
+      <span class="panel-title"><span class="header-icon">&#x1F916;</span> {{ store.activeProject ? 'Project Agents' : 'Active Agents' }}</span>
       <span class="panel-count">{{ sortedActive.length }}</span>
     </div>
     <div class="agent-list">
@@ -96,7 +107,7 @@ function selectAgent(agent: Agent) {
       </template>
 
       <div v-if="sortedActive.length === 0 && sortedOffline.length === 0" class="empty-state">
-        No agents registered
+        {{ store.activeProject ? `No agents found for ${store.activeProject}` : 'No agents registered' }}
       </div>
     </div>
   </div>

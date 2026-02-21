@@ -13,6 +13,7 @@ import type {
   AgentStatusResponse,
   AnalyticsResponse,
   GraphExportResponse,
+  GraphLink,
   ContainerInfo,
 } from '@/types/command-center'
 
@@ -112,6 +113,7 @@ export const useCommandCenterStore = defineStore('command-center', () => {
   })
   const dismissedAttentionIds = ref<Set<string>>(new Set())
   const availableProjects = ref<ProjectInfo[]>([])
+  const graphLinks = ref<GraphLink[]>([])  // relations from knowledge graph
 
   const isConnected = ref(false)
   const lastError = ref<string | null>(null)
@@ -144,17 +146,48 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     )
   )
 
+  // ── Graph-based project context ────────────────────────────
+  // 1-hop neighbors: all entity names connected to the active project via graph links
+  const projectRelatedEntities = computed<Set<string>>(() => {
+    if (!activeProject.value) return new Set()
+    const proj = activeProject.value.toLowerCase()
+    const related = new Set<string>()
+    related.add(proj)
+    for (const link of graphLinks.value) {
+      const src = link.source.toLowerCase()
+      const tgt = link.target.toLowerCase()
+      if (src === proj || src.includes(proj)) related.add(tgt)
+      if (tgt === proj || tgt.includes(proj)) related.add(src)
+    }
+    return related
+  })
+
+  /** Is this message genuinely ABOUT the active project? (not just a passing mention) */
+  function isMessageAboutProject(m: Message, proj: string): boolean {
+    const content = m.content.toLowerCase()
+    const from = m.fromAgent.toLowerCase()
+    const to = m.toAgent.toLowerCase()
+
+    // Agent name contains project name (e.g., spectra-builder-agent)
+    if (from.includes(proj) || to.includes(proj)) return true
+
+    // Project name in first 200 chars → headline / subject area
+    const head = content.slice(0, 200)
+    if (head.includes(proj)) return true
+
+    // Multiple occurrences → the message is substantially about the project
+    const first = content.indexOf(proj)
+    if (first !== -1 && content.indexOf(proj, first + proj.length) !== -1) return true
+
+    return false
+  }
+
   const filteredMessages = computed(() => {
     let list = messages.value
-    // Project scope filter
+    // Project scope filter — graph-aware, headline-weighted
     if (activeProject.value) {
       const proj = activeProject.value.toLowerCase()
-      list = list.filter(
-        (m) =>
-          m.content.toLowerCase().includes(proj) ||
-          m.fromAgent.toLowerCase().includes(proj) ||
-          m.toAgent.toLowerCase().includes(proj)
-      )
+      list = list.filter((m) => isMessageAboutProject(m, proj))
     }
     const f = filter.value
     if (f.agent) {
@@ -175,6 +208,17 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     return list
   })
 
+  // Agents derived from project-filtered messages
+  const projectAgentNames = computed<Set<string>>(() => {
+    if (!activeProject.value) return new Set()
+    const names = new Set<string>()
+    for (const m of filteredMessages.value) {
+      if (!m.fromAgent.startsWith('_')) names.add(m.fromAgent)
+      if (!m.toAgent.startsWith('_')) names.add(m.toAgent)
+    }
+    return names
+  })
+
   const messageTypes = computed(() => {
     const types = new Set<string>()
     messages.value.forEach((m) => types.add(m.messageType))
@@ -190,15 +234,28 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     return Array.from(names).sort()
   })
 
+  // Knowledge filtered by graph relations (1-hop) with fallback to content match
   const filteredKnowledge = computed(() => {
     if (!activeProject.value) return knowledge.value
+    const related = projectRelatedEntities.value
     const proj = activeProject.value.toLowerCase()
-    return knowledge.value.filter(
-      (k) =>
-        k.entityName.toLowerCase().includes(proj) ||
-        k.entityType.toLowerCase().includes(proj) ||
-        k.latestObservation.toLowerCase().includes(proj)
-    )
+
+    return knowledge.value.filter((k) => {
+      const name = k.entityName.toLowerCase()
+      // Direct graph relation (1-hop neighbor)
+      if (related.has(name)) return true
+      // Entity name contains project name
+      if (name.includes(proj)) return true
+      // Entity's latest observation substantially mentions the project (2+ times or first 200 chars)
+      const obs = k.latestObservation.toLowerCase()
+      if (obs) {
+        const head = obs.slice(0, 200)
+        if (head.includes(proj)) return true
+        const first = obs.indexOf(proj)
+        if (first !== -1 && obs.indexOf(proj, first + proj.length) !== -1) return true
+      }
+      return false
+    })
   })
 
   const attentionItems = computed<AttentionItem[]>(() => {
@@ -344,6 +401,9 @@ export const useCommandCenterStore = defineStore('command-center', () => {
         `/api/graph-export?includeObservations=true`
       )
 
+      // Store graph links for project-context filtering
+      graphLinks.value = data.links || []
+
       // Build a map of latest observation per entity
       const obsMap = new Map<string, { content: string; updatedAt: Date }>()
       for (const obs of data.observations || []) {
@@ -449,6 +509,8 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     offlineAgents,
     filteredMessages,
     filteredKnowledge,
+    projectAgentNames,
+    projectRelatedEntities,
     messageTypes,
     agentNames,
     attentionItems,
