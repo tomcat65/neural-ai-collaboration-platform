@@ -4,11 +4,14 @@ export interface AgentStatusResponse {
   agents: ApiAgent[]
 }
 
+export type AgentStatus = 'active' | 'idle' | 'offline'
+
 export interface ApiAgent {
   agentId: string
   name: string
   type: string
-  status: 'online' | 'offline'
+  // Backward-compat: older backends may still emit 'online'
+  status: AgentStatus | 'online'
   eventsCount: number
   successRate: number
   averageResponseTime: number
@@ -97,7 +100,7 @@ export interface Agent {
   id: string
   name: string
   displayName: string
-  status: 'online' | 'offline'
+  status: AgentStatus
   lastSeen: Date
   messageCount: number
   capabilities: string[]

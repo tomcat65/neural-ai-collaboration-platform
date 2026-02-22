@@ -55,18 +55,15 @@ function lastProjectMsg(agent: Agent): string | null {
   return truncate(msg.content, 80)
 }
 
-// Auto-expand "Other Agents" when no active agents exist
 const othersExpanded = ref(false)
-const autoExpandOthers = computed(() => sortedActive.value.length === 0)
 
-// When a project is active, show only agents involved in that project
-const projectActive = computed(() => {
+// ── Project Agents (only when a project tab is active) ──
+const projectAgents = computed(() => {
   if (!store.activeProject) return []
   const names = store.projectAgentNames
   return store.realAgents
     .filter((a) => names.has(a.name) || names.has(a.id))
     .sort((a, b) => {
-      // Graph-discovered agents first, then by message count
       const aGraph = isGraphAgent(a) ? 1 : 0
       const bGraph = isGraphAgent(b) ? 1 : 0
       if (bGraph !== aGraph) return bGraph - aGraph
@@ -74,15 +71,30 @@ const projectActive = computed(() => {
     })
 })
 
+// IDs of project agents (to exclude from active/offline lists when project is active)
+const projectAgentIds = computed(() => new Set(projectAgents.value.map((a) => a.id)))
+
+// ── Active Agents (always visible) ──
 const sortedActive = computed(() => {
-  if (store.activeProject) return projectActive.value
-  return [...store.activeAgents].sort((a, b) => b.messageCount - a.messageCount)
+  let list = [...store.activeAgents].sort((a, b) => b.messageCount - a.messageCount)
+  // When project is active, exclude agents already shown in Project Agents section
+  if (store.activeProject) {
+    list = list.filter((a) => !projectAgentIds.value.has(a.id))
+  }
+  return list
 })
 
+// ── Other Agents (collapsed, always available) ──
 const sortedOffline = computed(() => {
-  if (store.activeProject) return [] // hide when project-scoped
-  return [...store.offlineAgents].sort((a, b) => b.messageCount - a.messageCount)
+  let list = [...store.offlineAgents].sort((a, b) => b.messageCount - a.messageCount)
+  if (store.activeProject) {
+    list = list.filter((a) => !projectAgentIds.value.has(a.id))
+  }
+  return list
 })
+
+// Auto-expand "Other Agents" when no active agents exist
+const autoExpandOthers = computed(() => sortedActive.value.length === 0 && projectAgents.value.length === 0)
 
 function timeAgo(date: Date): string {
   const seconds = Math.floor((Date.now() - date.getTime()) / 1000)
@@ -96,6 +108,18 @@ function timeAgo(date: Date): string {
   return `${days}d ago`
 }
 
+function statusDotClass(agent: Agent): 'online' | 'idle' | 'offline' {
+  if (agent.status === 'active') return 'online'
+  if (agent.status === 'idle') return 'idle'
+  return 'offline'
+}
+
+function statusTextClass(agent: Agent): 'online-text' | 'idle-text' | 'offline-text' {
+  if (agent.status === 'active') return 'online-text'
+  if (agent.status === 'idle') return 'idle-text'
+  return 'offline-text'
+}
+
 function selectAgent(agent: Agent) {
   emit('filter-agent', agent.name)
 }
@@ -103,8 +127,42 @@ function selectAgent(agent: Agent) {
 
 <template>
   <div class="agent-roster">
+    <!-- Project Agents section (only when project tab is active and has agents) -->
+    <template v-if="store.activeProject && projectAgents.length > 0">
+      <div class="panel-header project-header">
+        <span class="panel-title project-title"><span class="header-icon">&#x1F4C1;</span> Project Agents</span>
+        <span class="panel-count project-count">{{ projectAgents.length }}</span>
+      </div>
+      <div class="project-agents-list">
+        <div
+          v-for="agent in projectAgents"
+          :key="'proj-' + agent.id"
+          class="agent-card project"
+          @click="selectAgent(agent)"
+        >
+          <span class="agent-avatar">{{ meta(agent).avatar }}</span>
+          <div class="agent-info">
+            <div class="agent-name-row">
+              <span class="agent-name">{{ agent.displayName }}</span>
+              <span v-if="isGraphAgent(agent)" class="graph-badge" title="Graph-discovered participant">&#x1F517;</span>
+            </div>
+            <span class="agent-role">{{ projectRole(agent) }}</span>
+            <span v-if="lastProjectMsg(agent)" class="agent-last-msg">{{ lastProjectMsg(agent) }}</span>
+          </div>
+          <div class="agent-right">
+            <div class="agent-status-row">
+              <span class="status-dot" :class="statusDotClass(agent)"></span>
+              <span class="status-time" :class="statusTextClass(agent)">{{ timeAgo(agent.lastSeen) }}</span>
+            </div>
+            <span class="agent-msgs">{{ agent.messageCount }} msgs</span>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- Active Agents header (always shown) -->
     <div class="panel-header">
-      <span class="panel-title"><span class="header-icon">&#x1F916;</span> {{ store.activeProject ? 'Project Agents' : 'Active Agents' }}</span>
+      <span class="panel-title"><span class="header-icon">&#x1F916;</span> Active Agents</span>
       <span class="panel-count">{{ sortedActive.length }}</span>
     </div>
     <div class="agent-list">
@@ -117,17 +175,13 @@ function selectAgent(agent: Agent) {
       >
         <span class="agent-avatar">{{ meta(agent).avatar }}</span>
         <div class="agent-info">
-          <div class="agent-name-row">
-            <span class="agent-name">{{ agent.displayName }}</span>
-            <span v-if="store.activeProject && isGraphAgent(agent)" class="graph-badge" title="Graph-discovered participant">&#x1F517;</span>
-          </div>
-          <span class="agent-role">{{ store.activeProject ? projectRole(agent) : meta(agent).role }}</span>
-          <span v-if="store.activeProject && lastProjectMsg(agent)" class="agent-last-msg">{{ lastProjectMsg(agent) }}</span>
+          <span class="agent-name">{{ agent.displayName }}</span>
+          <span class="agent-role">{{ meta(agent).role }}</span>
         </div>
         <div class="agent-right">
           <div class="agent-status-row">
-            <span class="status-dot" :class="agent.status === 'online' ? 'online' : 'recent'"></span>
-            <span class="status-time" :class="agent.status === 'online' ? 'online-text' : 'recent-text'">{{ timeAgo(agent.lastSeen) }}</span>
+            <span class="status-dot" :class="statusDotClass(agent)"></span>
+            <span class="status-time" :class="statusTextClass(agent)">{{ timeAgo(agent.lastSeen) }}</span>
           </div>
           <span class="agent-msgs">{{ agent.messageCount }} msgs</span>
         </div>
@@ -155,7 +209,7 @@ function selectAgent(agent: Agent) {
       </template>
 
       <div v-if="sortedActive.length === 0 && sortedOffline.length === 0" class="empty-state">
-        {{ store.activeProject ? `No agents found for ${store.activeProject}` : 'No agents registered' }}
+        No agents registered
       </div>
     </div>
   </div>
@@ -201,6 +255,44 @@ function selectAgent(agent: Agent) {
   padding: 0.1rem 0.4rem;
   border-radius: 3px;
   font-weight: 600;
+}
+
+/* ── Project Agents section (cyan-accented) ── */
+.project-header {
+  background: var(--cc-cyan-dim);
+  border-bottom: 1px solid var(--cc-cyan);
+}
+
+.project-title {
+  color: var(--cc-cyan);
+}
+
+.project-count {
+  background: var(--cc-cyan);
+  color: var(--cc-bg);
+}
+
+.project-agents-list {
+  padding: 0.35rem;
+  border-bottom: 1px solid var(--cc-border);
+  flex-shrink: 0;
+}
+
+.agent-card.project {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 6px;
+  margin-bottom: 0.15rem;
+  background: var(--cc-cyan-dim);
+  border: 1px solid var(--cc-cyan);
+  transition: background 0.15s;
+  cursor: pointer;
+}
+
+.agent-card.project:hover {
+  background: rgba(34, 211, 238, 0.15);
 }
 
 .agent-list {
@@ -305,9 +397,14 @@ function selectAgent(agent: Agent) {
   box-shadow: 0 0 5px var(--cc-green);
 }
 
-.status-dot.recent {
+.status-dot.idle {
   background: var(--cc-amber);
   box-shadow: 0 0 5px var(--cc-amber-dim);
+}
+
+.status-dot.offline {
+  background: var(--cc-red);
+  box-shadow: 0 0 5px var(--cc-red-dim);
 }
 
 .online-text {
@@ -316,9 +413,15 @@ function selectAgent(agent: Agent) {
   font-weight: 500;
 }
 
-.recent-text {
+.idle-text {
   font-size: calc(0.62rem * var(--cc-font-scale, 1));
   color: var(--cc-amber);
+  font-weight: 500;
+}
+
+.offline-text {
+  font-size: calc(0.62rem * var(--cc-font-scale, 1));
+  color: var(--cc-red);
   font-weight: 500;
 }
 

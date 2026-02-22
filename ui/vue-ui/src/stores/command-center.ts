@@ -7,6 +7,7 @@ import type {
   SystemHealth,
   AttentionItem,
   MessageFilter,
+  AgentStatus,
   ApiAgent,
   ApiMessage,
   RecentEventsResponse,
@@ -40,12 +41,18 @@ function parseUTC(ts: string): Date {
   return new Date(ts)
 }
 
+function normalizeAgentStatus(status: ApiAgent['status']): AgentStatus {
+  if (status === 'online') return 'active'
+  if (status === 'active' || status === 'idle' || status === 'offline') return status
+  return 'offline'
+}
+
 function toAgent(a: ApiAgent): Agent {
   return {
     id: a.agentId,
     name: a.agentId,
     displayName: a.name || a.agentId,
-    status: a.status,
+    status: normalizeAgentStatus(a.status),
     lastSeen: parseUTC(a.lastSeen),
     messageCount: a.eventsCount,
     capabilities: a.capabilities,
@@ -160,17 +167,16 @@ export const useCommandCenterStore = defineStore('command-center', () => {
   // ── Computed ────────────────────────────────────────────────
   const realAgents = computed(() => agents.value.filter((a) => a.isReal))
 
-  // Consider agents "active" if online OR seen within the last 24 hours
+  // Consider agents "active" if status is active/idle OR seen within the last 24 hours
   const ACTIVE_WINDOW_MS = 24 * 60 * 60 * 1000
+  const isActiveLike = (a: Agent) =>
+    a.status === 'active' || a.status === 'idle' || Date.now() - a.lastSeen.getTime() < ACTIVE_WINDOW_MS
+
   const activeAgents = computed(() =>
-    realAgents.value.filter(
-      (a) => a.status === 'online' || Date.now() - a.lastSeen.getTime() < ACTIVE_WINDOW_MS
-    )
+    realAgents.value.filter((a) => isActiveLike(a))
   )
   const offlineAgents = computed(() =>
-    realAgents.value.filter(
-      (a) => a.status !== 'online' && Date.now() - a.lastSeen.getTime() >= ACTIVE_WINDOW_MS
-    )
+    realAgents.value.filter((a) => a.status === 'offline' && Date.now() - a.lastSeen.getTime() >= ACTIVE_WINDOW_MS)
   )
 
   // ── Graph-based project context ────────────────────────────
