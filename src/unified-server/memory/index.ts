@@ -1891,7 +1891,8 @@ export class MemoryManager {
           createdBy: from,
           timestamp: new Date().toISOString(),
         }, 'shared', 'entity', tenantId, context);
-        storedContent = `Full content stored as entity "${entityName}". Use search_entities("${entityName}") or get_message_detail("${id}") to retrieve.`;
+        const detailAgentId = to && to !== '*' ? to : '<your-agent-id>';
+        storedContent = `Full content stored as entity "${entityName}". To read the full message, call: get_message_detail({ messageId: "${id}", agentId: "${detailAgentId}" }). You can also inspect the entity via search_entities("${entityName}").`;
         console.log(`📦 Auto-split oversized message (${content.length} chars) → entity ${entityName}`);
       } catch {
         // If entity creation fails, store full content as fallback
