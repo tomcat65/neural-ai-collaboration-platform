@@ -1,63 +1,62 @@
-FROM node:20-slim
+# === BUILD STAGE ===
+FROM node:20-slim AS builder
 
-# Install system dependencies (glibc-based for sqlite-vec native extension compatibility)
+# Build tools for native modules (sqlite-vec, better-sqlite3)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    bash \
-    git \
     python3 \
     make \
     g++ \
-    sqlite3 \
     libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Create neural-ai user
+# Install all deps (including devDependencies for TypeScript build)
+COPY package*.json tsconfig.json ./
+RUN npm ci
+
+# Copy source and build
+COPY src/ ./src/
+COPY *.md *.json *.js *.cjs ./
+RUN npm run build
+
+# Strip devDependencies
+RUN npm prune --production
+
+# === RUNTIME STAGE ===
+FROM node:20-slim
+
+# Runtime-only system deps (curl for healthcheck, sqlite3 for CLI debug)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
 RUN groupadd -g 1001 neural-ai && \
     useradd -m -s /bin/bash -u 1001 -g neural-ai neural-ai
 
-# Copy package files first for better caching
-COPY package*.json ./
-COPY tsconfig.json ./
+WORKDIR /app
 
-# Install ALL dependencies (including dev dependencies for building)
-RUN npm ci && npm cache clean --force
+# Copy only production artifacts from builder (owned by neural-ai from the start)
+COPY --from=builder --chown=neural-ai:neural-ai /app/dist ./dist
+COPY --from=builder --chown=neural-ai:neural-ai /app/node_modules ./node_modules
+COPY --from=builder --chown=neural-ai:neural-ai /app/package.json ./
 
-# Copy ALL source code and configuration files
-COPY src/ ./src/
-COPY *.md ./
-COPY *.json ./
-COPY *.js ./
-COPY *.cjs ./
-
-# Build TypeScript
-RUN npm run build
-
-# Remove dev dependencies after build
-RUN npm prune --production
-
-# Create data, logs, and model cache directories with proper permissions
+# Create data dirs owned by runtime user
 RUN mkdir -p /app/data /app/logs /app/data/models && \
-    chown -R neural-ai:neural-ai /app
+    chown -R neural-ai:neural-ai /app/data /app/logs
 
-# Expose ports
 EXPOSE 6174 3003
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:6174/health || exit 1
 
-# Set environment variables
 ENV NODE_ENV=production
 ENV NEURAL_MCP_PORT=6174
 ENV MESSAGE_HUB_PORT=3003
 ENV SQLITE_VEC_CACHE_DIR=/app/data/models
 
-# Switch to neural-ai user
 USER neural-ai
 
-# Start the unified neural MCP server
 CMD ["node", "dist/unified-neural-mcp-server.js"]

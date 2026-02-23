@@ -687,17 +687,22 @@ export class SqliteVecClient {
     if (typeof sqliteVecModule.path === 'string') candidates.push(sqliteVecModule.path);
     if (typeof sqliteVecModule.loadablePath === 'string') candidates.push(sqliteVecModule.loadablePath);
 
+    // Deduplicate and try each candidate path
+    const tryPaths: string[] = [];
     for (const candidate of candidates) {
       // better-sqlite3 loadExtension auto-appends platform suffix (.so/.dylib/.dll),
-      // so strip it from the path to avoid double extension (vec0.so.so)
-      const stripped = candidate.replace(/\.(so|dylib|dll)$/, '');
-      for (const tryPath of [stripped, candidate]) {
-        try {
-          this.db.loadExtension(tryPath);
-          return true;
-        } catch (error: any) {
-          this.extensionLoadError = error?.message || `sqlite-vec loadExtension failed (${tryPath})`;
-        }
+      // so strip it to avoid double extension (vec0.so.so). Case-insensitive for Windows.
+      const stripped = candidate.replace(/\.(so|dylib|dll)$/i, '');
+      if (!tryPaths.includes(stripped)) tryPaths.push(stripped);
+      if (!tryPaths.includes(candidate)) tryPaths.push(candidate);
+    }
+
+    for (const tryPath of tryPaths) {
+      try {
+        this.db.loadExtension(tryPath);
+        return true;
+      } catch (error: any) {
+        this.extensionLoadError = error?.message || `sqlite-vec loadExtension failed (${tryPath})`;
       }
     }
 
