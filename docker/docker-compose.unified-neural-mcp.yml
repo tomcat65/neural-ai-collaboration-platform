@@ -14,6 +14,9 @@ services:
       - API_KEY=${API_KEY}
       - ENABLE_ADVANCED_MEMORY=true
       - ENABLE_CROSS_PLATFORM=true
+      - SQLITE_VEC_CACHE_DIR=/app/data/models
+      - SQLITE_VEC_DIMENSIONS=384
+      - SQLITE_VEC_MODEL=Xenova/all-MiniLM-L6-v2
     volumes:
       - unified_neural_data:/app/data
       - ../logs:/app/logs

@@ -1,22 +1,23 @@
-FROM node:18-alpine
+FROM node:20-slim
 
-# Install system dependencies
-RUN apk add --no-cache \
+# Install system dependencies (glibc-based for sqlite-vec native extension compatibility)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     bash \
     git \
     python3 \
     make \
     g++ \
-    sqlite \
-    && rm -rf /var/cache/apk/*
+    sqlite3 \
+    libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
 
 # Create neural-ai user
-RUN addgroup -g 1001 neural-ai && \
-    adduser -D -s /bin/bash -u 1001 -G neural-ai neural-ai
+RUN groupadd -g 1001 neural-ai && \
+    useradd -m -s /bin/bash -u 1001 -g neural-ai neural-ai
 
 # Copy package files first for better caching
 COPY package*.json ./
@@ -38,8 +39,8 @@ RUN npm run build
 # Remove dev dependencies after build
 RUN npm prune --production
 
-# Create data and logs directories with proper permissions
-RUN mkdir -p /app/data /app/logs && \
+# Create data, logs, and model cache directories with proper permissions
+RUN mkdir -p /app/data /app/logs /app/data/models && \
     chown -R neural-ai:neural-ai /app
 
 # Expose ports
@@ -53,6 +54,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 ENV NODE_ENV=production
 ENV NEURAL_MCP_PORT=6174
 ENV MESSAGE_HUB_PORT=3003
+ENV SQLITE_VEC_CACHE_DIR=/app/data/models
 
 # Switch to neural-ai user
 USER neural-ai
