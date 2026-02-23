@@ -113,7 +113,7 @@ export interface GraphQueryResult {
 
 export interface MemorySystemConfig {
   vectorDatabase: {
-    type: 'weaviate';
+    type: 'weaviate' | 'sqlite-vec';
     host: string;
     port: number;
     apiKey?: string;

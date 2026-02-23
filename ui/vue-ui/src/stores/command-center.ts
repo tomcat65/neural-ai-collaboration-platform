@@ -430,12 +430,10 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     try {
       const data = await fetchJSON<AnalyticsResponse>('/api/analytics')
       const o = data.overview
-      // Build container status from what we can observe
+      // Build container status only from currently known active services.
       const containers: ContainerInfo[] = [
         { name: 'unified-neural-mcp', port: '6174', status: 'healthy', mem: '—', uptime: '—' },
         { name: 'vue-dashboard', port: '5176', status: 'healthy', mem: '—', uptime: '—' },
-        { name: 'weaviate', port: '8080', status: 'healthy', mem: '—', uptime: '—' },
-        { name: 't2v-transformers', port: '—', status: 'healthy', mem: '—', uptime: '—' },
       ]
 
       // Estimate DB size from data counts (avg ~3KB per message, ~5KB per entity+observations)

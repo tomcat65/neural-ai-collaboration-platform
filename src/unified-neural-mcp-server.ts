@@ -162,15 +162,16 @@ export class NeuralMCPServer {
 
         // Determine readiness based on system connectivity
         const isReady = systemStatus.sqlite.connected; // SQLite is minimum requirement
-        const isDegraded = !systemStatus.advancedSystemsEnabled ||
-                          !systemStatus.weaviate.connected;
+        const vectorConnected = systemStatus.vector?.connected ?? systemStatus.weaviate?.connected ?? false;
+        const isDegraded = !systemStatus.advancedSystemsEnabled || !vectorConnected;
 
         const status = {
           ready: isReady,
           degraded: isDegraded,
           systems: {
             sqlite: systemStatus.sqlite.connected,
-            weaviate: systemStatus.weaviate.connected,
+            vector: vectorConnected,
+            weaviate: systemStatus.weaviate?.connected ?? vectorConnected, // legacy alias
             advancedSystemsEnabled: systemStatus.advancedSystemsEnabled
           },
           criticalAlerts: criticalAlerts.length,
@@ -916,9 +917,11 @@ export class NeuralMCPServer {
         let advancedStats: any = {};
         if (memoryStatus.advancedSystemsEnabled) {
           try {
-            if (memoryStatus.weaviate.connected && this.memoryManager.weaviateClient) {
-              const weaviateStats = await this.memoryManager.weaviateClient.getStatistics();
-              advancedStats.weaviate = weaviateStats;
+            const vectorConnected = memoryStatus.vector?.connected ?? memoryStatus.weaviate?.connected;
+            if (vectorConnected && this.memoryManager.vectorClient) {
+              const vectorStats = await this.memoryManager.vectorClient.getStatistics();
+              advancedStats.vector = vectorStats;
+              advancedStats.weaviate = vectorStats; // legacy alias for existing dashboard clients
             }
           } catch (statsError) {
             console.warn('⚠️ Error getting advanced system statistics:', statsError);
@@ -1335,7 +1338,8 @@ export class NeuralMCPServer {
               ...result,
               searchScore: score,
               searchType: searchType,
-              memorySource: result.source?.startsWith('weaviate:') ? 'weaviate' : 'sqlite',
+              memorySource: result.source?.startsWith('sqlite-vec:') ? 'sqlite-vec' :
+                            result.source?.startsWith('weaviate:') ? 'sqlite-vec' : 'sqlite',
               semanticSimilarity: null
             };
             if (result.chunked) {
@@ -1753,11 +1757,41 @@ export class NeuralMCPServer {
         }
 
         case 'read_graph': {
-          const entities = await this.memoryManager.search('', { shared: true }, tenantId);
-          const entitiesOnly = entities.filter((e: any) => e.content?.type === 'entity');
-          const relationsOnly = entities.filter((e: any) => e.content?.type === 'relation');
-          const observationsOnly = entities.filter((e: any) => e.content?.type === 'observation');
-          const chunkedCount = entities.filter((e: any) => e.chunked).length;
+          // Read by canonical memory_type from shared_memory. Using content.type here is incorrect:
+          // entity payloads use domain types (project, analysis, etc.), not the storage type 'entity'.
+          const db = this.memoryManager.getDb();
+          let rows: any[] = [];
+          try {
+            rows = db.prepare(
+              `SELECT id, memory_type, content, created_by, created_at
+               FROM shared_memory
+               WHERE tenant_id = ? AND memory_type IN ('entity', 'relation', 'observation')
+               ORDER BY created_at DESC`
+            ).all(tenantId) as any[];
+          } catch {
+            rows = [];
+          }
+
+          const toEntry = (row: any) => {
+            let content: any = {};
+            try {
+              content = JSON.parse(row.content || '{}');
+            } catch {
+              content = { raw: row.content, parseError: true };
+            }
+            return {
+              id: row.id,
+              type: 'shared',
+              content,
+              relevance: 0.6,
+              source: row.created_by,
+              timestamp: new Date(row.created_at),
+            };
+          };
+
+          const entitiesOnly = rows.filter((r: any) => r.memory_type === 'entity').map(toEntry);
+          const relationsOnly = rows.filter((r: any) => r.memory_type === 'relation').map(toEntry);
+          const observationsOnly = rows.filter((r: any) => r.memory_type === 'observation').map(toEntry);
 
           const graphData: any = {
             timestamp: new Date().toISOString(),
@@ -1765,7 +1799,6 @@ export class NeuralMCPServer {
               nodeCount: entitiesOnly.length,
               edgeCount: relationsOnly.length,
               observationCount: observationsOnly.length,
-              ...(chunkedCount > 0 ? { chunkedEntries: chunkedCount } : {})
             },
             graph: {
               entities: entitiesOnly,
@@ -2389,6 +2422,8 @@ export class NeuralMCPServer {
                 },
                 weaviateCleanup: deleteResult.weaviateCleanup,
                 weaviateFailures: deleteResult.weaviateFailures,
+                vectorCleanup: deleteResult.vectorCleanup,
+                vectorFailures: deleteResult.vectorFailures,
               }, null, 2),
             }],
           };
@@ -2471,6 +2506,8 @@ export class NeuralMCPServer {
                 removedObservations: deleteResult.deleted,
                 weaviateCleanup: deleteResult.weaviateCleanup,
                 weaviateFailures: deleteResult.weaviateFailures,
+                vectorCleanup: deleteResult.vectorCleanup,
+                vectorFailures: deleteResult.vectorFailures,
               }, null, 2),
             }],
           };
@@ -2529,6 +2566,7 @@ export class NeuralMCPServer {
                 reason: reason || null,
                 updated: updateResult.updated,
                 weaviateReindexed: updateResult.weaviateReindexed,
+                vectorReindexed: updateResult.vectorReindexed,
               }, null, 2),
             }],
           };
@@ -2597,6 +2635,8 @@ export class NeuralMCPServer {
                 deletedObservations: deleteResult.deleted,
                 weaviateCleanup: deleteResult.weaviateCleanup,
                 weaviateFailures: deleteResult.weaviateFailures,
+                vectorCleanup: deleteResult.vectorCleanup,
+                vectorFailures: deleteResult.vectorFailures,
               }, null, 2),
             }],
           };

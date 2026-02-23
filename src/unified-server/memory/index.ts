@@ -21,7 +21,7 @@ import {
   SharedKnowledge,
   ProjectArtifacts
 } from '../types/memory.js';
-import { WeaviateClient } from '../../memory/weaviate-client.js';
+import { SqliteVecClient } from '../../memory/sqlite-vec-client.js';
 import type { RequestContext } from '../../middleware/auth/types.js';
 import {
   setSystemConnected,
@@ -39,7 +39,9 @@ export class MemoryManager {
 
   /** Expose database reference for tenant resolver initialization */
   getDb(): Database.Database { return this.db; }
-  public weaviateClient?: WeaviateClient;
+  public vectorClient?: SqliteVecClient;
+  // Compatibility alias for existing call sites and payloads.
+  public weaviateClient?: SqliteVecClient;
   private isAdvancedSystemsEnabled: boolean = false;
   private isDualWriteEnabled: boolean = false;
   readonly contentSizeThreshold: number = parseInt(process.env.CONTENT_SIZE_THRESHOLD || '51200', 10); // 50KB default
@@ -85,19 +87,34 @@ export class MemoryManager {
     try {
       console.log('🚀 Initializing advanced memory systems...');
 
-      // Initialize Weaviate client
-      try {
-        this.weaviateClient = new WeaviateClient();
-        await this.weaviateClient.initialize();
-        setSystemConnected('weaviate', true);
-        metrics.logEvent('info', 'systems', 'Weaviate client initialized');
-      } catch (weaviateError) {
-        console.warn('⚠️ Weaviate initialization failed:', weaviateError);
+      const advancedEnabled = process.env.ENABLE_ADVANCED_MEMORY !== 'false';
+      if (!advancedEnabled) {
+        console.log('⏭️ Advanced memory systems disabled by ENABLE_ADVANCED_MEMORY=false');
         setSystemConnected('weaviate', false);
-        metrics.logEvent('error', 'systems', 'Weaviate client initialization failed', { error: String(weaviateError) });
+        this.vectorClient = undefined;
+        this.weaviateClient = undefined;
+        this.isAdvancedSystemsEnabled = false;
+        recordSQLiteFallback();
+        return;
       }
 
-      this.isAdvancedSystemsEnabled = !!this.weaviateClient;
+      // Initialize embedded sqlite-vec client
+      try {
+        this.vectorClient = new SqliteVecClient(this.db);
+        await this.vectorClient.initialize();
+        // Legacy alias while external status payloads still reference "weaviate".
+        this.weaviateClient = this.vectorClient;
+        setSystemConnected('weaviate', true);
+        metrics.logEvent('info', 'systems', 'sqlite-vec client initialized');
+      } catch (vectorError) {
+        console.warn('⚠️ sqlite-vec initialization failed:', vectorError);
+        setSystemConnected('weaviate', false);
+        metrics.logEvent('error', 'systems', 'sqlite-vec client initialization failed', { error: String(vectorError) });
+        this.vectorClient = undefined;
+        this.weaviateClient = undefined;
+      }
+
+      this.isAdvancedSystemsEnabled = !!this.vectorClient;
 
       if (this.isAdvancedSystemsEnabled) {
         console.log('✅ Advanced memory systems initialized (partial or full)');
@@ -106,7 +123,7 @@ export class MemoryManager {
         recordSQLiteFallback();
       }
 
-      // Startup tombstone drain: retry any failed Weaviate deletes from previous sessions
+      // Startup tombstone drain: retry any failed vector deletes from previous sessions.
       void this.retryFailedWeaviateDeletes(100).then((result) => {
         if (result.attempted > 0) {
           console.log(`🪦 Startup tombstone drain: ${result.succeeded}/${result.attempted} succeeded, ${result.failed} failed`);
@@ -858,9 +875,9 @@ export class MemoryManager {
 
   private async storeInAdvancedSystems(id: string, agentId: string, memory: any, scope: string, type: string, tenantId: string = 'default'): Promise<void> {
     try {
-      // Store in Weaviate for semantic search (tenant-scoped)
-      if (this.weaviateClient) {
-        await this.weaviateClient.storeMemory({
+      // Store in embedded vector index for semantic search (tenant-scoped).
+      if (this.vectorClient) {
+        await this.vectorClient.storeMemory({
           id,
           agentId,
           tenantId,
@@ -1289,15 +1306,15 @@ export class MemoryManager {
 
   private async searchInAdvancedSystems(query: string, scope: MemoryScope, results: SearchResult[], tenantId: string = 'default'): Promise<void> {
     try {
-      // 1. Semantic search with Weaviate (post-filtered by tenant)
-      if (this.weaviateClient && scope.shared) {
-        console.log(`🔍 Performing semantic search with Weaviate: "${query}" (tenant: ${tenantId})`);
-        const weaviateResults = await this.weaviateClient.searchMemories({
+      // 1. Semantic search with sqlite-vec (post-filtered by tenant)
+      if (this.vectorClient && scope.shared) {
+        console.log(`🔍 Performing semantic search with sqlite-vec: "${query}" (tenant: ${tenantId})`);
+        const vectorResults = await this.vectorClient.searchMemories({
           query,
           tenantId,
         });
 
-        for (const wResult of weaviateResults) {
+        for (const wResult of vectorResults) {
           results.push({
             id: wResult.id,
             type: 'shared',
@@ -1305,10 +1322,10 @@ export class MemoryManager {
               original: wResult.content,
               tags: wResult.tags,
               agentId: wResult.agentId,
-              source: 'weaviate'
+              source: 'sqlite-vec'
             },
             relevance: (wResult.priority || 5) / 10, // Convert back to 0-1 scale
-            source: `weaviate:${wResult.agentId}`,
+            source: `sqlite-vec:${wResult.agentId}`,
             timestamp: new Date(wResult.timestamp)
           });
         }
@@ -1359,13 +1376,17 @@ export class MemoryManager {
   async getSystemStatus(): Promise<any> {
     const status = {
       sqlite: { connected: true, type: 'SQLite' },
-      weaviate: { connected: false, type: 'Vector Database' },
+      vector: { connected: false, type: 'sqlite-vec', backend: 'sqlite-vec' },
+      // Backward-compat alias for older dashboards/clients.
+      weaviate: { connected: false, type: 'Vector Database (legacy alias)', backend: 'sqlite-vec' },
       advancedSystemsEnabled: this.isAdvancedSystemsEnabled
     };
 
     if (this.isAdvancedSystemsEnabled) {
-      if (this.weaviateClient) {
-        status.weaviate.connected = await this.weaviateClient.healthCheck();
+      if (this.vectorClient) {
+        const connected = await this.vectorClient.healthCheck();
+        status.vector.connected = connected;
+        status.weaviate.connected = connected;
       }
     }
 
@@ -1833,7 +1854,7 @@ export class MemoryManager {
 
   async close(): Promise<void> {
     this.db.close();
-    // Weaviate client doesn't need explicit closing
+    // Embedded vector client does not require explicit closing.
     console.log('🧠 Enhanced memory manager closed');
   }
 
@@ -1907,10 +1928,10 @@ export class MemoryManager {
       throw err;
     }
 
-    // Also store in Weaviate for semantic search if available
-    if (this.isAdvancedSystemsEnabled && this.weaviateClient) {
+    // Also store in vector index for semantic search if available.
+    if (this.isAdvancedSystemsEnabled && this.vectorClient) {
       try {
-        await this.weaviateClient.storeMemory({
+        await this.vectorClient.storeMemory({
           id,
           agentId: from,
           tenantId,
@@ -1923,7 +1944,7 @@ export class MemoryManager {
           metadata: { to, messageType, priority },
         });
       } catch {
-        // Non-critical: Weaviate write failure shouldn't break messaging
+        // Non-critical: vector write failure shouldn't break messaging.
       }
     }
 
@@ -1999,11 +2020,83 @@ export class MemoryManager {
       return messages;
     } catch (err: any) {
       if (err.message?.includes('no such table')) {
-        console.warn('⚠️ ai_messages table not found, falling back to search');
-        return [];
+        console.warn('⚠️ ai_messages table not found, falling back to shared_memory(ai_message)');
+        return this.getLegacyMessages(agentId, options);
       }
       throw err;
     }
+  }
+
+  /**
+   * Legacy fallback: read ai_message rows from shared_memory (pre-migration schema).
+   * These rows do not track read/archive state, so unreadOnly/includeArchived are best-effort.
+   */
+  private getLegacyMessages(
+    agentId: string,
+    options: {
+      messageType?: string;
+      since?: string;
+      limit?: number;
+      unreadOnly?: boolean;
+      markAsRead?: boolean;
+      tenantId?: string;
+      includeArchived?: boolean;
+      compact?: boolean;
+    } = {}
+  ): any[] {
+    const limit = options.limit || 5;
+    const tenantId = options.tenantId || 'default';
+
+    let rows: any[] = [];
+    try {
+      rows = this.db.prepare(
+        `SELECT id, content, created_by, created_at
+         FROM shared_memory
+         WHERE tenant_id = ? AND memory_type = 'ai_message'
+         ORDER BY created_at DESC
+         LIMIT 500`
+      ).all(tenantId) as any[];
+    } catch {
+      return [];
+    }
+
+    const filtered = rows
+      .map((row: any) => {
+        let payload: any = {};
+        try {
+          payload = JSON.parse(row.content || '{}');
+        } catch {
+          payload = {};
+        }
+
+        const toAgent = payload.to || payload.target || payload.to_agent;
+        const fromAgent = payload.from || payload.from_agent || row.created_by;
+        const content = String(payload.content ?? payload.message ?? '');
+        const messageType = String(payload.messageType ?? payload.type ?? 'info');
+        const priority = String(payload.priority ?? 'normal');
+        const createdAt = payload.timestamp || row.created_at;
+
+        return {
+          id: row.id,
+          from_agent: fromAgent,
+          to_agent: toAgent,
+          content,
+          message_type: messageType,
+          priority,
+          created_at: createdAt,
+          read_at: null,
+          archived_at: null,
+          summary: MemoryManager.generateSummary(content),
+          metadata: JSON.stringify(payload.metadata || {}),
+        };
+      })
+      .filter((msg: any) => msg.to_agent === agentId)
+      .filter((msg: any) => !options.messageType || msg.message_type === options.messageType)
+      .filter((msg: any) => !options.since || String(msg.created_at) >= String(options.since))
+      .slice(0, limit);
+
+    // markAsRead is ignored in legacy mode (no read_at column).
+    return filtered;
   }
 
   /**
@@ -2049,7 +2142,43 @@ export class MemoryManager {
       }
       return msg;
     } catch (err: any) {
-      if (err.message?.includes('no such table')) return null;
+      if (err.message?.includes('no such table')) {
+        // Legacy fallback from shared_memory(ai_message)
+        const row = this.db.prepare(
+          `SELECT id, content, created_by, created_at
+           FROM shared_memory
+           WHERE id = ? AND tenant_id = ? AND memory_type = 'ai_message'`
+        ).get(messageId, tenantId) as any;
+        if (!row) return null;
+
+        let payload: any = {};
+        try {
+          payload = JSON.parse(row.content || '{}');
+        } catch {
+          payload = {};
+        }
+
+        const toAgent = payload.to || payload.target || payload.to_agent;
+        if (agentId && toAgent !== agentId) return null;
+
+        const fromAgent = payload.from || payload.from_agent || row.created_by;
+        const content = String(payload.content ?? payload.message ?? '');
+        const messageType = String(payload.messageType ?? payload.type ?? 'info');
+        const priority = String(payload.priority ?? 'normal');
+
+        return {
+          id: row.id,
+          from_agent: fromAgent,
+          to_agent: toAgent,
+          content,
+          message_type: messageType,
+          priority,
+          created_at: payload.timestamp || row.created_at,
+          read_at: null,
+          summary: MemoryManager.generateSummary(content),
+          metadata: JSON.stringify(payload.metadata || {}),
+        };
+      }
       throw err;
     }
   }
@@ -2066,7 +2195,27 @@ export class MemoryManager {
       ).get(agentId, tenantId) as any;
       return row?.cnt ?? 0;
     } catch {
-      return 0;
+      // Legacy fallback: pre-migration rows have no read/archive tracking, treat all as unread.
+      try {
+        const rows = this.db.prepare(
+          `SELECT content
+           FROM shared_memory
+           WHERE tenant_id = ? AND memory_type = 'ai_message'`
+        ).all(tenantId) as Array<{ content: string }>;
+        let count = 0;
+        for (const row of rows) {
+          try {
+            const payload = JSON.parse(row.content || '{}');
+            const toAgent = payload.to || payload.target || payload.to_agent;
+            if (toAgent === agentId) count += 1;
+          } catch {
+            // ignore malformed row
+          }
+        }
+        return count;
+      } catch {
+        return 0;
+      }
     }
   }
 
@@ -2705,11 +2854,19 @@ export class MemoryManager {
   }
 
   /**
-   * Delete graph rows from SQLite in a transaction, then attempt Weaviate cleanup.
-   * Weaviate failures are tombstoned (codex finding #5).
+   * Delete graph rows from SQLite in a transaction, then attempt vector cleanup.
+   * Failures are tombstoned for retry.
    */
-  async deleteGraphRows(ids: string[], tenantId: string): Promise<{ deleted: number; weaviateCleanup: number; weaviateFailures: number }> {
-    if (ids.length === 0) return { deleted: 0, weaviateCleanup: 0, weaviateFailures: 0 };
+  async deleteGraphRows(ids: string[], tenantId: string): Promise<{
+    deleted: number;
+    vectorCleanup: number;
+    vectorFailures: number;
+    weaviateCleanup: number;
+    weaviateFailures: number;
+  }> {
+    if (ids.length === 0) {
+      return { deleted: 0, vectorCleanup: 0, vectorFailures: 0, weaviateCleanup: 0, weaviateFailures: 0 };
+    }
 
     // SQLite transaction delete
     const placeholders = ids.map(() => '?').join(',');
@@ -2720,17 +2877,17 @@ export class MemoryManager {
     });
     const result = txn();
 
-    // Weaviate cleanup (best-effort with tombstone on failure)
-    let weaviateCleanup = 0;
-    let weaviateFailures = 0;
+    // Vector cleanup (best-effort with tombstone on failure)
+    let vectorCleanup = 0;
+    let vectorFailures = 0;
 
-    if (this.weaviateClient) {
+    if (this.vectorClient) {
       for (const id of ids) {
         try {
-          await this.weaviateClient.deleteMemory(id);
-          weaviateCleanup++;
+          await this.vectorClient.deleteMemory(id);
+          vectorCleanup++;
         } catch (err: any) {
-          weaviateFailures++;
+          vectorFailures++;
           // Insert tombstone for retry
           try {
             this.db.prepare(
@@ -2743,23 +2900,29 @@ export class MemoryManager {
     }
 
     // Fire-and-forget: drain any pending tombstones while we're at it
-    if (weaviateFailures > 0) {
+    if (vectorFailures > 0) {
       void this.retryFailedWeaviateDeletes(25).catch(() => {});
     }
 
-    return { deleted: result.changes, weaviateCleanup, weaviateFailures };
+    return {
+      deleted: result.changes,
+      vectorCleanup,
+      vectorFailures,
+      // Legacy aliases for existing API consumers.
+      weaviateCleanup: vectorCleanup,
+      weaviateFailures: vectorFailures
+    };
   }
 
   /**
-   * Update observation content in SQLite and re-embed in Weaviate.
-   * Codex finding #5: delete+reinsert in Weaviate for vector re-embedding.
+   * Update observation content in SQLite and re-embed in vector index.
    */
   async updateObservationContent(
     obsId: string,
     newContent: string,
     contentIndex: number | undefined,
     tenantId: string
-  ): Promise<{ updated: boolean; weaviateReindexed: boolean }> {
+  ): Promise<{ updated: boolean; vectorReindexed: boolean; weaviateReindexed: boolean }> {
     // Fetch current row (constrained to observations only)
     const row = this.db.prepare(
       "SELECT id, content, created_by, owner_actor_type, owner_actor_id FROM shared_memory WHERE id = ? AND tenant_id = ? AND memory_type = 'observation'"
@@ -2793,12 +2956,12 @@ export class MemoryManager {
     ).run(JSON.stringify(updatedContentObj), obsId, tenantId);
     if (upd.changes !== 1) throw new Error(`Observation ${obsId} not found`);
 
-    // Weaviate: delete + reinsert for vector re-embedding
-    let weaviateReindexed = false;
-    if (this.weaviateClient) {
+    // Vector backend: delete + reinsert for re-embedding.
+    let vectorReindexed = false;
+    if (this.vectorClient) {
       try {
-        await this.weaviateClient.deleteMemory(obsId);
-        await this.weaviateClient.storeMemory({
+        await this.vectorClient.deleteMemory(obsId);
+        await this.vectorClient.storeMemory({
           id: obsId,
           agentId: row.created_by,
           tenantId,
@@ -2810,9 +2973,9 @@ export class MemoryManager {
           relationships: [],
           metadata: {},
         });
-        weaviateReindexed = true;
+        vectorReindexed = true;
       } catch (err: any) {
-        // Tombstone for failed Weaviate operation
+        // Tombstone for failed vector operation.
         try {
           this.db.prepare(
             `INSERT OR IGNORE INTO failed_weaviate_deletes (id, weaviate_id, tenant_id, last_error)
@@ -2824,7 +2987,12 @@ export class MemoryManager {
       }
     }
 
-    return { updated: true, weaviateReindexed };
+    return {
+      updated: true,
+      vectorReindexed,
+      // Legacy alias for existing API consumers.
+      weaviateReindexed: vectorReindexed
+    };
   }
 
   /**
@@ -2863,11 +3031,11 @@ export class MemoryManager {
   }
 
   /**
-   * Retry failed Weaviate deletes from the tombstone queue.
+   * Retry failed vector deletes from the tombstone queue.
    * Processes oldest-first, removes on success, bumps retry_count on failure.
    */
   async retryFailedWeaviateDeletes(limit = 100): Promise<{ attempted: number; succeeded: number; failed: number }> {
-    if (!this.weaviateClient) return { attempted: 0, succeeded: 0, failed: 0 };
+    if (!this.vectorClient) return { attempted: 0, succeeded: 0, failed: 0 };
 
     const rows = this.db.prepare(
       `SELECT id, weaviate_id, tenant_id, retry_count
@@ -2880,7 +3048,7 @@ export class MemoryManager {
     let failed = 0;
     for (const row of rows) {
       try {
-        await this.weaviateClient.deleteMemory(row.weaviate_id);
+        await this.vectorClient.deleteMemory(row.weaviate_id);
         this.db.prepare('DELETE FROM failed_weaviate_deletes WHERE id = ?').run(row.id);
         succeeded++;
       } catch (err: any) {
