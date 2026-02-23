@@ -1137,29 +1137,6 @@ export class NeuralMCPServer {
           inputSchema: UnifiedToolSchemas.set_agent_identity.inputSchema
         },
 
-        // === CROSS-PLATFORM SUPPORT ===
-        {
-          name: 'translate_path',
-          description: 'Translate file paths between different operating systems (Windows/WSL/Linux)',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              path: { type: 'string', description: 'Path to translate' },
-              fromPlatform: {
-                type: 'string',
-                enum: ['windows', 'wsl', 'linux'],
-                description: 'Source platform'
-              },
-              toPlatform: {
-                type: 'string',
-                enum: ['windows', 'wsl', 'linux'],
-                description: 'Target platform'
-              }
-            },
-            required: ['path', 'fromPlatform', 'toPlatform']
-          }
-        },
-
         // === SESSION PROTOCOL ===
         {
           name: UnifiedToolSchemas.get_agent_context.name,
@@ -1177,12 +1154,9 @@ export class NeuralMCPServer {
           inputSchema: UnifiedToolSchemas.end_session.inputSchema
         },
 
-        // === SEARCH (LEGACY) ===
-        {
-          name: UnifiedToolSchemas.search_nodes.name,
-          description: UnifiedToolSchemas.search_nodes.description,
-          inputSchema: UnifiedToolSchemas.search_nodes.inputSchema
-        },
+        // Legacy aliases intentionally hidden from tools/list:
+        // - search_nodes (alias of search_entities)
+        // - translate_path (cross-platform helper)
 
         // === USER PROFILE (Task 1100) ===
         {

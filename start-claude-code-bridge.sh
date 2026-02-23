@@ -32,12 +32,13 @@ mkdir -p data/memory
 # Set environment variables for Claude Code integration
 export NODE_ENV=development
 export MCP_PORT=5174
+export NEURAL_MCP_PORT=$MCP_PORT
 export CLAUDE_CODE_MODE=true
 export MEMORY_BRIDGE_ENABLED=true
 export REAL_TIME_SYNC=true
 
 echo "📋 Configuration:"
-echo "  MCP Port: $MCP_PORT"
+echo "  MCP Port: $NEURAL_MCP_PORT"
 echo "  Claude Code Mode: $CLAUDE_CODE_MODE"
 echo "  Memory Bridge: $MEMORY_BRIDGE_ENABLED"
 echo "  Real-time Sync: $REAL_TIME_SYNC"
@@ -89,7 +90,7 @@ else
 fi
 
 # Check MCP server
-if curl -s http://localhost:$MCP_PORT/health > /dev/null; then
+if curl -s http://localhost:$NEURAL_MCP_PORT/health > /dev/null; then
     echo "✅ MCP Server: Running"
 else
     echo "❌ MCP Server: Failed to start"
@@ -101,10 +102,10 @@ echo "=================================================================="
 echo ""
 echo "📋 Available Endpoints:"
 echo "  🌐 Unified Server:     http://localhost:3000"
-echo "  📡 MCP Server:         http://localhost:$MCP_PORT"
+echo "  📡 MCP Server:         http://localhost:$NEURAL_MCP_PORT"
 echo "  💬 Message Hub:        ws://localhost:3003"
 echo "  📊 Health Check:       http://localhost:3000/health"
-echo "  🔧 MCP Health:         http://localhost:$MCP_PORT/health"
+echo "  🔧 MCP Health:         http://localhost:$NEURAL_MCP_PORT/health"
 echo ""
 echo "🧠 Memory & Collaboration:"
 echo "  📚 Store Memory:       POST http://localhost:3000/api/memory/store"
@@ -113,9 +114,9 @@ echo "  🤝 Collaboration:      POST http://localhost:3000/api/collaboration/ta
 echo "  🗳️ Consensus:          POST http://localhost:3000/api/collaboration/consensus"
 echo ""
 echo "🔗 MCP Integration:"
-echo "  📡 MCP Endpoint:       http://localhost:$MCP_PORT/mcp"
-echo "  💬 AI Messaging:       POST http://localhost:$MCP_PORT/ai-message"
-echo "  📨 Get Messages:       GET  http://localhost:$MCP_PORT/ai-messages/{agentId}"
+echo "  📡 MCP Endpoint:       http://localhost:$NEURAL_MCP_PORT/mcp"
+echo "  💬 AI Messaging:       POST http://localhost:$NEURAL_MCP_PORT/ai-message"
+echo "  📨 Get Messages:       GET  http://localhost:$NEURAL_MCP_PORT/ai-messages/{agentId}"
 echo ""
 echo "📄 Claude Code MCP Configuration:"
 echo "  Copy this to your Claude Code settings:"
@@ -123,9 +124,9 @@ echo '  {
     "mcpServers": {
       "neural-ai-collaboration": {
         "command": "node",
-        "args": ["'$(pwd)'/dist/mcp-http-server.js"],
+        "args": ["'$(pwd)'/dist/unified-neural-mcp-server.js"],
         "env": {
-          "MCP_PORT": "'$MCP_PORT'",
+          "NEURAL_MCP_PORT": "'$NEURAL_MCP_PORT'",
           "NODE_ENV": "development"
         }
       }

@@ -7,10 +7,10 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/unified-server/index.js",
-    "dev": "tsx src/unified-server/server.ts",
+    "dev": "tsx src/unified-neural-mcp-server.ts",
     "unified:start": "node dist/unified-server/index.js",
     "unified:prod": "NODE_ENV=production node dist/unified-server/index.js",
-    "mcp:start": "node dist/mcp-http-server.js",
+    "mcp:start": "node dist/unified-neural-mcp-server.js",
     "hub:start": "node dist/message-hub/server.js",
     "bridge:demo": "tsx src/mcp-bridge/examples/bridge-demo.ts",
     "bridge:test": "node dist/mcp-bridge/examples/bridge-demo.js",
