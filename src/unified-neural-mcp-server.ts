@@ -509,9 +509,9 @@ export class NeuralMCPServer {
     this.app.get('/ai-messages/:agentId', async (req, res) => {
       try {
         const { agentId } = req.params;
-        const { since, messageType, limit, unreadOnly, markAsRead } = req.query as {
+        const { since, messageType, limit, unreadOnly, markAsRead, from } = req.query as {
           since?: string; messageType?: string; limit?: string;
-          unreadOnly?: string; markAsRead?: string;
+          unreadOnly?: string; markAsRead?: string; from?: string;
         };
 
         const msgReqContext = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
@@ -523,6 +523,7 @@ export class NeuralMCPServer {
           markAsRead: markAsRead === 'true',
           tenantId: msgReqContext.tenantId,
           compact: false, // HTTP route always returns full content
+          from,
         });
 
         const messages = rawMessages.map((msg: any) => ({
@@ -1921,7 +1922,7 @@ export class NeuralMCPServer {
         }
 
         case 'get_ai_messages': {
-          const { agentId: targetAgentId, messageType, since, markAsRead, includeArchived } = args;
+          const { agentId: targetAgentId, messageType, since, markAsRead, includeArchived, from } = args;
           const compact = args.compact !== false; // default true
           const unreadOnly = args.unreadOnly !== false; // default true
           // Server-side hard cap: 20 messages max, floor of 1
@@ -1937,6 +1938,7 @@ export class NeuralMCPServer {
             tenantId,
             includeArchived,
             compact,
+            from,
           });
 
           // Transform to response format — compact mode omits full content
@@ -1980,6 +1982,7 @@ export class NeuralMCPServer {
                     messageType: messageType || 'all',
                     since: since || 'beginning',
                     unreadOnly,
+                    from: from || undefined,
                     limit
                   },
                   messages: formattedMessages,

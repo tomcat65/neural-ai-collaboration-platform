@@ -1968,6 +1968,7 @@ export class MemoryManager {
       tenantId?: string;
       includeArchived?: boolean;
       compact?: boolean;
+      from?: string;
     } = {}
   ): any[] {
     const limit = options.limit || 5;
@@ -2002,6 +2003,10 @@ export class MemoryManager {
       }
       if (options.unreadOnly) {
         query += ' AND read_at IS NULL';
+      }
+      if (options.from) {
+        query += ' AND from_agent = ?';
+        params.push(options.from);
       }
 
       query += ' ORDER BY created_at DESC LIMIT ?';

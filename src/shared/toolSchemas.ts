@@ -136,6 +136,7 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
       type: 'object',
       properties: {
         agentId: { type: 'string', description: 'AI agent ID to get messages for' },
+        from: { type: 'string', description: 'Filter by sender agent ID (e.g. "codex", "claude-code-sm")' },
         limit: { type: 'number', description: 'Maximum number of messages (server hard cap: 20)', default: 5 },
         messageType: {
           type: 'string',
