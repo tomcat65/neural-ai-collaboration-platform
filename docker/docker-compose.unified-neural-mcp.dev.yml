@@ -17,6 +17,8 @@ services:
     container_name: neural-ai-vue-dashboard
     ports:
       - "5176:5176"
+    env_file:
+      - ../.env
     environment:
       - NEURAL_API_KEY=${API_KEY}
     depends_on:

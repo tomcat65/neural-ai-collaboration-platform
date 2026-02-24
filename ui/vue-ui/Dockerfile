@@ -106,4 +106,4 @@ EXPOSE 5176
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:5176/ || exit 1
 
-CMD ["/bin/sh", "-c", "sed -i \"s|NGINX_API_KEY_PLACEHOLDER|${NEURAL_API_KEY:-}|g\" /etc/nginx/nginx.conf && nginx -g 'daemon off;'"]
+CMD ["/bin/sh", "-c", "API_KEY_VALUE=\"${NEURAL_API_KEY:-${API_KEY:-}}\"; if [ -n \"$API_KEY_VALUE\" ]; then sed -i \"s|NGINX_API_KEY_PLACEHOLDER|$API_KEY_VALUE|g\" /etc/nginx/nginx.conf; else sed -i '/NGINX_API_KEY_PLACEHOLDER/d' /etc/nginx/nginx.conf; fi && nginx -g 'daemon off;'"]
