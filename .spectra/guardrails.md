@@ -42,3 +42,10 @@ Populated during build phases. Record failures, lessons, and patterns here.
 - `shared_memory` table stores 5 different types (ai_message, observation, agent_registration, entity, relation) — be careful with WHERE clauses during migration.
 - Docker compose project name `unified`, file path `docker/docker-compose.unified-neural-mcp.yml`, ports 6174 (MCP) and 3004 (MessageHub) are hardcoded in Tommy's startup scripts — NEVER change these.
 - mcp-shim at `~/projects/mcp-shim/` is a pure passthrough — do not touch it during any phase.
+
+## Shared Inbox Message Retrieval
+- `get_ai_messages` defaults `unreadOnly: true`. This is correct for checking your OWN inbox.
+- When monitoring another agent's inbox (e.g. claude-desktop checking codex or claude-code), use `unreadOnly: false`. The target agent marks its own messages read during execution, so `unreadOnly: true` returns 0 even when messages exist.
+- Pattern for shared inboxes: `get_ai_messages({ agentId: "target-agent", unreadOnly: false, limit: 5 })`
+- Pattern for own inbox: `get_ai_messages({ agentId: "my-agent" })` (defaults are correct)
+- Root cause: read_at is set by the agent that processes messages, not the agent that sent them. Any inbox touched by multiple consumers is a "shared inbox."

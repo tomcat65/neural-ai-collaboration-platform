@@ -536,11 +536,19 @@ await send_ai_message({
 ```typescript
 {
   agentId: string,                                        // Agent ID to get messages for (required)
-  limit?: number,                                         // Max messages, default: 50
+  limit?: number,                                         // Max messages (default: 5, server hard cap: 20)
   messageType?: 'info' | 'task' | 'query' | 'response' | 'collaboration', // Filter by type
-  since?: string                                          // ISO timestamp filter
+  since?: string,                                         // ISO timestamp filter (ADVANCED ONLY)
+  unreadOnly?: boolean,                                   // Default: true. Set false for shared inboxes
+  compact?: boolean,                                      // Default: true. Summaries only; use get_message_detail for full
+  markAsRead?: boolean,                                   // Default: false. Mark returned messages as read
+  includeArchived?: boolean                               // Default: false. Include archived messages
 }
 ```
+
+> **Shared Inbox Warning:** When monitoring another agent's inbox (e.g. claude-desktop
+> checking codex), always set `unreadOnly: false`. The target agent marks its own messages
+> read during execution, so `unreadOnly: true` will return 0 results even when messages exist.
 
 #### Usage Examples
 ```typescript

@@ -131,7 +131,7 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   },
   get_ai_messages: {
     name: 'get_ai_messages',
-    description: 'Retrieve messages for an AI agent with filtering and pagination. IMPORTANT: For routine inbox checks, just pass agentId — the defaults (unreadOnly: true, compact: true, limit: 5) will return your latest unread messages. Do NOT use the since filter for inbox checks; it often causes missed messages when the timestamp is stale.',
+    description: 'Retrieve messages for an AI agent with filtering and pagination. IMPORTANT: For routine inbox checks, just pass agentId — the defaults (unreadOnly: true, compact: true, limit: 5) will return your latest unread messages. Do NOT use the since filter for inbox checks; it often causes missed messages when the timestamp is stale. SHARED INBOX NOTE: When monitoring another agent\'s inbox (e.g. claude-desktop checking codex), use unreadOnly: false — the target agent marks its own messages read during execution, so unreadOnly: true returns 0.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -143,7 +143,7 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
           description: 'Filter by message type'
         },
         since: { type: 'string', description: 'ADVANCED ONLY — ISO timestamp for time-range queries. Do NOT use for routine inbox checks; use unreadOnly instead. A stale timestamp will cause missed messages.' },
-        unreadOnly: { type: 'boolean', description: 'Only return unread messages (default: true). This is the recommended way to check your inbox.', default: true },
+        unreadOnly: { type: 'boolean', description: 'Only return unread messages (default: true). This is the recommended way to check your inbox. Set to false when monitoring a shared inbox — other agents mark their own messages read.', default: true },
         compact: { type: 'boolean', description: 'Return summaries only without full content (use get_message_detail for full content)', default: true },
         markAsRead: { type: 'boolean', description: 'Mark returned messages as read after retrieval', default: false },
         includeArchived: { type: 'boolean', description: 'Include archived messages in results (excluded by default)', default: false }

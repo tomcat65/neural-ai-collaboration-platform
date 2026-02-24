@@ -108,6 +108,20 @@ curl -s -X POST http://localhost:6174/mcp \
       "limit":10
     }}
   }' | jq
+
+# Monitor a shared inbox (IMPORTANT: use unreadOnly:false)
+# Other agents mark their own messages read during execution,
+# so unreadOnly:true returns 0 for inboxes you don't own.
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{
+    "jsonrpc":"2.0","id":13,"method":"tools/call",
+    "params":{"name":"get_ai_messages","arguments":{
+      "agentId":"codex",
+      "unreadOnly":false,
+      "limit":5
+    }}
+  }' | jq
 ```
 
 ### HTTP Messaging Endpoints

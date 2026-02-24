@@ -170,10 +170,15 @@ curl -s -X POST http://localhost:6174/mcp \
   -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_ai_message","arguments":{"from":"my-agent","to":"other-agent","content":"Hello!","messageType":"info"}}}'
 
-# Get unread messages (and mark as read)
+# Get unread messages from your OWN inbox (and mark as read)
 curl -s -X POST http://localhost:6174/mcp \
   -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_ai_messages","arguments":{"agentId":"other-agent","unreadOnly":true,"markAsRead":true}}}'
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_ai_messages","arguments":{"agentId":"my-agent","unreadOnly":true,"markAsRead":true}}}'
+
+# Monitor ANOTHER agent's inbox (use unreadOnly:false — they mark their own messages read)
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_ai_messages","arguments":{"agentId":"other-agent","unreadOnly":false,"limit":5}}}'
 ```
 
 ## Environment Variables

@@ -344,7 +344,7 @@ curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
   -d '{
     "jsonrpc":"2.0","id":42,
     "method":"tools/call",
-    "params":{ "name":"get_ai_messages", "arguments": { "agentId":"codex-agent", "limit": 5 } }
+    "params":{ "name":"get_ai_messages", "arguments": { "agentId":"codex-agent", "unreadOnly": false, "limit": 5 } }
   }' | jq
 
 # Or search persisted results
@@ -392,7 +392,7 @@ curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
 # Fetch Claude's response
 curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
   http://localhost:6174/mcp \
-  -d '{"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"get_ai_messages","arguments":{"agentId":"codex-agent","limit":5}}}' | jq
+  -d '{"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"get_ai_messages","arguments":{"agentId":"codex-agent","unreadOnly":false,"limit":5}}}' | jq
 
 # After execution (scripts/roll_back.sh; tests), report outcome
 curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
@@ -427,7 +427,7 @@ curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
 # Fetch Claude's message (includes patch diff)
 curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
   http://localhost:6174/mcp \
-  -d '{"jsonrpc":"2.0","id":62,"method":"tools/call","params":{"name":"get_ai_messages","arguments":{"agentId":"codex-agent","limit":3}}}' | jq
+  -d '{"jsonrpc":"2.0","id":62,"method":"tools/call","params":{"name":"get_ai_messages","arguments":{"agentId":"codex-agent","unreadOnly":false,"limit":3}}}' | jq
 
 # After applying diff & running tests, persist test outcomes
 curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
