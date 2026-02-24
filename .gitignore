@@ -190,3 +190,14 @@ CLAUDE_DESKTOP_WINDOWS_FIX.md
 *.pfx
 secrets/
 *.secret
+
+# Scaffolding (backed up 2026-02-23, awaiting Auth0 integration)
+docs/MULTI_TENANT_DESIGN.md
+docs/MULTI_TENANT_SECURITY.md
+scripts/test-multi-tenant.ts
+scripts/test-redis-flap-with-restart.sh
+scripts/test-redis-flap.ts
+src/migrations/
+src/observability/
+src/tenant/
+backups/
