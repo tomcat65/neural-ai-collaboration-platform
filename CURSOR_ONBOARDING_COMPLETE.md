@@ -208,4 +208,4 @@
 
 *For detailed usage instructions, see [CURSOR_AGENT_ONBOARDING.md](CURSOR_AGENT_ONBOARDING.md)*  
 *For practical examples, see [CURSOR_DEMO_SESSION.md](CURSOR_DEMO_SESSION.md)*  
-*For complete tool reference, see [COMPLETE_TOOL_REFERENCE.md](COMPLETE_TOOL_REFERENCE.md)*
+*For current tool docs, see [README.md](README.md) and [docs/TOOLS_SCHEMA.md](docs/TOOLS_SCHEMA.md)*

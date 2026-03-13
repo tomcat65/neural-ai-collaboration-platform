@@ -1,3 +1,7 @@
+# Archived on 2026-03-13
+
+This document describes a removed legacy restore flow built around `neural-ai-control.sh` and stale endpoints, and is kept for historical reference only.
+
 # Restoring Neural AI Collaboration Platform from Backup
 
 ## Overview

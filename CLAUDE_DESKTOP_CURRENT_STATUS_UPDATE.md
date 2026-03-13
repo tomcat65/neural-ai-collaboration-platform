@@ -45,7 +45,7 @@ You've successfully accessed the neural-ai-collaboration system! I can see you r
 ## 🚀 **Recent Major Achievements**
 
 ### **1. Complete Documentation System**
-✅ **COMPLETE_TOOL_REFERENCE.md**: All 27 tools documented with examples  
+✅ **Tool documentation**: Later consolidated into the README and `docs/TOOLS_SCHEMA.md`  
 ✅ **CURSOR_AGENT_ONBOARDING.md**: Full onboarding guide for new agents  
 ✅ **Cross-Platform Guides**: Windows/WSL2 integration solutions  
 
