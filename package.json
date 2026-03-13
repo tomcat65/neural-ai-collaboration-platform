@@ -28,9 +28,9 @@
     "ci:schemas": "npm run docs:check && tsx scripts/check-servers-use-unified.ts",
     "typecheck": "tsc --noEmit",
     "typecheck:bridge": "tsc --noEmit --project src/mcp-bridge/tsconfig.json",
-    "docker:build": "docker build -f docker/Dockerfile.neural-ai -t neural-ai-platform .",
-    "docker:run": "docker-compose -f docker/docker-compose.simple.yml up -d",
-    "docker:stop": "docker-compose -f docker/docker-compose.simple.yml down",
+    "docker:build": "docker build -f docker/Dockerfile.unified-neural-mcp -t unified-neural-mcp .",
+    "docker:run": "docker compose -f docker/docker-compose.unified-neural-mcp.yml up -d",
+    "docker:stop": "docker compose -f docker/docker-compose.unified-neural-mcp.yml down",
     "clean": "rm -rf dist",
     "prebuild": "npm run clean",
     "postbuild": "echo 'Build completed successfully'"
