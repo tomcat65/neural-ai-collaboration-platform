@@ -1,6 +1,6 @@
 # Neural AI Collaboration Platform
 
-A **deterministic AI memory and messaging server** built on SQLite + sqlite-vec, exposing 27 MCP tools for knowledge graph management, AI-to-AI messaging, agent coordination, session protocol, and cross-platform support.
+A **deterministic AI memory and messaging server** built on SQLite + sqlite-vec, exposing 25 MCP tools for knowledge graph management, AI-to-AI messaging, agent coordination, session protocol, and cross-platform support.
 
 ## Architecture
 
@@ -36,8 +36,7 @@ curl http://localhost:6174/health
 ### Services
 | Service | Port | Purpose |
 |---------|------|---------|
-| **neural-ai-server** | 6174, 3004 | MCP server + MessageHub WebSocket |
-| **event-orchestrator** | 3004, 3005 | Event-driven agent activation via webhooks |
+| **unified-neural-mcp** | 6174, 3004 | MCP server + MessageHub WebSocket |
 
 ### Startup Scripts
 Tommy's convenience scripts:
@@ -55,9 +54,9 @@ Tommy's convenience scripts:
 - Rate limiting with optional Redis backend (graceful fallback to in-memory).
 - Multi-tenant isolation via Auth0/RequestContext plumbing (`src/tenant/`, `src/middleware/auth/`).
 
-## MCP Tools (27)
+## MCP Tools (25)
 
-### Knowledge Graph (8)
+### Knowledge Graph (9)
 | Tool | Description |
 |------|-------------|
 | `create_entities` | Create entities with observations in the knowledge graph |
@@ -106,7 +105,7 @@ Tommy's convenience scripts:
 | `get_user_profile` | Retrieve user profile data |
 | `update_user_profile` | Update user profile fields |
 
-### Utilities (2)
+### Hidden Legacy Aliases (not in tools/list, but callable)
 | Tool | Description |
 |------|-------------|
 | `translate_path` | Cross-platform path translation (Linux/Windows/WSL) |
@@ -227,4 +226,4 @@ curl -s -X POST http://localhost:6174/mcp \
 | Port | Service |
 |------|---------|
 | 6174 | Unified MCP Server (JSON-RPC + HTTP API) |
-| 3004 | MessageHub WebSocket / Event Orchestrator |
+| 3004 | MessageHub WebSocket |
