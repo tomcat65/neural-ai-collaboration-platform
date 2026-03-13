@@ -1,43 +1,37 @@
-# Scaffolding Cleanup — Restore Reviewability
+# Bounded Consolidation — Implementation Plan
 
-## Context
-`.gitignore` hides 3 `src/` directories and several scripts/docs under a "Scaffolding" comment.
-Two of those directories (`src/observability/`, `src/tenant/`) are **live production code** imported by the runtime server.
-Hiding them from git means fresh clones break and PRs can't review changes to critical auth/metrics code.
+## Prior Work
+- [x] Scaffolding cleanup (commit f401ec5) — un-ignored live production code, deleted dead stubs
 
-## Audit Results
+## Task 1: Fix message delivery persistence bug
+- [x] 1a. Add `updateMessageStatus()` method to MemoryManager for ai_messages-specific updates
+- [x] 1b. Update `simulateRealTimeDelivery()` to use new method instead of `memoryManager.update(..., 'shared')`
+- [x] 1c. Verify: build passes, delivery status is persisted to ai_messages
 
-| Path | Live? | Complete? | Action |
-|------|-------|-----------|--------|
-| `src/observability/` | **YES** — imported by server, security, memory | 100% | **Un-ignore, commit** |
-| `src/tenant/` | **YES** — imported by security middleware, auth | 100% | **Un-ignore, commit** |
-| `src/migrations/001-*`, `002-*` | No (CLI tools) | 100% | Already committed — no change |
-| `src/migrations/migration-ledger.sql` | No | Stub | **Delete** — not imported anywhere |
-| `src/migrations/reconciliation-job.ts` | No | Stub | **Delete** — not imported anywhere |
-| `src/migrations/task-knowledge-migration.ts` | No | Stub | **Delete** — not imported anywhere |
-| `docs/MULTI_TENANT_DESIGN.md` | No | Design doc | **Un-ignore, commit** — reference for tenant/ code |
-| `docs/MULTI_TENANT_SECURITY.md` | No | Ops guide | **Un-ignore, commit** — reference for tenant/ code |
-| `scripts/test-multi-tenant.ts` | No | 100% | **Un-ignore, commit** — useful integration test |
-| `scripts/test-redis-flap.ts` | No | 100% | **Un-ignore, commit** — useful test |
-| `scripts/test-redis-flap-with-restart.sh` | No | Stub (15 lines) | **Delete** — incomplete |
+## Task 2: Fix readiness + align package.json
+- [x] 2a. Fix `/ready` endpoint: return 207 for degraded state instead of `isDegraded ? 200 : 200`
+- [x] 2b. Align `package.json` main/start/unified:start to `dist/unified-neural-mcp-server.js`
+- [x] 2c. Verify: build passes
 
-## Plan
+## Task 3: Remove synthetic metrics from canonical runtime
+- [x] 3a. Replace Math.random()/hardcoded analytics with null (real data kept: totalEvents, activeAgents, memory heap, event counts)
+- [x] 3b. Verify: /api/analytics returns only real data or explicit null markers
 
-- [x] 1. Remove scaffolding entries from `.gitignore` (lines 194-203)
-- [x] 2. Delete dead stubs: `migration-ledger.sql`, `reconciliation-job.ts`, `task-knowledge-migration.ts`, `test-redis-flap-with-restart.sh`
-- [x] 3. `git add` the un-ignored live files so they become tracked
-- [x] 4. Verify: `npm run build` still succeeds (no import breakage)
-- [x] 5. Verify: no secrets or sensitive data in newly tracked files
-- [ ] 6. Report results to Codex
+## Task 4: Truth the docs
+- [x] 4a. Update README.md: sqlite-vec, 27 tools, correct architecture, canonical runtime documented
+- [x] 4b. Archive docs/curl-answer.md → docs/curl-answer.md.archived
+- [x] 4c. Verify: docs match runtime reality
 
-## Results
+## Task 5: Minimal agent registration upsert
+- [x] 5a. Add upsert logic: delete prior registrations for same agentId before inserting
+- [x] 5b. Verify: build passes
 
-**Changes made:**
-- `.gitignore`: Removed 10-line scaffolding block (lines 194-203). Kept `backups/` ignored.
-- Deleted 4 dead files: `src/migrations/{migration-ledger.sql,reconciliation-job.ts,task-knowledge-migration.ts}`, `scripts/test-redis-flap-with-restart.sh`
-- Un-ignored and ready to commit: `src/observability/` (4 files), `src/tenant/` (4 files), `docs/MULTI_TENANT_{DESIGN,SECURITY}.md`, `scripts/test-{multi-tenant,redis-flap}.ts`
-
-**Verification:**
-- `npm run build` — passes clean
-- Secret scan — no hardcoded credentials in any newly tracked files
-- No runtime behavior change — only git tracking changed
+## Verification Summary
+- All 5 tasks: build passes clean (`npm run build`)
+- No secrets in any committed files
+- No runtime behavior regressions (changes are correctness fixes + doc truth)
+- Delivery status now persists to correct table (ai_messages metadata)
+- /ready now distinguishes healthy (200) vs degraded (207) vs down (503)
+- Analytics returns null for unmeasured metrics instead of fabricated values
+- README reflects actual architecture (sqlite-vec, 27 tools, canonical runtime)
+- Agent re-registration now updates instead of duplicating

@@ -1,15 +1,23 @@
 # Neural AI Collaboration Platform
 
-A **deterministic AI memory and messaging server** built on SQLite + Weaviate, exposing 18 MCP tools for knowledge graph management, AI-to-AI messaging, agent coordination, session protocol, and cross-platform support.
+A **deterministic AI memory and messaging server** built on SQLite + sqlite-vec, exposing 27 MCP tools for knowledge graph management, AI-to-AI messaging, agent coordination, session protocol, and cross-platform support.
 
 ## Architecture
 
 | Component | Purpose |
 |-----------|---------|
 | **SQLite** | Primary ACID storage — entities, relations, observations, messages, agent state |
-| **Weaviate** | Optional vector database for semantic search (text2vec-transformers) |
+| **sqlite-vec** | Native vector search (v0.1.7-alpha.2, vec0 mode) for semantic operations |
 | **Express + MCP** | HTTP server with JSON-RPC MCP protocol on port 6174 |
 | **MessageHub** | WebSocket real-time messaging on port 3004 |
+
+## Canonical Runtime
+
+The production server is `src/unified-neural-mcp-server.ts` (`NeuralMCPServer` class).
+
+- **Docker:** `docker/Dockerfile.neural-ai-server` → `npm run mcp:start`
+- **Dev:** `npm run dev` (tsx)
+- **Prod:** `npm start` or `npm run unified:prod`
 
 ## Docker Deployment
 
@@ -18,7 +26,7 @@ A **deterministic AI memory and messaging server** built on SQLite + Weaviate, e
 # Set your API key
 export API_KEY="your-secret-key"
 
-# Start the stack (3 services: neural-mcp + weaviate + t2v-transformers)
+# Start the stack
 docker compose -p unified -f docker/docker-compose.unified-neural-mcp.yml up -d --build
 
 # Verify health
@@ -28,9 +36,8 @@ curl http://localhost:6174/health
 ### Services
 | Service | Port | Purpose |
 |---------|------|---------|
-| **unified-neural-mcp** | 6174, 3004 | MCP server + MessageHub WebSocket |
-| **weaviate** | 8080 | Vector database for semantic search |
-| **t2v-transformers** | (internal) | Sentence transformer model for Weaviate |
+| **neural-ai-server** | 6174, 3004 | MCP server + MessageHub WebSocket |
+| **event-orchestrator** | 3004, 3005 | Event-driven agent activation via webhooks |
 
 ### Startup Scripts
 Tommy's convenience scripts:
@@ -46,10 +53,11 @@ Tommy's convenience scripts:
 - Clients send `X-API-Key` header or `Authorization: Bearer` token.
 - Public endpoints: `/health`, `/health.json`, `/ready`.
 - Rate limiting with optional Redis backend (graceful fallback to in-memory).
+- Multi-tenant isolation via Auth0/RequestContext plumbing (`src/tenant/`, `src/middleware/auth/`).
 
-## MCP Tools (18)
+## MCP Tools (27)
 
-### Knowledge Graph (5)
+### Knowledge Graph (8)
 | Tool | Description |
 |------|-------------|
 | `create_entities` | Create entities with observations in the knowledge graph |
@@ -57,12 +65,19 @@ Tommy's convenience scripts:
 | `create_relations` | Create typed relationships between entities |
 | `read_graph` | Read the full knowledge graph with statistics |
 | `search_entities` | Federated search (exact, semantic, graph, hybrid) |
+| `delete_entity` | Delete an entity and its observations/relations |
+| `remove_observations` | Remove specific observations from an entity |
+| `update_observation` | Update an existing observation's content |
+| `delete_observations_by_entity` | Delete all observations for an entity |
 
-### AI Messaging (2)
+### AI Messaging (5)
 | Tool | Description |
 |------|-------------|
 | `send_ai_message` | Send messages (direct, capability-based, or broadcast) |
 | `get_ai_messages` | Retrieve messages with filtering, read tracking (`unreadOnly`, `markAsRead`) |
+| `get_message_detail` | Get full content of a single message by ID |
+| `mark_messages_read` | Mark messages as read |
+| `archive_messages` | Archive messages |
 
 ### Agent Management (3)
 | Tool | Description |
@@ -85,11 +100,17 @@ Tommy's convenience scripts:
 | `begin_session` | Open a project session — loads context, returns handoff flag, creates project skeleton |
 | `end_session` | Close a project session — writes handoff flag, records learnings, Slack notification |
 
+### User Profile (2)
+| Tool | Description |
+|------|-------------|
+| `get_user_profile` | Retrieve user profile data |
+| `update_user_profile` | Update user profile fields |
+
 ### Utilities (2)
 | Tool | Description |
 |------|-------------|
 | `translate_path` | Cross-platform path translation (Linux/Windows/WSL) |
-| `search_nodes` | Deprecated alias for `search_entities` with `searchType: "graph"` |
+| `search_nodes` | _(Deprecated)_ Alias for `search_entities` with `searchType: "graph"` |
 
 ### List Tools
 ```bash
@@ -103,11 +124,13 @@ curl -s -X POST http://localhost:6174/mcp \
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Health check (public) |
-| GET | `/ready` | Readiness with system status |
+| GET | `/ready` | Readiness with system status (200=healthy, 207=degraded, 503=down) |
 | POST | `/mcp` | MCP JSON-RPC (tools/list, tools/call) |
 | POST | `/ai-message` | Send AI message via HTTP |
 | GET | `/ai-messages/:agentId` | Get messages (`?unreadOnly=true&markAsRead=true`) |
 | GET | `/system/status` | Full system status |
+| GET | `/api/analytics` | Dashboard analytics (real metrics only) |
+| GET | `/metrics` | Prometheus-format metrics |
 
 ## Client Integrations (MCP)
 
@@ -188,8 +211,6 @@ curl -s -X POST http://localhost:6174/mcp \
 | `API_KEY` | Yes | — | API key for authentication |
 | `NEURAL_MCP_PORT` | No | 6174 | MCP server port |
 | `MESSAGE_HUB_PORT` | No | 3004 | WebSocket hub port |
-| `WEAVIATE_URL` | No | `http://weaviate:8080` | Weaviate connection URL |
-| `ENABLE_ADVANCED_MEMORY` | No | true | Enable Weaviate integration |
 | `SLACK_WEBHOOK_URL` | No | — | Slack Incoming Webhook URL for session notifications |
 | `NODE_ENV` | No | development | Node environment |
 
@@ -198,11 +219,12 @@ curl -s -X POST http://localhost:6174/mcp \
 - Tool schemas: `src/shared/toolSchemas.ts` (source of truth)
 - Auto-generated docs: `npm run docs:tools` (outputs `docs/TOOLS_SCHEMA.md`)
 - Examples: [EXAMPLES_OF_USE.md](EXAMPLES_OF_USE.md)
+- Multi-tenant design: [docs/MULTI_TENANT_DESIGN.md](docs/MULTI_TENANT_DESIGN.md)
+- Security operations: [docs/MULTI_TENANT_SECURITY.md](docs/MULTI_TENANT_SECURITY.md)
 
 ## Port Reference
 
 | Port | Service |
 |------|---------|
 | 6174 | Unified MCP Server (JSON-RPC + HTTP API) |
-| 3004 | MessageHub WebSocket |
-| 8080 | Weaviate (internal to Docker network) |
+| 3004 | MessageHub WebSocket / Event Orchestrator |
