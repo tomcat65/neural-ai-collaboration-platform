@@ -1063,6 +1063,30 @@ export class MemoryManager {
     console.log(`🔄 Updated ${scope} memory: ${id}`);
   }
 
+  /**
+   * Update delivery status for a message in ai_messages table.
+   * Merges the new status into the existing metadata JSON column.
+   */
+  async updateMessageStatus(messageId: string, deliveryStatus: string): Promise<void> {
+    try {
+      const row = this.db.prepare('SELECT metadata FROM ai_messages WHERE id = ?').get(messageId) as any;
+      if (!row) {
+        console.warn(`⚠️ updateMessageStatus: message ${messageId} not found in ai_messages`);
+        return;
+      }
+      const metadata = row.metadata ? JSON.parse(row.metadata) : {};
+      metadata.deliveryStatus = deliveryStatus;
+      metadata.deliveredAt = new Date().toISOString();
+      this.db.prepare('UPDATE ai_messages SET metadata = ? WHERE id = ?').run(JSON.stringify(metadata), messageId);
+    } catch (err: any) {
+      if (err.message?.includes('no such table')) {
+        console.warn('⚠️ updateMessageStatus: ai_messages table not found, skipping');
+        return;
+      }
+      throw err;
+    }
+  }
+
   async share(fromAgent: string, toAgent: string, memory: any): Promise<void> {
     // Create a shared knowledge entry
     const sharedKnowledge: SharedKnowledge = {

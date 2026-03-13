@@ -178,9 +178,11 @@ export class NeuralMCPServer {
           timestamp: new Date().toISOString()
         };
 
-        // Return 200 if ready, 503 if not
-        if (isReady) {
-          res.status(isDegraded ? 200 : 200).json(status);
+        // Return 200 if fully ready, 207 if degraded, 503 if down
+        if (isReady && !isDegraded) {
+          res.status(200).json(status);
+        } else if (isReady && isDegraded) {
+          res.status(207).json(status);
         } else {
           res.status(503).json(status);
         }
@@ -816,8 +818,8 @@ export class NeuralMCPServer {
           agentPerformance = agentRows.map((r) => ({
             name: r.from_agent,
             events: r.cnt,
-            successRate: 95 + Math.random() * 5,
-            avgTime: Math.round(100 + Math.random() * 200),
+            successRate: null,
+            avgTime: null,
           }));
 
           const typeRows = db.prepare(
@@ -865,7 +867,7 @@ export class NeuralMCPServer {
               'SELECT COUNT(*) as cnt FROM ai_messages WHERE tenant_id = ? AND created_at >= ? AND created_at < ?'
             ).get(tenantId, start.toISOString(), end.toISOString()) as { cnt: number } | undefined;
             trendEvents.push(row?.cnt ?? 0);
-            trendSuccessRates.push(92 + Math.random() * 6);
+            trendSuccessRates.push(null as any);
           }
         } catch {
           // ai_messages may not exist
@@ -876,8 +878,8 @@ export class NeuralMCPServer {
           overview: {
             totalEvents,
             activeAgents,
-            successRate: 95.0,
-            avgResponseTime: 180,
+            successRate: null,
+            avgResponseTime: null,
             entityCount,
             relationCount,
             observationCount,
@@ -890,10 +892,10 @@ export class NeuralMCPServer {
           agentPerformance,
           eventTypes,
           systemHealth: {
-            cpu: Math.round(Math.random() * 30 + 20),
+            cpu: null,
             memory: Math.round((memUsage.heapUsed / memUsage.heapTotal) * 100),
-            network: Math.round(Math.random() * 20 + 40),
-            storage: Math.round(Math.random() * 20 + 30),
+            network: null,
+            storage: null,
           },
         });
       } catch (error: any) {
@@ -2142,6 +2144,21 @@ export class NeuralMCPServer {
           };
 
           // Agent registrations are GLOBAL (not tenant-scoped per isolation policy)
+          // Upsert: remove prior registration for this agentId to prevent duplicates
+          try {
+            const db = this.memoryManager.getDb();
+            const existing = db.prepare(
+              `SELECT id FROM shared_memory WHERE memory_type = 'agent_registration' AND json_extract(content, '$.agentId') = ?`
+            ).all(newAgentId) as Array<{ id: string }>;
+            if (existing.length > 0) {
+              const deleteStmt = db.prepare('DELETE FROM shared_memory WHERE id = ?');
+              for (const row of existing) {
+                deleteStmt.run(row.id);
+              }
+            }
+          } catch {
+            // Non-critical: if cleanup fails, fall through to insert
+          }
           const registrationId = await this.memoryManager.store(agent, agentData, 'shared', 'agent_registration');
 
           // Simulate agent registration with unified server
@@ -2665,11 +2682,10 @@ export class NeuralMCPServer {
         messageData.deliveryStatus = 'delivered';
       }
 
-      // Persist the updated delivery status back to the database
+      // Persist the updated delivery status to ai_messages
       if (messageId) {
         try {
-          // Update the stored message with the new delivery status
-          await this.memoryManager.update(messageId, messageData, 'shared');
+          await this.memoryManager.updateMessageStatus(messageId, messageData.deliveryStatus);
           console.log(`💾 Updated delivery status to '${messageData.deliveryStatus}' for message ${messageId}`);
         } catch (updateError) {
           console.error(`❌ Failed to update delivery status in database:`, updateError);
@@ -2678,11 +2694,11 @@ export class NeuralMCPServer {
     } catch (error) {
       console.error(`❌ Failed to deliver message to ${messageData.to}:`, error);
       messageData.deliveryStatus = 'failed';
-      
-      // Also persist the failed status
+
+      // Persist the failed status to ai_messages
       if (messageId) {
         try {
-          await this.memoryManager.update(messageId, messageData, 'shared');
+          await this.memoryManager.updateMessageStatus(messageId, 'failed');
           console.log(`💾 Updated delivery status to 'failed' for message ${messageId}`);
         } catch (updateError) {
           console.error(`❌ Failed to update failed delivery status in database:`, updateError);
