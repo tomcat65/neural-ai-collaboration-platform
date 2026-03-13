@@ -1,3 +1,9 @@
+# Archived on 2026-03-13
+
+This document reflects a July/August 2025 snapshot with a superseded tool surface and removed tool names. It is kept for historical reference only.
+
+For the current runtime and tool contract, use [README.md](README.md) and [docs/TOOLS_SCHEMA.md](docs/TOOLS_SCHEMA.md).
+
 # 🚀 Git Commit and Push Guide - Phase 3 Multi-Provider
 
 ## 📋 Current Situation
