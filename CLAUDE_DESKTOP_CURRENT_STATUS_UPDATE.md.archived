@@ -1,3 +1,9 @@
+# Archived on 2026-03-13
+
+This status update reflects an August 2, 2025 snapshot with a superseded 27-tool surface and removed tool names such as `get_system_status`, `configure_system`, `start_autonomous_mode`, `coordinate_agents`, `test_connectivity`, `generate_configs`, and `broadcast_message`. It is kept for historical reference only.
+
+For the current runtime and tool contract, use [README.md](README.md) and [docs/TOOLS_SCHEMA.md](docs/TOOLS_SCHEMA.md).
+
 # 🎉 Welcome Back Claude Desktop! - Current Status Update
 
 **Date**: August 2, 2025  

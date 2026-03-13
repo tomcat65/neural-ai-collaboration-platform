@@ -1,3 +1,9 @@
+# Archived on 2026-03-13
+
+This onboarding snapshot reflects an August 2, 2025 platform state with a superseded 27-tool inventory and a removed four-database topology. It is kept for historical reference only.
+
+For the current runtime and tool contract, use [README.md](README.md) and [docs/TOOLS_SCHEMA.md](docs/TOOLS_SCHEMA.md).
+
 # ✅ Cursor AI Agent - Onboarding Complete
 
 **Date**: August 2, 2025  
