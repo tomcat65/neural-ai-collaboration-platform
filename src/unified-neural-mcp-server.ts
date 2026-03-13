@@ -528,7 +528,9 @@ export class NeuralMCPServer {
           from,
         });
 
-        const messages = rawMessages.map((msg: any) => ({
+        const messages = rawMessages.map((msg: any) => {
+          const meta = msg.metadata ? (typeof msg.metadata === 'string' ? JSON.parse(msg.metadata) : msg.metadata) : {};
+          return {
           id: msg.id,
           content: {
             from: msg.from_agent,
@@ -537,11 +539,12 @@ export class NeuralMCPServer {
             messageType: msg.message_type,
             priority: msg.priority,
             timestamp: msg.created_at,
-            deliveryStatus: 'delivered',
+            deliveryStatus: meta.deliveryStatus || 'delivered',
           },
           timestamp: msg.created_at,
           from: msg.from_agent,
-        }));
+        };
+        });
 
         res.json({ agentId, messages });
       } catch (error) {
@@ -1945,6 +1948,7 @@ export class NeuralMCPServer {
 
           // Transform to response format — compact mode omits full content
           const formattedMessages = rawMessages.map((msg: any) => {
+            const msgMeta = msg.metadata ? (typeof msg.metadata === 'string' ? JSON.parse(msg.metadata) : msg.metadata) : {};
             const base: any = {
               id: msg.id,
               type: 'shared',
@@ -1954,7 +1958,7 @@ export class NeuralMCPServer {
                 messageType: msg.message_type,
                 priority: msg.priority,
                 timestamp: msg.created_at,
-                deliveryStatus: 'delivered',
+                deliveryStatus: msgMeta.deliveryStatus || 'delivered',
               },
               relevance: 0.6,
               source: msg.from_agent,
@@ -2265,29 +2269,39 @@ export class NeuralMCPServer {
           const { agentId: targetAgentId } = args;
           
           let statusData;
-          
+          const db = this.memoryManager.getDb();
+
           if (targetAgentId) {
-            // Get status for specific agent
-            const agentRecords = await this.memoryManager.search(`"agentId":"${targetAgentId}"`, { shared: true });
-            const latestRecord = agentRecords[0];
-            
+            // Get status for specific agent — query shared_memory directly
+            const row = db.prepare(
+              `SELECT content, updated_at FROM shared_memory WHERE memory_type = 'agent_registration' AND json_extract(content, '$.agentId') = ? ORDER BY updated_at DESC LIMIT 1`
+            ).get(targetAgentId) as { content: string; updated_at: string } | undefined;
+            const record = row ? JSON.parse(row.content) : null;
+
             statusData = {
               agentId: targetAgentId,
-              status: latestRecord ? 'active' : 'unknown',
-              lastSeen: latestRecord?.timestamp || 'never',
-              capabilities: latestRecord?.content?.capabilities || []
+              status: record ? 'active' : 'unknown',
+              lastSeen: row?.updated_at || 'never',
+              capabilities: record?.capabilities || []
             };
           } else {
-            // Get status for all agents
-            const allAgentRecords = await this.memoryManager.search('agent_registration', { shared: true });
-            
+            // Get status for all agents — query shared_memory directly
+            const rows = db.prepare(
+              `SELECT content, updated_at FROM shared_memory WHERE memory_type = 'agent_registration' ORDER BY updated_at DESC`
+            ).all() as Array<{ content: string; updated_at: string }>;
+
+            const agents = rows.map(row => {
+              const record = JSON.parse(row.content);
+              return {
+                agentId: record.agentId,
+                name: record.name,
+                lastSeen: row.updated_at
+              };
+            });
+
             statusData = {
-              totalAgents: allAgentRecords.length,
-              agents: allAgentRecords.map(record => ({
-                agentId: record.content?.agentId,
-                name: record.content?.name,
-                lastSeen: record.timestamp
-              }))
+              totalAgents: agents.length,
+              agents
             };
           }
 
