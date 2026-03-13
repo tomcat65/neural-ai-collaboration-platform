@@ -15,7 +15,7 @@ A **deterministic AI memory and messaging server** built on SQLite + sqlite-vec,
 
 The production server is `src/unified-neural-mcp-server.ts` (`NeuralMCPServer` class).
 
-- **Docker:** `docker/Dockerfile.neural-ai-server` → `npm run mcp:start`
+- **Docker:** `docker/Dockerfile.unified-neural-mcp` → `node dist/unified-neural-mcp-server.js`
 - **Dev:** `npm run dev` (tsx)
 - **Prod:** `npm start` or `npm run unified:prod`
 

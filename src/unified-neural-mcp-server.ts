@@ -2272,10 +2272,10 @@ export class NeuralMCPServer {
           const db = this.memoryManager.getDb();
 
           if (targetAgentId) {
-            // Get status for specific agent — query shared_memory directly
+            // Get status for specific agent — query shared_memory directly (tenant-scoped)
             const row = db.prepare(
-              `SELECT content, updated_at FROM shared_memory WHERE memory_type = 'agent_registration' AND json_extract(content, '$.agentId') = ? ORDER BY updated_at DESC LIMIT 1`
-            ).get(targetAgentId) as { content: string; updated_at: string } | undefined;
+              `SELECT content, updated_at FROM shared_memory WHERE memory_type = 'agent_registration' AND tenant_id = ? AND json_extract(content, '$.agentId') = ? ORDER BY updated_at DESC LIMIT 1`
+            ).get(tenantId, targetAgentId) as { content: string; updated_at: string } | undefined;
             const record = row ? JSON.parse(row.content) : null;
 
             statusData = {
@@ -2285,10 +2285,10 @@ export class NeuralMCPServer {
               capabilities: record?.capabilities || []
             };
           } else {
-            // Get status for all agents — query shared_memory directly
+            // Get status for all agents — query shared_memory directly (tenant-scoped)
             const rows = db.prepare(
-              `SELECT content, updated_at FROM shared_memory WHERE memory_type = 'agent_registration' ORDER BY updated_at DESC`
-            ).all() as Array<{ content: string; updated_at: string }>;
+              `SELECT content, updated_at FROM shared_memory WHERE memory_type = 'agent_registration' AND tenant_id = ? ORDER BY updated_at DESC`
+            ).all(tenantId) as Array<{ content: string; updated_at: string }>;
 
             const agents = rows.map(row => {
               const record = JSON.parse(row.content);
