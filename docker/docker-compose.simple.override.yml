@@ -1,6 +1,0 @@
-services:
-  neural-ai-platform:
-    ports:
-      - '5300:3000'
-      - '5301:3001'
-      - '5175:5174'
