@@ -1801,10 +1801,11 @@ export class NeuralMCPServer {
         case 'send_ai_message': {
           // Avoid conflating sender and target: support `to`/`from` and aliases
           const explicitTarget = args.to || args.agentId; // agentId kept for backward compatibility
+          const requestedSenderAgentId = args.from || this.agentId;
           if (!args.from) {
             console.warn(`⚠️ send_ai_message called without 'from' — attributing to server. Callers should always pass 'from'.`);
           }
-          const senderAgentId = args.from || this.agentId;
+          const senderAgentId = this.memoryManager.resolvePreferredAgentId(requestedSenderAgentId);
           const content = args.content ?? args.message;
           const messageType = args.messageType ?? 'info';
           const priority = args.priority ?? 'normal';
@@ -1827,12 +1828,13 @@ export class NeuralMCPServer {
           // Resolve recipients
           let recipients: string[] = [];
           if (!broadcast && explicitTarget) {
-            recipients = [explicitTarget];
+            recipients = [this.memoryManager.resolvePreferredAgentId(explicitTarget)];
           } else if (broadcast) {
             const regs = await this.memoryManager.search('agent_registration', { shared: true });
             recipients = regs
               .map((r: any) => r?.content?.agentId)
-              .filter((id: any) => typeof id === 'string' && id.length > 0);
+              .filter((id: any) => typeof id === 'string' && id.length > 0)
+              .map((id: string) => this.memoryManager.resolvePreferredAgentId(id));
             if (excludeSelf) recipients = recipients.filter(id => id !== senderAgentId);
           } else if (capSelector && capSelector.length > 0) {
             const want = capSelector.map((c: string) => String(c).toLowerCase());
@@ -1844,7 +1846,8 @@ export class NeuralMCPServer {
                 return want.every(w => caps.includes(w));
               })
               .map((r: any) => r.content.agentId)
-              .filter((id: any) => typeof id === 'string' && id.length > 0);
+              .filter((id: any) => typeof id === 'string' && id.length > 0)
+              .map((id: string) => this.memoryManager.resolvePreferredAgentId(id));
             if (excludeSelf) recipients = recipients.filter(id => id !== senderAgentId);
           } else {
             throw new Error('Missing recipient: provide `to`, `broadcast: true`, or `toCapabilities`.');
@@ -1867,7 +1870,11 @@ export class NeuralMCPServer {
               metadata: {
                 realTimeDelivery: "true",
                 persistentStorage: "true", 
-                crossPlatform: "true"
+                crossPlatform: "true",
+                original: {
+                  requestedFrom: requestedSenderAgentId,
+                  requestedTo: explicitTarget || null,
+                }
               }
             };
 

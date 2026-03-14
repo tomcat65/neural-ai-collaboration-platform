@@ -1371,6 +1371,149 @@ export class MemoryManager {
     return this.memorySystem.individual.get(cacheKey);
   }
 
+  private comparableAgentId(agentId: string): string {
+    return String(agentId || '').trim().toLowerCase();
+  }
+
+  private normalizeAgentId(agentId: string): string {
+    let normalized = this.comparableAgentId(agentId);
+    for (const suffix of ['-ide-agent', '-cli']) {
+      if (normalized.endsWith(suffix) && normalized.length > suffix.length) {
+        normalized = normalized.slice(0, -suffix.length);
+        break;
+      }
+    }
+    return normalized;
+  }
+
+  private getHeuristicAgentAliases(agentId: string): string[] {
+    const comparable = this.comparableAgentId(agentId);
+    if (!comparable) return [];
+
+    const normalized = this.normalizeAgentId(comparable);
+    return Array.from(new Set([
+      comparable,
+      normalized,
+      `${normalized}-cli`,
+      `${normalized}-ide-agent`,
+    ].filter(Boolean)));
+  }
+
+  private getRegisteredAgentRows(): Array<{ agentId: string; updatedAt: string }> {
+    try {
+      return this.db.prepare(
+        `SELECT json_extract(content, '$.agentId') as agentId, updated_at as updatedAt
+         FROM shared_memory
+         WHERE memory_type = 'agent_registration'
+           AND json_extract(content, '$.agentId') IS NOT NULL
+         ORDER BY updated_at DESC`
+      ).all() as Array<{ agentId: string; updatedAt: string }>;
+    } catch {
+      return [];
+    }
+  }
+
+  private getAgentIdentityRows(): Array<{ previousAgentId: string; updatedAgentId: string; updatedAt: string }> {
+    try {
+      return this.db.prepare(
+        `SELECT
+           json_extract(content, '$.previousAgentId') as previousAgentId,
+           json_extract(content, '$.updatedAgentId') as updatedAgentId,
+           updated_at as updatedAt
+         FROM shared_memory
+         WHERE memory_type = 'agent_identity'
+           AND json_extract(content, '$.previousAgentId') IS NOT NULL
+           AND json_extract(content, '$.updatedAgentId') IS NOT NULL
+         ORDER BY updated_at DESC`
+      ).all() as Array<{ previousAgentId: string; updatedAgentId: string; updatedAt: string }>;
+    } catch {
+      return [];
+    }
+  }
+
+  private resolveAgentFamily(agentId: string): { aliases: string[]; canonical: string } {
+    const requested = this.comparableAgentId(agentId);
+    if (!requested) {
+      return { aliases: [], canonical: '' };
+    }
+
+    const registrations = this.getRegisteredAgentRows();
+    const identities = this.getAgentIdentityRows();
+    const normalized = this.normalizeAgentId(requested);
+    const aliases = new Set<string>(this.getHeuristicAgentAliases(requested));
+    const queue = Array.from(aliases);
+
+    const addAlias = (candidate?: string | null) => {
+      const comparable = this.comparableAgentId(candidate || '');
+      if (!comparable || aliases.has(comparable)) return;
+      aliases.add(comparable);
+      queue.push(comparable);
+    };
+
+    for (const row of registrations) {
+      if (this.normalizeAgentId(row.agentId) === normalized) {
+        addAlias(row.agentId);
+      }
+    }
+
+    for (const row of identities) {
+      if (
+        this.normalizeAgentId(row.previousAgentId) === normalized ||
+        this.normalizeAgentId(row.updatedAgentId) === normalized
+      ) {
+        addAlias(row.previousAgentId);
+        addAlias(row.updatedAgentId);
+      }
+    }
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const row of identities) {
+        if (this.comparableAgentId(row.previousAgentId) === current) {
+          addAlias(row.updatedAgentId);
+        }
+        if (this.comparableAgentId(row.updatedAgentId) === current) {
+          addAlias(row.previousAgentId);
+        }
+      }
+    }
+
+    let canonical = requested;
+    const aliasList = Array.from(aliases);
+    const registeredMatches = registrations
+      .filter((row) => aliasList.includes(this.comparableAgentId(row.agentId)))
+      .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+
+    if (registeredMatches.length > 0) {
+      canonical = this.comparableAgentId(registeredMatches[0].agentId);
+    } else {
+      const identityMatches = identities
+        .filter((row) =>
+          aliasList.includes(this.comparableAgentId(row.previousAgentId)) ||
+          aliasList.includes(this.comparableAgentId(row.updatedAgentId))
+        )
+        .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
+
+      if (identityMatches.length > 0) {
+        canonical = this.comparableAgentId(identityMatches[0].updatedAgentId) || requested;
+      }
+    }
+
+    if (!aliases.has(canonical)) {
+      aliases.add(canonical);
+    }
+
+    return { aliases: Array.from(aliases), canonical };
+  }
+
+  public getAgentAliases(agentId: string): string[] {
+    return this.resolveAgentFamily(agentId).aliases;
+  }
+
+  public resolvePreferredAgentId(agentId: string): string {
+    return this.resolveAgentFamily(agentId).canonical || this.comparableAgentId(agentId);
+  }
+
   getSharedMemory(): SharedMemory {
     return this.memorySystem.shared;
   }
@@ -1998,6 +2141,8 @@ export class MemoryManager {
     const limit = options.limit || 5;
     const tenantId = options.tenantId || 'default';
     const compact = options.compact !== false; // default true
+    const recipientAliases = this.getAgentAliases(agentId);
+    const senderAliases = options.from ? this.getAgentAliases(options.from) : [];
 
     try {
       // Ensure read_at + archived_at + summary columns exist (idempotent migration)
@@ -2009,8 +2154,9 @@ export class MemoryManager {
       const columns = compact
         ? 'id, from_agent, to_agent, message_type, priority, created_at, read_at, archived_at, summary, metadata'
         : '*';
-      let query = `SELECT ${columns} FROM ai_messages WHERE to_agent = ? AND tenant_id = ?`;
-      const params: any[] = [agentId, tenantId];
+      const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
+      let query = `SELECT ${columns} FROM ai_messages WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ?`;
+      const params: any[] = [...recipientAliases, tenantId];
 
       // Task 1200: Exclude archived by default
       if (!options.includeArchived) {
@@ -2029,8 +2175,9 @@ export class MemoryManager {
         query += ' AND read_at IS NULL';
       }
       if (options.from) {
-        query += ' AND from_agent = ?';
-        params.push(options.from);
+        const senderPlaceholders = senderAliases.map(() => '?').join(',');
+        query += ` AND from_agent IN (${senderPlaceholders})`;
+        params.push(...senderAliases);
       }
 
       query += ' ORDER BY created_at DESC LIMIT ?';
@@ -2072,10 +2219,13 @@ export class MemoryManager {
       tenantId?: string;
       includeArchived?: boolean;
       compact?: boolean;
+      from?: string;
     } = {}
   ): any[] {
     const limit = options.limit || 5;
     const tenantId = options.tenantId || 'default';
+    const recipientAliases = this.getAgentAliases(agentId);
+    const senderAliases = options.from ? this.getAgentAliases(options.from) : [];
 
     let rows: any[] = [];
     try {
@@ -2120,9 +2270,10 @@ export class MemoryManager {
           metadata: JSON.stringify(payload.metadata || {}),
         };
       })
-      .filter((msg: any) => msg.to_agent === agentId)
+      .filter((msg: any) => recipientAliases.includes(this.comparableAgentId(msg.to_agent)))
       .filter((msg: any) => !options.messageType || msg.message_type === options.messageType)
       .filter((msg: any) => !options.since || String(msg.created_at) >= String(options.since))
+      .filter((msg: any) => !options.from || senderAliases.includes(this.comparableAgentId(msg.from_agent)))
       .slice(0, limit);
 
     // markAsRead is ignored in legacy mode (no read_at column).
@@ -2139,15 +2290,17 @@ export class MemoryManager {
     tenantId: string = 'default',
     agentId?: string
   ): Promise<any | null> {
+    const recipientAliases = agentId ? this.getAgentAliases(agentId) : [];
     try {
       this.ensureReadAtColumn();
       this.ensureSummaryColumn();
       // Scope by tenant + recipient to prevent cross-tenant/cross-agent reads
       let query = 'SELECT * FROM ai_messages WHERE id = ? AND tenant_id = ?';
       const params: any[] = [messageId, tenantId];
-      if (agentId) {
-        query += ' AND to_agent = ?';
-        params.push(agentId);
+      if (recipientAliases.length > 0) {
+        const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
+        query += ` AND to_agent IN (${recipientPlaceholders})`;
+        params.push(...recipientAliases);
       }
       const msg = this.db.prepare(query).get(...params) as any;
       if (!msg) return null;
@@ -2189,7 +2342,7 @@ export class MemoryManager {
         }
 
         const toAgent = payload.to || payload.target || payload.to_agent;
-        if (agentId && toAgent !== agentId) return null;
+        if (recipientAliases.length > 0 && !recipientAliases.includes(this.comparableAgentId(toAgent))) return null;
 
         const fromAgent = payload.from || payload.from_agent || row.created_by;
         const content = String(payload.content ?? payload.message ?? '');
@@ -2217,12 +2370,16 @@ export class MemoryManager {
    * Count unread, non-archived messages for an agent within a tenant.
    */
   countUnreadMessages(agentId: string, tenantId: string = 'default'): number {
+    const recipientAliases = this.getAgentAliases(agentId);
     try {
       this.ensureReadAtColumn();
       this.ensureArchivedAtColumn();
+      const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
       const row = this.db.prepare(
-        'SELECT COUNT(*) as cnt FROM ai_messages WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL'
-      ).get(agentId, tenantId) as any;
+        `SELECT COUNT(*) as cnt
+         FROM ai_messages
+         WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL`
+      ).get(...recipientAliases, tenantId) as any;
       return row?.cnt ?? 0;
     } catch {
       // Legacy fallback: pre-migration rows have no read/archive tracking, treat all as unread.
@@ -2237,7 +2394,7 @@ export class MemoryManager {
           try {
             const payload = JSON.parse(row.content || '{}');
             const toAgent = payload.to || payload.target || payload.to_agent;
-            if (toAgent === agentId) count += 1;
+            if (recipientAliases.includes(this.comparableAgentId(toAgent))) count += 1;
           } catch {
             // ignore malformed row
           }
@@ -2326,19 +2483,25 @@ export class MemoryManager {
   ): number {
     this.ensureReadAtColumn();
     const now = new Date().toISOString();
+    const recipientAliases = this.getAgentAliases(agentId);
+    const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
 
     if (messageIds && messageIds.length > 0) {
       // Mark specific messages
       const placeholders = messageIds.map(() => '?').join(',');
       const result = this.db.prepare(
-        `UPDATE ai_messages SET read_at = ? WHERE id IN (${placeholders}) AND to_agent = ? AND tenant_id = ? AND read_at IS NULL`
-      ).run(now, ...messageIds, agentId, tenantId);
+        `UPDATE ai_messages
+         SET read_at = ?
+         WHERE id IN (${placeholders}) AND to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND read_at IS NULL`
+      ).run(now, ...messageIds, ...recipientAliases, tenantId);
       return result.changes;
     } else {
       // Mark all unread for this agent
       const result = this.db.prepare(
-        `UPDATE ai_messages SET read_at = ? WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL`
-      ).run(now, agentId, tenantId);
+        `UPDATE ai_messages
+         SET read_at = ?
+         WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND read_at IS NULL`
+      ).run(now, ...recipientAliases, tenantId);
       return result.changes;
     }
   }
@@ -2355,10 +2518,14 @@ export class MemoryManager {
     this.ensureArchivedAtColumn();
     const now = new Date().toISOString();
     const cutoff = new Date(Date.now() - olderThanDays * 86400000).toISOString();
+    const recipientAliases = this.getAgentAliases(agentId);
+    const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
 
     const result = this.db.prepare(
-      `UPDATE ai_messages SET archived_at = ? WHERE to_agent = ? AND tenant_id = ? AND created_at < ? AND archived_at IS NULL`
-    ).run(now, agentId, tenantId, cutoff);
+      `UPDATE ai_messages
+       SET archived_at = ?
+       WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND created_at < ? AND archived_at IS NULL`
+    ).run(now, ...recipientAliases, tenantId, cutoff);
     return result.changes;
   }
 
