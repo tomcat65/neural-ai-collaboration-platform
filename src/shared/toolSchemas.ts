@@ -21,6 +21,17 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
             properties: {
               name: { type: 'string', description: 'The name of the entity' },
               entityType: { type: 'string', description: 'The type of the entity' },
+              aliases: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Optional natural-language aliases that should resolve to this canonical entity',
+              },
+              agentBootstrap: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Optional agent-facing bootstrap instructions for future sessions',
+              },
+              metadata: { type: 'object', description: 'Optional structured metadata for agent consumers' },
               observations: {
                 type: 'array',
                 items: { type: 'string' },
@@ -40,6 +51,10 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
     inputSchema: {
       type: 'object',
       properties: {
+        agentId: {
+          type: 'string',
+          description: 'Optional source agent ID for observation attribution. When supplied by a trusted agent bridge, this becomes shared_memory.created_by and is required for Phase C gate evidence rows.',
+        },
         observations: {
           type: 'array',
           items: {
@@ -50,7 +65,24 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
                 type: 'array', 
                 items: { type: 'string' },
                 description: 'An array of observation contents to add' 
-              }
+              },
+              metadata: {
+                type: 'object',
+                description: 'Optional structured metadata for agents, e.g. {kind, canonicalFact, supersedes, appliesTo, severity, status}',
+              },
+              kind: { type: 'string', description: 'Optional shorthand for metadata.kind, e.g. correction, handoff, decision' },
+              canonicalFact: { type: 'string', description: 'Optional shorthand for metadata.canonicalFact when kind=correction' },
+              supersedes: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Optional observation IDs or handles superseded by this observation',
+              },
+              appliesTo: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Optional entity names this observation/correction applies to',
+              },
+              severity: { type: 'string', description: 'Optional agent-facing importance, e.g. low, normal, high, critical' },
             },
             required: ['entityName', 'contents']
           }
@@ -201,22 +233,198 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
     inputSchema: {
       type: 'object',
       properties: {
-        agentId: { type: 'string', description: 'Specific agent ID, or omit for all agents' }
+        agentId: { type: 'string', description: 'Specific agent ID, or omit for all agents' },
+        groupByCanonical: {
+          type: 'boolean',
+          description: 'Include canonical-agent rollups and aliases in addition to raw registrations',
+          default: true,
+        }
       }
     }
   },
   search_entities: {
     name: 'search_entities',
-    description: 'Advanced federated search across graph, vectors, and cache',
+    description: 'Advanced federated search across graph, vectors, and cache. Returns compact summaries by default (use get_entity_detail for full content). Supports pagination via offset/nextOffset and filtering by memoryType/agentFilter.',
     inputSchema: {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Query against names, types, observations' },
         searchType: { type: 'string', enum: ['semantic', 'exact', 'graph', 'hybrid'], default: 'hybrid' },
-        limit: { type: 'number', description: 'Maximum number of results', default: 50 }
+        limit: { type: 'number', description: 'Maximum number of results per page', default: 50 },
+        compact: { type: 'boolean', description: 'Return compact summaries for large entities (use get_entity_detail for full content)', default: true },
+        offset: { type: 'number', description: 'Skip this many results for pagination (use nextOffset from previous response)', default: 0 },
+        maxResponseSize: { type: 'number', description: 'Maximum response size in characters (budget enforcement)', default: 40000 },
+        memoryType: { type: 'string', description: 'Filter results by memory type (e.g. "individual", "shared")' },
+        agentFilter: { type: 'string', description: 'Filter results by agent/source ID' },
+        includeRedundantRepresentations: {
+          type: 'boolean',
+          description: 'Include dual-storage representations that are hidden by default, such as an entity row matched only through embedded inline observation text when the materialized observation row is also returned',
+          default: false
+        }
       },
       required: ['query']
     }
+  },
+  inspect_identity_candidates: {
+    name: 'inspect_identity_candidates',
+    description: 'Pass 2.0 Phase A read-only inventory/dry-run producer for duplicate canonical entity keys. Produces a reviewable report and may record exactly one pass2_dry_run audit row for the canonical-form report hash.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        canonicalKey: {
+          type: 'string',
+          description: 'Optional canonical entity key or entity name to inspect. When omitted, scans duplicate canonical-key groups.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of candidate groups to return',
+          default: 50,
+        },
+        minGroupSize: {
+          type: 'number',
+          description: 'Minimum entity rows per canonical-key group',
+          default: 2,
+        },
+        includeSingletons: {
+          type: 'boolean',
+          description: 'Include single-row canonical-key groups. Useful only for diagnostics.',
+          default: false,
+        },
+        recordAudit: {
+          type: 'boolean',
+          description: 'If true, write exactly one neural_audit_log row with operation pass2_dry_run and the canonical-form report hash. No domain tables are mutated.',
+          default: false,
+        },
+        saveArtifact: {
+          type: 'boolean',
+          description: 'If true, save the dry-run report JSON to artifactDir. Filesystem artifact writes do not mutate Neural domain tables.',
+          default: false,
+        },
+        artifactDir: {
+          type: 'string',
+          description: 'Directory for saved dry-run JSON artifacts when saveArtifact is true. Defaults to data/pass2-dry-runs.',
+        },
+      },
+    }
+  },
+  get_entity_context: {
+    name: 'get_entity_context',
+    description: 'Pass 2.0 Phase B read-only identity-oriented context over legacy shared_memory plus a signed Phase A dry-run projection.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Human entity name, alias, canonical key, or lookup term. Required unless identityId is provided.',
+        },
+        identityId: {
+          type: 'string',
+          description: 'Optional persisted Phase C identity id. If both identityId and query are present, identityId wins.',
+        },
+        tenantId: { type: 'string', description: 'Tenant id. Defaults to request context tenant/default.' },
+        sections: {
+          type: 'array',
+          items: { type: 'string', enum: ['identity', 'observations', 'relations', 'facets', 'legacyBootstrap'] },
+          description: 'Sections to assemble. Defaults to identity, observations, relations, facets, and legacyBootstrap.',
+        },
+        observationLimit: { type: 'number', default: 25, description: 'Maximum observations to return, capped at 100.' },
+        observationOffset: { type: 'number', default: 0, description: 'Observation pagination offset.' },
+        observationKindFilter: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional metadata.kind values to include.',
+        },
+        relationLimit: { type: 'number', default: 25, description: 'Maximum relations to return, capped at 100.' },
+        relationOffset: { type: 'number', default: 0, description: 'Relation pagination offset.' },
+        relationTypeFilter: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional sourceRelationType or semanticRelationType values to include.',
+        },
+        facetLimit: { type: 'number', default: 25, description: 'Accepted for Phase C compatibility; Phase B returns no facet items.' },
+        facetOffset: { type: 'number', default: 0, description: 'Accepted for Phase C compatibility; Phase B returns no facet items.' },
+        facetTypeFilter: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Accepted for Phase C compatibility; Phase B projected facets remain in provenance only.',
+        },
+        maxTokens: { type: 'number', default: 8000, description: 'Hard token budget for assembled context, bounded between 500 and 50000.' },
+        since: {
+          type: 'string',
+          description: 'ISO timestamp. Includes observations and relation rows whose recorded/created timestamp is at or after this value.',
+        },
+        includeLegacyEmbedded: { type: 'boolean', default: false, description: 'Include legacy inline entity observations as observation items.' },
+        includeFacets: { type: 'boolean', default: true, description: 'Include projected facet metadata in provenance. Phase B facets.items remains empty.' },
+        includeCandidates: { type: 'boolean', default: true, description: 'Include unresolved resolution candidates.' },
+        includeLegacyRowCounts: { type: 'boolean', default: true, description: 'Include diagnostic legacy row counts.' },
+        excludeLifecycleStatus: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional lifecycle statuses to exclude from candidates. Closed projects are not excluded by default.',
+        },
+        dryRunArtifactPath: {
+          type: 'string',
+          description: 'Optional dev/test artifact path. The artifact must still match a signed pass2_dry_run audit row.',
+        },
+        dryRunHash: {
+          type: 'string',
+          description: 'Optional dev/test expected canonical hash. It must match a signed pass2_dry_run audit row.',
+        },
+      },
+      additionalProperties: true,
+    }
+  },
+  execute_pass2_phase_c: {
+    name: 'execute_pass2_phase_c',
+    description: 'Pass 2.0 Phase C guarded identity/facet/link migration tool. Supports plan, non-production rehearsal, and production execute only when operator-pinned evidence IDs, exact approval, reviewer PASS, and rollback rehearsal evidence are validated.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['plan', 'execute', 'rollback', 'verify'],
+          default: 'plan',
+          description: 'Phase C action. Production execute is enabled only when the operator switch, exact dry-run hash, operator-pinned approval/rehearsal/reviewer evidence IDs, live plan output, rollback rehearsal evidence, reviewer PASS, and fresh exact-scope execute approval gates are complete.',
+        },
+        tenantId: { type: 'string', description: 'Tenant id. Defaults to request context tenant/default.' },
+        dryRunHash: {
+          type: 'string',
+          description: 'Canonical-form sha256 of the signed Phase A dry-run artifact. Required for production plan/execute.',
+        },
+        dryRunArtifactPath: {
+          type: 'string',
+          description: 'Optional artifact path. If dryRunHash is supplied, the artifact must match that exact signed hash.',
+        },
+        canonicalKeys: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Optional allowlist of canonical keys for diagnostics/canary planning.',
+        },
+        approvalObservationId: {
+          type: 'string',
+          description: 'Required for production execute. Must identify a fresh Phase C production_execute_approval observation from a trusted creator/approver, bound to the exact dryRunHash and scope.',
+        },
+        requireRollbackRehearsal: {
+          type: 'boolean',
+          default: true,
+          description: 'Production execute gate. Production execute requires rollback rehearsal evidence.',
+        },
+        executionMode: {
+          type: 'string',
+          enum: ['test', 'rehearsal', 'production'],
+          description: 'Optional context marker. Production writes require executionMode=production plus validated approval and rollback rehearsal evidence.',
+        },
+        rollbackOwnerAuditId: {
+          type: 'string',
+          description: 'Future rollback handle. Must be a unique Phase C owner audit row id, not a dry-run content hash.',
+        },
+        deactivatedBy: {
+          type: 'string',
+          default: 'codex-desktop',
+          description: 'Future rollback actor id.',
+        },
+      },
+    },
   },
   get_agent_context: {
     name: 'get_agent_context',
@@ -349,6 +557,24 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
         markAsRead: { type: 'boolean', description: 'Mark this message as read after retrieval', default: true }
       },
       required: ['messageId', 'agentId']
+    }
+  },
+  // Entity detail retrieval (companion to search_entities compact mode)
+  get_entity_detail: {
+    name: 'get_entity_detail',
+    description: 'Retrieve full content for specific entities by ID. Use after scanning compact results from search_entities.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Entity IDs to retrieve (max 5)',
+          maxItems: 5
+        },
+        maxTotalSize: { type: 'number', description: 'Maximum total response size in characters', default: 80000 }
+      },
+      required: ['ids']
     }
   },
   // Task 1200: Message lifecycle tools
