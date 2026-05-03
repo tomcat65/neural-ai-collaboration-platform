@@ -242,6 +242,7 @@ export interface SearchResult {
   relevance: number;
   source: string;
   timestamp: Date;
+  memoryType?: string;
   chunked?: boolean;
   contentSize?: number;
   totalChunks?: number;

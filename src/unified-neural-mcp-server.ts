@@ -6,6 +6,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
 import { createHash } from 'crypto';
+import { v4 as uuidv4 } from 'uuid';
 import cors from 'cors';
 import helmet from 'helmet';
 import { MemoryManager } from './unified-server/memory/index.js';
@@ -38,6 +39,7 @@ export class NeuralMCPServer {
   private port: number;
   private messageHub?: MessageHubIntegration;
   private notificationPort: NotificationPort;
+  private restoring = false;
 
   constructor(port: number = 6174, dbPath?: string) {
     this.port = port;
@@ -106,6 +108,10 @@ export class NeuralMCPServer {
       if (req.path === '/ai-message') {
         return next();
       }
+      if (req.path === '/api/data/import') {
+        express.json({ limit: '50mb' })(req, res, next);
+        return;
+      }
       express.json({ limit: '10mb' })(req, res, next);
     });
 
@@ -118,6 +124,15 @@ export class NeuralMCPServer {
 
     // Apply general rate limiting
     this.app.use(rateLimitMiddleware);
+
+    // Restore locking: reject requests during DB restore
+    this.app.use((req, res, next) => {
+      if (this.restoring && !req.path.startsWith('/health')) {
+        res.status(503).json({ error: 'Service temporarily unavailable during database restore' });
+        return;
+      }
+      next();
+    });
 
     // Apply stricter rate limiting and validation to message endpoints
     this.app.use('/ai-message', messageRateLimitMiddleware);
@@ -689,6 +704,283 @@ export class NeuralMCPServer {
       }
     });
 
+    // ─── Data Management API ─────────────────────────────────────
+
+    this.app.get('/api/data/entity-prefixes', async (req, res) => {
+      try {
+        const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+        const authResult = this.memoryManager.authorizeGraphRead(context);
+        if (!authResult.authorized) {
+          res.status(403).json({ error: 'Forbidden', message: authResult.reason });
+          return;
+        }
+        const prefixes = this.memoryManager.listEntityPrefixes(context.tenantId);
+        res.json({ prefixes });
+      } catch (error: any) {
+        console.error('❌ Entity prefixes error:', error);
+        res.status(500).json({ error: error.message || 'Failed to list entity prefixes' });
+      }
+    });
+
+    this.app.get('/api/data/export', async (req, res) => {
+      try {
+        const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+        const authResult = this.memoryManager.authorizeGraphRead(context);
+        if (!authResult.authorized) {
+          res.status(403).json({ error: 'Forbidden', message: authResult.reason });
+          return;
+        }
+
+        const namePrefix = req.query.namePrefix as string | undefined;
+        const entityNamesRaw = req.query.entityNames as string | undefined;
+        const entityNames = entityNamesRaw ? entityNamesRaw.split(',').map(n => n.trim()) : undefined;
+        const preview = req.query.preview === 'true';
+
+        this.memoryManager.auditLog(
+          'data_export',
+          context.userId || context.apiKeyId || 'unknown',
+          JSON.stringify({ namePrefix, entityNames, preview })
+        );
+
+        const backup = this.memoryManager.exportEntities({
+          tenantId: context.tenantId,
+          namePrefix,
+          entityNames,
+        });
+
+        if (preview) {
+          // Return counts + entity names only
+          const entityNameList = (backup.entities || []).map((e: any) => {
+            try { return JSON.parse(e.content).name; } catch { return null; }
+          }).filter(Boolean);
+          res.json({
+            namePrefix,
+            entityNames: entityNameList,
+            counts: backup.counts,
+          });
+          return;
+        }
+
+        res.json(backup);
+      } catch (error: any) {
+        console.error('❌ Data export error:', error);
+        res.status(500).json({ error: error.message || 'Failed to export data' });
+      }
+    });
+
+    this.app.post('/api/data/import', async (req, res) => {
+      try {
+        const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+        const authResult = this.memoryManager.authorizeGraphRead(context);
+        if (!authResult.authorized) {
+          res.status(403).json({ error: 'Forbidden', message: authResult.reason });
+          return;
+        }
+
+        const backup = req.body;
+        if (!backup || !backup.schemaVersion) {
+          res.status(400).json({ error: 'Invalid backup payload: missing schemaVersion' });
+          return;
+        }
+
+        this.memoryManager.auditLog(
+          'data_import',
+          context.userId || context.apiKeyId || 'unknown',
+          JSON.stringify({ schemaVersion: backup.schemaVersion, counts: backup.counts })
+        );
+
+        const result = await this.memoryManager.importEntities(backup, context.tenantId);
+        res.json(result);
+      } catch (error: any) {
+        console.error('❌ Data import error:', error);
+        res.status(500).json({ error: error.message || 'Failed to import data' });
+      }
+    });
+
+    this.app.delete('/api/data/retire', async (req, res) => {
+      try {
+        const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+        const authResult = this.memoryManager.authorizeGraphRead(context);
+        if (!authResult.authorized) {
+          res.status(403).json({ error: 'Forbidden', message: authResult.reason });
+          return;
+        }
+
+        const { entityNames, backupFirst, reason } = req.body;
+        if (!entityNames || !Array.isArray(entityNames) || entityNames.length === 0) {
+          res.status(400).json({ error: 'entityNames array is required' });
+          return;
+        }
+
+        this.memoryManager.auditLog(
+          'data_retire',
+          context.userId || context.apiKeyId || 'unknown',
+          JSON.stringify({ entityNames, backupFirst, reason })
+        );
+
+        // Optionally backup before retirement
+        let backup: any = null;
+        if (backupFirst !== false) {
+          backup = this.memoryManager.exportEntities({
+            tenantId: context.tenantId,
+            entityNames,
+          });
+        }
+
+        const result = await this.memoryManager.retireEntities(entityNames, context.tenantId);
+        res.json({ ...result, backup });
+      } catch (error: any) {
+        console.error('❌ Data retire error:', error);
+        res.status(500).json({ error: error.message || 'Failed to retire entities' });
+      }
+    });
+
+    this.app.get('/api/data/backup-locations', async (_req, res) => {
+      try {
+        const locations = this.memoryManager.getBackupLocations();
+        res.json({ locations });
+      } catch (error: any) {
+        console.error('❌ Backup locations error:', error);
+        res.status(500).json({ error: error.message || 'Failed to list backup locations' });
+      }
+    });
+
+    this.app.get('/api/data/backup-folders', async (req, res) => {
+      try {
+        const locationId = req.query.locationId as string | undefined;
+        const folders = this.memoryManager.listBackupFolders(locationId);
+        res.json({ folders });
+      } catch (error: any) {
+        console.error('❌ Backup folders error:', error);
+        res.status(500).json({ error: error.message || 'Failed to list folders' });
+      }
+    });
+
+    this.app.post('/api/data/backup-folders', async (req, res) => {
+      try {
+        const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+        const { name, locationId } = req.body;
+        if (!name) {
+          res.status(400).json({ error: 'Folder name is required' });
+          return;
+        }
+
+        this.memoryManager.auditLog(
+          'backup_folder_create',
+          context.userId || context.apiKeyId || 'unknown',
+          JSON.stringify({ name, locationId })
+        );
+
+        const result = this.memoryManager.createBackupFolder(name, locationId);
+        res.json(result);
+      } catch (error: any) {
+        console.error('❌ Create folder error:', error);
+        res.status(500).json({ error: error.message || 'Failed to create folder' });
+      }
+    });
+
+    this.app.post('/api/data/snapshots', async (req, res) => {
+      try {
+        const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+        const label = req.body?.label as string | undefined;
+        const locationId = req.body?.locationId as string | undefined;
+        const folder = req.body?.folder as string | undefined;
+
+        this.memoryManager.auditLog(
+          'snapshot_create',
+          context.userId || context.apiKeyId || 'unknown',
+          JSON.stringify({ label, locationId, folder })
+        );
+
+        const snapshot = await this.memoryManager.createSnapshot(label, locationId, folder);
+        res.json(snapshot);
+      } catch (error: any) {
+        console.error('❌ Snapshot create error:', error);
+        res.status(500).json({ error: error.message || 'Failed to create snapshot' });
+      }
+    });
+
+    this.app.get('/api/data/snapshots', async (req, res) => {
+      try {
+        const locationId = req.query.locationId as string | undefined;
+        const snapshots = this.memoryManager.listSnapshots(locationId);
+        res.json({ snapshots });
+      } catch (error: any) {
+        console.error('❌ Snapshot list error:', error);
+        res.status(500).json({ error: error.message || 'Failed to list snapshots' });
+      }
+    });
+
+    this.app.post('/api/data/snapshots/:id/move', async (req, res) => {
+      try {
+        const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+        const { locationId, folder } = req.body;
+        if (!locationId) {
+          res.status(400).json({ error: 'Target locationId is required' });
+          return;
+        }
+
+        this.memoryManager.auditLog(
+          'snapshot_move',
+          context.userId || context.apiKeyId || 'unknown',
+          JSON.stringify({ snapshotId: req.params.id, locationId, folder })
+        );
+
+        const result = await this.memoryManager.moveSnapshot(req.params.id, locationId, folder);
+        res.json(result);
+      } catch (error: any) {
+        console.error('❌ Snapshot move error:', error);
+        res.status(500).json({ error: error.message || 'Failed to move snapshot' });
+      }
+    });
+
+    this.app.delete('/api/data/snapshots/:id', async (req, res) => {
+      try {
+        const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+
+        this.memoryManager.auditLog(
+          'snapshot_delete',
+          context.userId || context.apiKeyId || 'unknown',
+          JSON.stringify({ snapshotId: req.params.id })
+        );
+
+        const result = this.memoryManager.deleteSnapshot(req.params.id);
+        res.json(result);
+      } catch (error: any) {
+        console.error('❌ Snapshot delete error:', error);
+        res.status(500).json({ error: error.message || 'Failed to delete snapshot' });
+      }
+    });
+
+    this.app.post('/api/data/snapshots/:id/restore', async (req, res) => {
+      try {
+        const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+
+        if (req.body?.confirm !== true) {
+          res.status(400).json({ error: 'Must pass { confirm: true } to restore' });
+          return;
+        }
+
+        this.memoryManager.auditLog(
+          'snapshot_restore',
+          context.userId || context.apiKeyId || 'unknown',
+          JSON.stringify({ snapshotId: req.params.id })
+        );
+
+        this.restoring = true;
+        try {
+          const result = await this.memoryManager.restoreSnapshot(req.params.id);
+          res.json(result);
+        } finally {
+          this.restoring = false;
+        }
+      } catch (error: any) {
+        console.error('❌ Snapshot restore error:', error);
+        this.restoring = false;
+        res.status(500).json({ error: error.message || 'Failed to restore snapshot' });
+      }
+    });
+
     // ─── Dashboard API: Agent Status ───
     this.app.get('/api/agent-status', async (req, res) => {
       try {
@@ -1072,6 +1364,11 @@ export class NeuralMCPServer {
           inputSchema: UnifiedToolSchemas.search_entities.inputSchema
         },
         {
+          name: UnifiedToolSchemas.get_entity_detail.name,
+          description: UnifiedToolSchemas.get_entity_detail.description,
+          inputSchema: UnifiedToolSchemas.get_entity_detail.inputSchema
+        },
+        {
           name: UnifiedToolSchemas.add_observations.name,
           description: UnifiedToolSchemas.add_observations.description,
           inputSchema: UnifiedToolSchemas.add_observations.inputSchema,
@@ -1085,6 +1382,21 @@ export class NeuralMCPServer {
           name: UnifiedToolSchemas.read_graph.name,
           description: UnifiedToolSchemas.read_graph.description,
           inputSchema: UnifiedToolSchemas.read_graph.inputSchema,
+        },
+        {
+          name: UnifiedToolSchemas.inspect_identity_candidates.name,
+          description: UnifiedToolSchemas.inspect_identity_candidates.description,
+          inputSchema: UnifiedToolSchemas.inspect_identity_candidates.inputSchema,
+        },
+        {
+          name: UnifiedToolSchemas.get_entity_context.name,
+          description: UnifiedToolSchemas.get_entity_context.description,
+          inputSchema: UnifiedToolSchemas.get_entity_context.inputSchema,
+        },
+        {
+          name: UnifiedToolSchemas.execute_pass2_phase_c.name,
+          description: UnifiedToolSchemas.execute_pass2_phase_c.description,
+          inputSchema: UnifiedToolSchemas.execute_pass2_phase_c.inputSchema,
         },
 
         // === KNOWLEDGE GRAPH MUTATIONS (Phase A) ===
@@ -1256,28 +1568,53 @@ export class NeuralMCPServer {
                 }
               }
             }
+            const structuredFields = [
+              ...(Array.isArray(entity.aliases) ? entity.aliases : []),
+              ...(Array.isArray(entity.agentBootstrap) ? entity.agentBootstrap : []),
+              ...(entity.metadata ? [JSON.stringify(entity.metadata)] : []),
+            ].filter((value) => typeof value === 'string');
+            for (const field of structuredFields) {
+              const check = MemoryManager.sanitizeContent(field);
+              if (!check.safe) {
+                this.memoryManager.auditLog('create_entity', agent, field, entity.name, true, check.reason);
+                this.notificationPort.send(`⚠️ Neural write flagged — agent: ${agent}, operation: create_entity, reason: ${check.reason}`).catch(() => {});
+                throw new Error(`Content flagged by sanitizer: ${check.reason}`);
+              }
+            }
           }
 
           const createdEntities = await Promise.all(entities.map(async (entity: any) => {
+            const entityMetadata = {
+              ...(entity.metadata && typeof entity.metadata === 'object' ? entity.metadata : {}),
+              vectorEmbedded: true,
+              graphIndexed: true,
+              cacheEnabled: true
+            };
             const entityData = {
               name: entity.name,
               type: entity.entityType,
+              aliases: Array.isArray(entity.aliases) ? entity.aliases : [],
+              agentBootstrap: Array.isArray(entity.agentBootstrap) ? entity.agentBootstrap : [],
               observations: entity.observations,
               createdBy: agent,
               timestamp: new Date().toISOString(),
-              metadata: {
-                vectorEmbedded: true,
-                graphIndexed: true,
-                cacheEnabled: true
-              }
+              metadata: entityMetadata
             };
 
             const entityId = await this.memoryManager.store(agent, entityData, 'shared', 'entity', tenantId, context);
+            const materializedInlineObservations = await this.memoryManager.materializeInlineObservations(
+              agent,
+              entityId,
+              entity.name,
+              entityData.observations,
+              tenantId,
+              context
+            );
 
             // NE-S6b: Audit log
             this.memoryManager.auditLog('create_entity', agent, JSON.stringify(entityData), entity.name);
 
-            return { id: entityId, ...entityData };
+            return { id: entityId, ...entityData, materializedInlineObservations };
           }));
 
           await this.publishEventToUnified('knowledge.entities.created', {
@@ -1303,25 +1640,135 @@ export class NeuralMCPServer {
         }
 
         case 'search_entities': {
-          const { query, searchType = 'hybrid', limit = 50 } = args;
+          const {
+            query,
+            searchType = 'hybrid',
+            limit = 50,
+            compact = true,
+            offset = 0,
+            maxResponseSize = 40000,
+            memoryType,
+            agentFilter,
+            includeRedundantRepresentations = false,
+          } = args;
+          const normalizedSearchType = String(searchType).toLowerCase();
+          const exactSearch = normalizedSearchType === 'exact';
+          const semanticSearch = normalizedSearchType === 'semantic';
 
-          // Basic search for now, but structured for advanced features (tenant-scoped)
-          const searchResults = await this.memoryManager.search(query, { shared: true }, tenantId);
-          
-          // Score ALL results first, then dedup, then slice to limit
-          // (dedup before slice so highest-scoring duplicate is never lost)
-          const scoredResults = searchResults.map((result: any) => {
-            const nameMatch = result.content?.name?.toLowerCase().includes(query.toLowerCase());
-            const typeMatch = result.content?.type?.toLowerCase().includes(query.toLowerCase());
-            const score = nameMatch ? 1.0 : typeMatch ? 0.8 : 0.6;
+          const parseOriginalContent = (content: any): any | null => {
+            if (!content?.original || typeof content.original !== 'string') return null;
+            try {
+              return JSON.parse(content.original);
+            } catch {
+              return null;
+            }
+          };
+
+          const getContentPayload = (result: any): any => {
+            return parseOriginalContent(result.content) || result.content || {};
+          };
+
+          const getStorageMemoryType = (result: any): string | undefined => {
+            const payload = getContentPayload(result);
+            if (result.memoryType) return result.memoryType;
+            if (result.storageMemoryType) return result.storageMemoryType;
+            if (payload?.memoryType) return payload.memoryType;
+            if (payload?.memory_type) return payload.memory_type;
+            if (payload?.entityName && Array.isArray(payload?.contents)) return 'observation';
+            if (payload?.from && payload?.to && payload?.relationType) return 'relation';
+            if (payload?.name && Array.isArray(payload?.observations)) return 'entity';
+            return undefined;
+          };
+
+          const getDomainType = (result: any): string | undefined => {
+            const payload = getContentPayload(result);
+            return payload?.entityType || payload?.type;
+          };
+
+          const getEntityName = (result: any): string | undefined => {
+            const payload = getContentPayload(result);
+            return payload?.name || payload?.entityName;
+          };
+
+          const parseMatchedLookupKinds = (value: any): string[] => {
+            if (Array.isArray(value)) {
+              return Array.from(new Set(value.map((kind) => String(kind).trim()).filter(Boolean)));
+            }
+            return Array.from(new Set(String(value || '')
+              .split(',')
+              .map((kind) => kind.trim())
+              .filter(Boolean)));
+          };
+
+          const lookupKindsToOrigins = (kinds: string[]): string[] => {
+            const origins = new Set<string>();
+            for (const kind of kinds) {
+              if (kind === 'canonical_name') origins.add('name');
+              else if (kind === 'alias') origins.add('alias');
+              else if (kind === 'embedded_observation_handle') origins.add('observation_prose');
+              else if (kind === 'agent_bootstrap_handle') origins.add('agent_bootstrap');
+              else if (kind === 'entity_name') origins.add('entity_name');
+              else if (kind === 'applies_to' || kind === 'metadata_applies_to') origins.add('applies_to');
+              else if (kind === 'observation_handle') origins.add('observation_prose');
+              else if (kind === 'canonical_fact_handle') origins.add('canonical_fact');
+              else if (kind === 'relation_from') origins.add('relation_from');
+              else if (kind === 'relation_to') origins.add('relation_to');
+              else origins.add(kind);
+            }
+            return Array.from(origins);
+          };
+
+          const rowToSearchResult = (row: any, storageMemoryType: 'entity' | 'observation' | 'relation', flags: Record<string, boolean>) => {
+            let content: any;
+            try {
+              content = JSON.parse(row.content || '{}');
+            } catch {
+              content = { raw: row.content, type: storageMemoryType };
+            }
+            const matchedLookupKinds = parseMatchedLookupKinds(row.lookup_key_kinds);
+            return {
+              id: row.id,
+              type: 'shared',
+              content,
+              relevance: 1,
+              source: row.created_by,
+              timestamp: new Date(row.created_at),
+              memoryType: storageMemoryType,
+              lookupWeight: row.lookup_weight,
+              matchedLookupKinds,
+              matchOrigins: lookupKindsToOrigins(matchedLookupKinds),
+              ...flags,
+            };
+          };
+
+          const scoreAndDecorate = (results: any[]) => results.map((result: any) => {
+            const payload = getContentPayload(result);
+            const lowerQuery = query.toLowerCase();
+            const nameMatch = getEntityName(result)?.toLowerCase().includes(lowerQuery);
+            const typeMatch = getDomainType(result)?.toLowerCase().includes(lowerQuery);
+            const score = result.exactEntityMatch ? 1.1 :
+                          result.exactObservationMatch ? 1.05 :
+                          result.exactRelationMatch ? 1.0 :
+                          nameMatch ? 1.0 :
+                          typeMatch ? 0.8 : 0.6;
             const entry: any = {
               ...result,
               searchScore: score,
               searchType: searchType,
+              storageMemoryType: getStorageMemoryType(result),
+              entityType: getDomainType(result),
+              canonicalEntityName: getEntityName(result),
               memorySource: result.source?.startsWith('sqlite-vec:') ? 'sqlite-vec' :
                             result.source?.startsWith('weaviate:') ? 'sqlite-vec' : 'sqlite',
-              semanticSimilarity: null
+              semanticSimilarity: null,
+              matchedLookupKinds: parseMatchedLookupKinds(result.matchedLookupKinds),
+              matchOrigins: Array.isArray(result.matchOrigins)
+                ? Array.from(new Set(result.matchOrigins.map((origin: any) => String(origin).trim()).filter(Boolean)))
+                : lookupKindsToOrigins(parseMatchedLookupKinds(result.matchedLookupKinds)),
             };
+            if (payload?.metadata?.kind || payload?.metadata?.canonicalFact || payload?.metadata?.supersedes) {
+              entry.structuredObservation = payload.metadata;
+            }
             if (result.chunked) {
               entry.chunked = true;
               entry.contentSize = result.contentSize;
@@ -1330,28 +1777,228 @@ export class NeuralMCPServer {
             return entry;
           }).sort((a: any, b: any) => b.searchScore - a.searchScore);
 
-          // Task 1300: Dedup by (entity_name, tenant_id) — tenant already scoped by search
-          // Highest relevance score wins; source provenance preserved
-          const dedupMap = new Map<string, any>();
-          for (const result of scoredResults) {
-            const entityName = (result.content?.name || result.id || '').toLowerCase();
-            const existing = dedupMap.get(entityName);
-            if (!existing) {
-              result.sources = [result.memorySource];
-              dedupMap.set(entityName, result);
-            } else if (result.searchScore > existing.searchScore) {
-              // New result has higher score — replace, but keep provenance
-              result.sources = Array.from(new Set([...(existing.sources || []), result.memorySource]));
-              dedupMap.set(entityName, result);
-            } else {
-              // Existing wins — just merge source provenance
-              existing.sources = Array.from(new Set([...(existing.sources || []), result.memorySource]));
-            }
-          }
-          const dedupCount = dedupMap.size;
-          const enhancedResults = Array.from(dedupMap.values()).slice(0, limit);
+          const inlineObservationRepresentationKey = (result: any): string | null => {
+            const payload = getContentPayload(result);
+            if ((result.storageMemoryType || getStorageMemoryType(result)) !== 'observation') return null;
+            const metadata = payload?.metadata || {};
+            if (metadata.source !== 'create_entities_inline') return null;
+            if (!metadata.entityId || !metadata.contentHash) return null;
+            return `${metadata.entityId}:${metadata.contentHash}`;
+          };
 
-          const hasChunked = enhancedResults.some((r: any) => r.chunked);
+          const entityInlineObservationRepresentationKeys = (result: any): Set<string> => {
+            const keys = new Set<string>();
+            const payload = getContentPayload(result);
+            if ((result.storageMemoryType || getStorageMemoryType(result)) !== 'entity') return keys;
+            if (!Array.isArray(payload?.observations)) return keys;
+
+            for (const observation of payload.observations) {
+              if (typeof observation !== 'string' || !observation.trim()) continue;
+              keys.add(`${result.id}:${MemoryManager.contentHash(observation)}`);
+            }
+            return keys;
+          };
+
+          const matchedSolelyByEmbeddedObservation = (result: any): boolean => {
+            if ((result.storageMemoryType || getStorageMemoryType(result)) !== 'entity') return false;
+            const kinds = parseMatchedLookupKinds(result.matchedLookupKinds);
+            return kinds.length > 0 && kinds.every((kind) => kind === 'embedded_observation_handle');
+          };
+
+          const dropRedundantRepresentations = (results: any[]) => {
+            if (includeRedundantRepresentations) {
+              return { results, redundantRepresentationCount: 0 };
+            }
+
+            const materializedInlineKeys = new Set<string>();
+            for (const result of results) {
+              const key = inlineObservationRepresentationKey(result);
+              if (key) materializedInlineKeys.add(key);
+            }
+
+            if (materializedInlineKeys.size === 0) {
+              return { results, redundantRepresentationCount: 0 };
+            }
+
+            const filtered: any[] = [];
+            let redundantRepresentationCount = 0;
+            for (const result of results) {
+              if (!matchedSolelyByEmbeddedObservation(result)) {
+                filtered.push(result);
+                continue;
+              }
+
+              const entityKeys = entityInlineObservationRepresentationKeys(result);
+              const hasMaterializedTwin = Array.from(entityKeys).some((key) => materializedInlineKeys.has(key));
+              if (hasMaterializedTwin) {
+                redundantRepresentationCount++;
+                continue;
+              }
+
+              filtered.push(result);
+            }
+
+            return { results: filtered, redundantRepresentationCount };
+          };
+
+          const dedupAndFilter = (scored: any[]) => {
+            const dedupMap = new Map<string, any>();
+            for (const result of scored) {
+              const storageType = result.storageMemoryType || getStorageMemoryType(result);
+              const entityName = storageType === 'entity'
+                ? (result.canonicalEntityName || getEntityName(result) || result.id || '').toLowerCase()
+                : (result.id || '').toLowerCase();
+              const existing = dedupMap.get(entityName);
+              if (!existing) {
+                result.sources = [result.memorySource];
+                dedupMap.set(entityName, result);
+              } else if (result.searchScore > existing.searchScore) {
+                result.sources = Array.from(new Set([...(existing.sources || []), result.memorySource]));
+                dedupMap.set(entityName, result);
+              } else {
+                existing.sources = Array.from(new Set([...(existing.sources || []), result.memorySource]));
+              }
+            }
+
+            let filteredResults = Array.from(dedupMap.values());
+            if (memoryType) {
+              const filterLower = String(memoryType).toLowerCase();
+              filteredResults = filteredResults.filter((r: any) =>
+                String(r.type || '').toLowerCase() === filterLower ||
+                String(r.storageMemoryType || getStorageMemoryType(r) || '').toLowerCase() === filterLower ||
+                String(r.entityType || getDomainType(r) || '').toLowerCase() === filterLower
+              );
+            }
+            if (agentFilter) {
+              const filterLower = agentFilter.toLowerCase();
+              filteredResults = filteredResults.filter((r: any) => {
+                const payload = getContentPayload(r);
+                return r.source?.toLowerCase().includes(filterLower) ||
+                  payload?.agentId?.toLowerCase().includes(filterLower) ||
+                  payload?.createdBy?.toLowerCase().includes(filterLower) ||
+                payload?.addedBy?.toLowerCase().includes(filterLower);
+              });
+            }
+
+            const preRepresentationDeduplicationCount = filteredResults.length;
+            const representationDeduped = dropRedundantRepresentations(filteredResults);
+
+            return {
+              dedupMap,
+              filteredResults: representationDeduped.results,
+              preRepresentationDeduplicationCount,
+              redundantRepresentationCount: representationDeduped.redundantRepresentationCount,
+            };
+          };
+
+          const useIndexedExact = !semanticSearch;
+          const exactEntityRows = useIndexedExact ? this.memoryManager.findEntitiesByNameOrAlias(query, tenantId) : [];
+          const exactEntityResults = exactEntityRows.map((row: any) =>
+            rowToSearchResult(row, 'entity', { exactEntityMatch: true })
+          );
+          const exactObservationResults = useIndexedExact
+            ? this.memoryManager.findObservationsByEntityOrAlias(query, tenantId).map((row: any) =>
+                rowToSearchResult(row, 'observation', { exactObservationMatch: true })
+              )
+            : [];
+          const exactRelationResults = useIndexedExact
+            ? this.memoryManager.findRelationsByEntityOrAlias(query, tenantId).map((row: any) =>
+                rowToSearchResult(row, 'relation', { exactRelationMatch: true })
+              )
+            : [];
+          const exactDirectResults = [
+            ...exactEntityResults,
+            ...exactObservationResults,
+            ...exactRelationResults,
+          ];
+
+          const exactScoredResults = scoreAndDecorate(exactDirectResults);
+          const exactFiltered = dedupAndFilter(exactScoredResults);
+          const exactAnchored = useIndexedExact && exactFiltered.filteredResults.length > 0;
+          const exactOnly = exactSearch && exactAnchored;
+          const semanticSkipped = exactAnchored ? 'exact_matches' : null;
+
+          // Search with propagated limit (tenant-scoped). Exact graph matches are
+          // prepended so "read entity X" workflows land on canonical rows first.
+          // For default/hybrid searches, deterministic graph matches are enough;
+          // semantic search remains available through searchType:'semantic'.
+          const fallbackResults = exactAnchored
+            ? []
+            : await this.memoryManager.search(query, { shared: true }, tenantId, {
+                limit: Math.max(limit + offset, Math.min(250, (limit + offset) * 3)),
+              });
+          const searchResults = [
+            ...exactDirectResults,
+            ...fallbackResults
+          ];
+
+          // Score ALL results first, then dedup, then filter, then paginate
+          const scoredResults = exactAnchored ? exactScoredResults : scoreAndDecorate(searchResults);
+          const {
+            dedupMap,
+            filteredResults,
+            preRepresentationDeduplicationCount,
+            redundantRepresentationCount,
+          } = exactAnchored ? exactFiltered : dedupAndFilter(scoredResults);
+
+          const totalMatches = filteredResults.length;
+
+          // Apply pagination: offset + limit
+          const paginatedResults = filteredResults.slice(offset, offset + limit);
+
+          // Apply compact mode + tiered content + budget enforcement
+          const COMPACT_THRESHOLD = 2048; // 2KB
+          let responseSize = 0;
+          const budgetedResults: any[] = [];
+
+          for (const result of paginatedResults) {
+            const contentStr = JSON.stringify(result.content || {});
+            const contentSize = contentStr.length;
+
+            let outputResult: any;
+
+            if (compact && contentSize >= COMPACT_THRESHOLD) {
+              // Compact envelope for large entities
+              const summary = MemoryManager.generateSummary(
+                typeof result.content === 'string' ? result.content :
+                result.content?.original || result.content?.content || result.content?.description || contentStr
+              );
+              outputResult = {
+                id: result.id,
+                type: result.type,
+                searchScore: result.searchScore,
+                sources: result.sources,
+                matchedLookupKinds: result.matchedLookupKinds,
+                matchOrigins: result.matchOrigins,
+                name: result.canonicalEntityName || result.content?.name,
+                entityType: result.entityType || result.content?.entityType || result.content?.type,
+                memoryType: result.storageMemoryType || result.content?.memory_type || result.memoryType,
+                agentId: result.content?.agentId || result.source,
+                tags: result.content?.tags,
+                relationships: result.content?.relationships,
+                structuredObservation: result.structuredObservation,
+                summary,
+                contentSize,
+                _compacted: true,
+                timestamp: result.timestamp,
+              };
+            } else {
+              // Full content for small entities or when compact=false
+              outputResult = result;
+            }
+
+            const resultStr = JSON.stringify(outputResult);
+            // Budget enforcement: always include at least 1 result
+            if (budgetedResults.length > 0 && responseSize + resultStr.length > maxResponseSize) {
+              break;
+            }
+            responseSize += resultStr.length;
+            budgetedResults.push(outputResult);
+          }
+
+          const returnedResults = budgetedResults.length;
+          const nextOffset = offset + returnedResults < totalMatches ? offset + returnedResults : null;
+
           return {
             content: [
               {
@@ -1359,12 +2006,156 @@ export class NeuralMCPServer {
                 text: JSON.stringify({
                   query,
                   searchType,
-                  totalResults: enhancedResults.length,
-                  ...(hasChunked ? { chunkedResults: enhancedResults.filter((r: any) => r.chunked).length } : {}),
-                  deduplicated: scoredResults.length !== dedupCount,
+                  totalMatches,
+                  returnedResults,
+                  nextOffset,
+                  responseSize,
+                  compact,
+                  exactOnly,
+                  exactAnchored,
+                  semanticSkipped,
+                  deduplicated: scoredResults.length !== dedupMap.size || redundantRepresentationCount > 0,
                   preDeduplicationCount: scoredResults.length,
-                  results: enhancedResults,
+                  preRepresentationDeduplicationCount,
+                  redundantRepresentationCount,
+                  includeRedundantRepresentations,
+                  exactEntityMatches: exactEntityResults.length,
+                  exactObservationMatches: exactObservationResults.length,
+                  exactRelationMatches: exactRelationResults.length,
+                  filteredExactMatches: exactFiltered.filteredResults.length,
+                  totalResults: totalMatches,
+                  results: budgetedResults,
                 }, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'get_entity_detail': {
+          const { ids, maxTotalSize = 80000 } = args;
+          if (!ids || !Array.isArray(ids) || ids.length === 0) {
+            return { content: [{ type: 'text', text: JSON.stringify({ error: 'ids array is required and must not be empty' }) }] };
+          }
+          if (ids.length > 5) {
+            return { content: [{ type: 'text', text: JSON.stringify({ error: 'Maximum 5 IDs per request' }) }] };
+          }
+
+          const retrieved: any[] = [];
+          const skipped: any[] = [];
+          let budgetUsed = 0;
+
+          for (const id of ids) {
+            const entity = await this.memoryManager.getEntityById(id, tenantId);
+            if (!entity) {
+              skipped.push({ id, reason: 'not_found' });
+              continue;
+            }
+            const entityStr = JSON.stringify(entity);
+            if (retrieved.length > 0 && budgetUsed + entityStr.length > maxTotalSize) {
+              skipped.push({ id, reason: 'budget_exceeded', contentSize: entityStr.length });
+              continue;
+            }
+            budgetUsed += entityStr.length;
+            retrieved.push(entity);
+          }
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  retrieved: retrieved.length,
+                  skipped,
+                  budgetUsed,
+                  maxTotalSize,
+                  entities: retrieved,
+                }, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'inspect_identity_candidates': {
+          const {
+            canonicalKey,
+            limit = 50,
+            minGroupSize = 2,
+            includeSingletons = false,
+            recordAudit = false,
+            saveArtifact = false,
+            artifactDir,
+          } = args;
+
+          const report = this.memoryManager.inspectIdentityCandidates({
+            tenantId,
+            canonicalKey,
+            limit,
+            minGroupSize,
+            includeSingletons,
+          });
+
+          let audit: any = { recorded: false, rowsWritten: 0 };
+          if (recordAudit) {
+            const auditRow = this.memoryManager.recordPass2DryRunAudit(
+              agent,
+              tenantId,
+              report.canonicalHash,
+              report.summary.rowsInReturnedGroups,
+              `Pass 2.0 Phase A dry-run (${report.summary.returnedGroupCount} groups)`,
+              context
+            );
+            audit = { recorded: true, rowsWritten: 1, ...auditRow };
+          }
+
+          let artifactPath: string | null = null;
+          const finalReport = {
+            ...report,
+            audit,
+          };
+          if (saveArtifact) {
+            artifactPath = this.memoryManager.savePass2DryRunArtifact(finalReport, artifactDir);
+            finalReport.artifactPath = artifactPath;
+          }
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(finalReport, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'get_entity_context': {
+          const requestTenantId = args.tenantId || tenantId;
+          const contextPayload = this.memoryManager.getEntityContext({
+            ...args,
+            tenantId: requestTenantId,
+          });
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(contextPayload, null, 2),
+              },
+            ],
+          };
+        }
+
+        case 'execute_pass2_phase_c': {
+          const requestTenantId = args.tenantId || tenantId;
+          const result = this.memoryManager.executePass2PhaseC({
+            ...args,
+            tenantId: requestTenantId,
+          });
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(result, null, 2),
               },
             ],
           };
@@ -1642,15 +2433,47 @@ export class NeuralMCPServer {
                 }
               }
             }
+            const metadataForSanitizer = [
+              obs.kind,
+              obs.canonicalFact,
+              obs.severity,
+              ...(Array.isArray(obs.supersedes) ? obs.supersedes : []),
+              ...(Array.isArray(obs.appliesTo) ? obs.appliesTo : []),
+              ...(obs.metadata ? [JSON.stringify(obs.metadata)] : []),
+            ].filter((value) => typeof value === 'string');
+            for (const c of metadataForSanitizer) {
+              const check = MemoryManager.sanitizeContent(c);
+              if (!check.safe) {
+                this.memoryManager.auditLog('add_observation', agent, c, obs.entityName, true, check.reason);
+                this.notificationPort.send(`⚠️ Neural write flagged — agent: ${agent}, operation: add_observation, reason: ${check.reason}`).catch(() => {});
+                throw new Error(`Content flagged by sanitizer: ${check.reason}`);
+              }
+            }
           }
 
           const results = await Promise.all(observations.map(async (obs: any) => {
+            const contents = Array.isArray(obs.contents) ? obs.contents : [];
+            const contentHashInput = contents.length === 1 && typeof contents[0] === 'string'
+              ? contents[0]
+              : JSON.stringify(contents);
+            const structuredMetadata = {
+              ...(obs.metadata && typeof obs.metadata === 'object' ? obs.metadata : {}),
+              ...(obs.kind ? { kind: obs.kind } : {}),
+              ...(obs.canonicalFact ? { canonicalFact: obs.canonicalFact } : {}),
+              ...(Array.isArray(obs.supersedes) ? { supersedes: obs.supersedes } : {}),
+              ...(Array.isArray(obs.appliesTo) ? { appliesTo: obs.appliesTo } : {}),
+              ...(obs.severity ? { severity: obs.severity } : {}),
+            };
             const observationData = {
               entityName: obs.entityName,
               contents: obs.contents,
               addedBy: agent,
               timestamp: new Date().toISOString(),
               metadata: {
+                ...structuredMetadata,
+                source: 'add_observations',
+                canonicalEntityKey: this.memoryManager.canonicalEntityKey(obs.entityName),
+                contentHash: MemoryManager.contentHash(contentHashInput),
                 vectorEmbedded: true,
                 relationshipsUpdated: true
               }
@@ -2139,47 +2962,61 @@ export class NeuralMCPServer {
 
         case 'register_agent': {
           const { agentId: newAgentId, name, capabilities, endpoint, metadata = {} } = args;
-          
-          const agentData = {
-            agentId: newAgentId,
-            name,
-            capabilities,
-            endpoint,
-            metadata: {
-              ...metadata,
-              registeredBy: agent,
-              registrationTime: new Date().toISOString(),
-              status: 'active',
-              version: '1.0.0'
-            }
+          const capabilityList = Array.isArray(capabilities) ? capabilities : [];
+
+          const now = new Date().toISOString();
+          const canonicalAgentId = this.memoryManager.inferCanonicalAgentId(newAgentId, name, metadata);
+          const aliases = Array.from(new Set([
+            canonicalAgentId,
+            newAgentId,
+            ...(Array.isArray(metadata.aliases) ? metadata.aliases : []),
+          ].filter(Boolean).map((value: string) => String(value).trim().toLowerCase())));
+          const enrichedMetadata = {
+            ...metadata,
+            canonicalAgentId,
+            aliases,
+            registeredBy: agent,
+            registrationTime: now,
+            status: 'active',
+            version: '1.0.0'
           };
 
-          // Agent registrations are GLOBAL (not tenant-scoped per isolation policy)
-          // Upsert: remove prior registration for this agentId to prevent duplicates
-          try {
-            const db = this.memoryManager.getDb();
-            const existing = db.prepare(
-              `SELECT id FROM shared_memory WHERE memory_type = 'agent_registration' AND json_extract(content, '$.agentId') = ?`
-            ).all(newAgentId) as Array<{ id: string }>;
-            if (existing.length > 0) {
-              const deleteStmt = db.prepare('DELETE FROM shared_memory WHERE id = ?');
-              for (const row of existing) {
-                deleteStmt.run(row.id);
-              }
-            }
-          } catch {
-            // Non-critical: if cleanup fails, fall through to insert
-          }
-          const registrationId = await this.memoryManager.store(agent, agentData, 'shared', 'agent_registration');
+          // Upsert into canonical agent_registrations table
+          const db = this.memoryManager.getDb();
+          db.prepare(`
+            INSERT INTO agent_registrations (agent_id, tenant_id, name, capabilities_json, endpoint, metadata_json, status, registered_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+            ON CONFLICT(agent_id, tenant_id) DO UPDATE SET
+              name = excluded.name,
+              capabilities_json = excluded.capabilities_json,
+              endpoint = excluded.endpoint,
+              metadata_json = excluded.metadata_json,
+              status = 'active',
+              registered_by = excluded.registered_by,
+              updated_at = excluded.updated_at
+          `).run(
+            newAgentId,
+            tenantId,
+            name,
+            JSON.stringify(capabilityList),
+            endpoint || null,
+            JSON.stringify(enrichedMetadata),
+            agent,
+            now,
+            now
+          );
+
+          const registrationId = `reg-${newAgentId}-${tenantId}`;
 
           // Simulate agent registration with unified server
+          const agentData = { agentId: newAgentId, name, capabilities: capabilityList, endpoint, metadata: enrichedMetadata };
           await this.simulateAgentRegistration(agentData);
 
           await this.publishEventToUnified('agent.registered', {
             registrationId,
             agentId: newAgentId,
             name,
-            capabilities,
+            capabilities: capabilityList,
             registeredBy: agent
           });
 
@@ -2190,12 +3027,14 @@ export class NeuralMCPServer {
                 text: JSON.stringify({
                   registrationId,
                   agentId: newAgentId,
+                  canonicalAgentId,
+                  aliases,
                   status: 'registered',
                   features: {
                     crossPlatformAccess: true,
                     realTimeMessaging: true,
-                    autonomousCapability: capabilities.includes('autonomous'),
-                    multiProviderAI: capabilities.includes('multi-provider')
+                    autonomousCapability: capabilityList.includes('autonomous'),
+                    multiProviderAI: capabilityList.includes('multi-provider')
                   }
                 }, null, 2),
               },
@@ -2222,18 +3061,24 @@ export class NeuralMCPServer {
             ? String(currentAgentId).trim()
             : updatedAgentId;
 
-          const identityRecord = {
+          const now = new Date().toISOString();
+          const identityId = uuidv4();
+
+          // Write to canonical agent_identity_changes table
+          const db = this.memoryManager.getDb();
+          db.prepare(`
+            INSERT INTO agent_identity_changes (id, previous_agent_id, updated_agent_id, updated_name, capabilities_json, metadata_json, updated_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            identityId,
             previousAgentId,
             updatedAgentId,
-            updatedName: newName || updatedAgentId,
-            capabilities,
-            metadata,
-            updatedBy: args.agentId || this.agentId,
-            timestamp: new Date().toISOString()
-          };
-
-          // Agent identity is GLOBAL (not tenant-scoped per isolation policy)
-          const identityId = await this.memoryManager.store(previousAgentId, identityRecord, 'shared', 'agent_identity');
+            newName || updatedAgentId,
+            JSON.stringify(capabilities),
+            JSON.stringify(metadata),
+            args.agentId || this.agentId,
+            now
+          );
 
           console.log(`🪪 Agent identity update recorded: ${previousAgentId} → ${updatedAgentId}`);
 
@@ -2273,42 +3118,100 @@ export class NeuralMCPServer {
         }
 
         case 'get_agent_status': {
-          const { agentId: targetAgentId } = args;
-          
+          const { agentId: targetAgentId, groupByCanonical = true } = args;
+
           let statusData;
           const db = this.memoryManager.getDb();
 
+          const parseJson = (raw: string | null | undefined, fallback: any) => {
+            if (!raw) return fallback;
+            try {
+              return JSON.parse(raw);
+            } catch {
+              return fallback;
+            }
+          };
+
           if (targetAgentId) {
-            // Get status for specific agent — query shared_memory directly (tenant-scoped)
             const row = db.prepare(
-              `SELECT content, updated_at FROM shared_memory WHERE memory_type = 'agent_registration' AND tenant_id = ? AND json_extract(content, '$.agentId') = ? ORDER BY updated_at DESC LIMIT 1`
-            ).get(tenantId, targetAgentId) as { content: string; updated_at: string } | undefined;
-            const record = row ? JSON.parse(row.content) : null;
+              `SELECT agent_id, name, capabilities_json, metadata_json, status, updated_at
+               FROM agent_registrations
+               WHERE tenant_id = ? AND agent_id = ?
+               LIMIT 1`
+            ).get(tenantId, targetAgentId) as { agent_id: string; name: string; capabilities_json: string; metadata_json: string; status: string; updated_at: string } | undefined;
+
+            const metadata = row ? parseJson(row.metadata_json, {}) : {};
+            const canonicalAgentId = row
+              ? this.memoryManager.inferCanonicalAgentId(row.agent_id, row.name, metadata)
+              : this.memoryManager.resolvePreferredAgentId(targetAgentId);
 
             statusData = {
               agentId: targetAgentId,
-              status: record ? 'active' : 'unknown',
+              canonicalAgentId,
+              status: row?.status || 'unknown',
               lastSeen: row?.updated_at || 'never',
-              capabilities: record?.capabilities || []
+              capabilities: row ? parseJson(row.capabilities_json, []) : [],
+              aliases: this.memoryManager.getAgentAliases(targetAgentId)
             };
           } else {
-            // Get status for all agents — query shared_memory directly (tenant-scoped)
             const rows = db.prepare(
-              `SELECT content, updated_at FROM shared_memory WHERE memory_type = 'agent_registration' AND tenant_id = ? ORDER BY updated_at DESC`
-            ).all(tenantId) as Array<{ content: string; updated_at: string }>;
+              `SELECT agent_id, name, capabilities_json, metadata_json, status, updated_at
+               FROM agent_registrations
+               WHERE tenant_id = ?
+               ORDER BY updated_at DESC`
+            ).all(tenantId) as Array<{ agent_id: string; name: string; capabilities_json: string; metadata_json: string; status: string; updated_at: string }>;
 
             const agents = rows.map(row => {
-              const record = JSON.parse(row.content);
+              const metadata = parseJson(row.metadata_json, {});
               return {
-                agentId: record.agentId,
-                name: record.name,
+                agentId: row.agent_id,
+                canonicalAgentId: this.memoryManager.inferCanonicalAgentId(row.agent_id, row.name, metadata),
+                name: row.name,
+                status: row.status,
                 lastSeen: row.updated_at
               };
             });
 
+            const canonicalMap = new Map<string, any>();
+            if (groupByCanonical) {
+              for (const row of rows) {
+                const metadata = parseJson(row.metadata_json, {});
+                const canonicalAgentId = this.memoryManager.inferCanonicalAgentId(row.agent_id, row.name, metadata);
+                const existing = canonicalMap.get(canonicalAgentId) || {
+                  agentId: canonicalAgentId,
+                  name: row.name,
+                  status: 'inactive',
+                  lastSeen: row.updated_at,
+                  aliases: [],
+                  sessionCount: 0,
+                  capabilities: [],
+                };
+                existing.sessionCount += 1;
+                existing.status = existing.status === 'active' || row.status === 'active' ? 'active' : row.status;
+                if (String(row.updated_at || '') > String(existing.lastSeen || '')) {
+                  existing.lastSeen = row.updated_at;
+                  existing.name = row.name;
+                }
+                existing.aliases = Array.from(new Set([
+                  ...existing.aliases,
+                  row.agent_id,
+                  ...(Array.isArray(metadata.aliases) ? metadata.aliases : []),
+                ].filter(Boolean)));
+                existing.capabilities = Array.from(new Set([
+                  ...existing.capabilities,
+                  ...parseJson(row.capabilities_json, []),
+                ]));
+                canonicalMap.set(canonicalAgentId, existing);
+              }
+            }
+
             statusData = {
               totalAgents: agents.length,
-              agents
+              totalCanonicalAgents: canonicalMap.size || undefined,
+              agents,
+              canonicalAgents: groupByCanonical
+                ? Array.from(canonicalMap.values()).sort((a, b) => String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')))
+                : undefined
             };
           }
 

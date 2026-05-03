@@ -53,7 +53,7 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
       properties: {
         agentId: {
           type: 'string',
-          description: 'Optional source agent ID for observation attribution. When supplied by a trusted agent bridge, this becomes shared_memory.created_by and is required for Phase C gate evidence rows.',
+          description: 'Optional source agent ID for observation attribution. This is accepted inside the operator/API-key trust boundary and becomes shared_memory.created_by; Phase C gate evidence also requires operator-pinned observation IDs and exact hash/scope bindings.',
         },
         observations: {
           type: 'array',

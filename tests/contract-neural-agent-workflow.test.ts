@@ -167,6 +167,19 @@ describe('Neural agent workflow metadata', () => {
     expect(metadata.canonicalEntityKey).toBe(entityName.toLowerCase());
     expect(metadata.contentHash).toBe(createHash('sha256').update('Current project fact.').digest('hex'));
 
+    const db = server.getMemoryManager().getDb();
+    const row = db.prepare(
+      "SELECT content FROM shared_memory WHERE id = ? AND memory_type = 'observation'"
+    ).get(added.observations[0].id) as any;
+    const persisted = JSON.parse(row.content);
+    expect(persisted.metadata).toMatchObject({
+      kind: 'correction',
+      canonicalFact: 'Current project fact.',
+      source: 'add_observations',
+      canonicalEntityKey: entityName.toLowerCase(),
+      contentHash: createHash('sha256').update('Current project fact.').digest('hex'),
+    });
+
     const searched = await mcpCall(server, 'search_entities', {
       query: entityName,
       searchType: 'exact',
@@ -1070,6 +1083,60 @@ describe('Neural agent workflow metadata', () => {
     }
   });
 
+  it('Phase C refuses execute and verify when source rows drift after dry-run review', async () => {
+    const ts = Date.now();
+    const entityName = `phase-c-source-drift-${ts}`;
+    const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pass2-source-drift-'));
+
+    try {
+      await mcpCall(server, 'create_entities', {
+        entities: [
+          { name: entityName, entityType: 'project', metadata: { source: 'create_entities_inline' }, observations: ['Drift shard one.'] },
+          { name: entityName, entityType: 'project', metadata: { source: 'create_entities_inline' }, observations: ['Drift shard two.'] },
+        ],
+      });
+      const report = await mcpCall(server, 'inspect_identity_candidates', {
+        canonicalKey: entityName,
+        recordAudit: true,
+        saveArtifact: true,
+        artifactDir,
+      });
+      const sourceRowId = report.groups[0].rows[0].sourceRowId;
+      const db = server.getMemoryManager().getDb();
+      db.prepare('UPDATE shared_memory SET content = ? WHERE id = ?').run(
+        JSON.stringify({ name: entityName, entityType: 'project', observations: ['Drifted after review.'] }),
+        sourceRowId
+      );
+
+      const before = pass2WatchedCounts(server);
+      const plan = await mcpCall(server, 'execute_pass2_phase_c', {
+        action: 'plan',
+        dryRunArtifactPath: report.artifactPath,
+        dryRunHash: report.canonicalHash,
+      });
+      expect(plan.status).toBe('source_row_validation_failed');
+      expect(plan.sourceRowIssues).toEqual(expect.arrayContaining([
+        expect.objectContaining({ sourceRowId, issue: 'SOURCE_ROW_HASH_DRIFT' }),
+      ]));
+      expect(plan.productionExecuteEnabled).toBe(false);
+      expect(pass2WatchedCounts(server)).toEqual(before);
+
+      await expect(mcpCall(server, 'execute_pass2_phase_c', {
+        action: 'execute',
+        dryRunArtifactPath: report.artifactPath,
+        dryRunHash: report.canonicalHash,
+      })).rejects.toThrow(/PHASE_C_SOURCE_ROW_VALIDATION_FAILED/);
+      await expect(mcpCall(server, 'execute_pass2_phase_c', {
+        action: 'verify',
+        dryRunArtifactPath: report.artifactPath,
+        dryRunHash: report.canonicalHash,
+      })).rejects.toThrow(/PHASE_C_SOURCE_ROW_VALIDATION_FAILED/);
+      expect(pass2WatchedCounts(server)).toEqual(before);
+    } finally {
+      fs.rmSync(artifactDir, { recursive: true, force: true });
+    }
+  });
+
   it('Phase C execute verifies idempotent no-op, persisted context, and rollback in test context', async () => {
     const ts = Date.now();
     const entityName = `phase-c-execute-${ts}`;
@@ -1356,14 +1423,41 @@ describe('Neural agent workflow metadata', () => {
           },
         ],
       });
+      const approvalMissingAction = await mcpCall(prodLikeServer, 'add_observations', {
+        agentId: 'codex-desktop',
+        observations: [
+          {
+            entityName: 'Pass 2.0 Phase C Identity/Facet/Link Writes',
+            contents: ['Tommy approval without the required exact action binding must not open production execute.'],
+            metadata: {
+              kind: 'production_execute_approval',
+              phase: 'Phase C',
+              dryRunHash: report.canonicalHash,
+              productionExecuteApproved: true,
+              approvedBy: 'tommy',
+            },
+          },
+        ],
+      });
       process.env.PHASE_C_PRODUCTION_EXECUTE_ENABLED = 'true';
       process.env.PHASE_C_PRODUCTION_DRY_RUN_HASH = report.canonicalHash;
-      process.env.PHASE_C_PRODUCTION_APPROVAL_OBSERVATION_ID = approval.observations[0].id;
+      process.env.PHASE_C_PRODUCTION_APPROVAL_OBSERVATION_ID = approvalMissingAction.observations[0].id;
       process.env.PHASE_C_ROLLBACK_REHEARSAL_OBSERVATION_ID = rehearsal.observations[0].id;
       process.env.PHASE_C_REVIEWER_PASS_OBSERVATION_IDS = [
         `codex=${spoofedCodexReview.observations[0].id}`,
         `claude-code=${claudeReview.observations[0].id}`,
       ].join(',');
+
+      const missingActionPlan = await mcpCall(prodLikeServer, 'execute_pass2_phase_c', {
+        action: 'plan',
+        executionMode: 'production',
+        dryRunArtifactPath: report.artifactPath,
+        dryRunHash: report.canonicalHash,
+        approvalObservationId: approvalMissingAction.observations[0].id,
+      });
+      expect(missingActionPlan.productionExecuteEnabled).toBe(false);
+      expect(missingActionPlan.productionGate.reasons).toContain('PHASE_C_APPROVAL_ACTION_MISMATCH');
+      process.env.PHASE_C_PRODUCTION_APPROVAL_OBSERVATION_ID = approval.observations[0].id;
 
       const spoofedPlan = await mcpCall(prodLikeServer, 'execute_pass2_phase_c', {
         action: 'plan',

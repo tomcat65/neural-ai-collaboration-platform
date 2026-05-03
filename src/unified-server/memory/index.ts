@@ -4670,7 +4670,7 @@ export class MemoryManager {
       if (metadata.productionExecuteApproved !== true) {
         reasons.push('PHASE_C_PRODUCTION_APPROVAL_NOT_TRUE');
       }
-      if (metadata.action && metadata.action !== 'execute_pass2_phase_c') {
+      if (metadata.action !== 'execute_pass2_phase_c') {
         reasons.push('PHASE_C_APPROVAL_ACTION_MISMATCH');
       }
       if (dryRunHash && metadata.dryRunHash !== dryRunHash) {
@@ -5179,7 +5179,7 @@ export class MemoryManager {
     const tenantId = String(args.tenantId || 'default');
     const writeContext = this.pass2PhaseCWriteContext(args);
     if (!writeContext) {
-      throw new Error('PHASE_C_PRODUCTION_ROLLBACK_NOT_ENABLED: rollback requires a non-production test/rehearsal context and an explicit reviewed rollback plan.');
+      throw new Error('PHASE_C_PRODUCTION_ROLLBACK_NOT_ENABLED: rollback requires a non-production test/rehearsal context. Production rollback is a manual SQL runbook operation; see docs/PLAN-Pass-2.0-Phase-C-Identity-Facet-Link-Writes.md.');
     }
     const rollbackOwnerAuditId = String(args.rollbackOwnerAuditId || '');
     if (!rollbackOwnerAuditId) {
@@ -5213,6 +5213,7 @@ export class MemoryManager {
 
       let facetChanges = 0;
       let linkChanges = 0;
+      let cascadedFromIdentityCount = 0;
       const facetByOwner = this.db.prepare(`
         UPDATE entity_context_facets
         SET status = 'deactivated', deactivated_at = ?, deactivated_by = ?
@@ -5234,12 +5235,14 @@ export class MemoryManager {
           WHERE tenant_id = ? AND identity_id IN (${placeholders}) AND status = 'active'
         `).run(now, actorId, tenantId, ...identityIds);
         facetChanges += facetByIdentity.changes || 0;
+        cascadedFromIdentityCount += facetByIdentity.changes || 0;
         const linkByIdentity = this.db.prepare(`
           UPDATE entity_lookup_identity_links
           SET status = 'deactivated', deactivated_at = ?, deactivated_by = ?, updated_at = ?
           WHERE tenant_id = ? AND identity_id IN (${placeholders}) AND status = 'active'
         `).run(now, actorId, now, tenantId, ...identityIds);
         linkChanges += linkByIdentity.changes || 0;
+        cascadedFromIdentityCount += linkByIdentity.changes || 0;
       }
 
       const targetCount = (identityUpdate.changes || 0) + facetChanges + linkChanges;
@@ -5257,6 +5260,7 @@ export class MemoryManager {
         identitiesDeactivated: identityUpdate.changes || 0,
         facetsDeactivated: facetChanges,
         linksDeactivated: linkChanges,
+        cascadedFromIdentityCount,
         targetCount,
         identityIds,
       };
@@ -5480,7 +5484,7 @@ export class MemoryManager {
       schemaVersion: 'pass2.phaseC.plan.v1',
       phase: 'C',
       action: 'plan',
-      status: executableGroups.length > 0 ? 'ready_for_plan_review' : 'no_executable_groups',
+      status: sourceRowIssues.length > 0 ? 'source_row_validation_failed' : (executableGroups.length > 0 ? 'ready_for_plan_review' : 'no_executable_groups'),
       tenantId,
       dryRunHash: projection.canonicalHash,
       dryRunArtifactPath: projection.artifactPath,
@@ -5534,6 +5538,9 @@ export class MemoryManager {
     };
     if (action === 'plan') {
       return planResult;
+    }
+    if (sourceRowIssues.length > 0) {
+      throw new Error(`PHASE_C_SOURCE_ROW_VALIDATION_FAILED: ${sourceRowIssues.map((issue) => `${issue.canonicalKey}:${issue.sourceRowId}:${issue.issue}`).join(', ')}`);
     }
     if (action === 'verify') {
       return this.verifyPass2PhaseCExecution({
