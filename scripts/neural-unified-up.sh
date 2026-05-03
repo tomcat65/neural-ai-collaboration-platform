@@ -58,12 +58,11 @@ check_port() {
 check_port 6174   # MCP
 check_port 3004   # Message Hub
 
-# 3) Ensure Simple stack is stopped (avoid port conflicts) – best-effort
-info "Ensuring Simple stack is stopped (avoid conflicts) ..."
+# 3) Ensure legacy stacks are stopped (avoid port conflicts) – best-effort
+info "Ensuring legacy stacks are stopped (avoid conflicts) ..."
 (
   cd "$PROJECT_DIR"
-  docker compose -p simple -f docker/docker-compose.simple.yml -f docker/docker-compose.simple.override.yml down -v 2>/dev/null || \
-  docker compose -p simple -f docker/docker-compose.simple.yml down -v 2>/dev/null || true
+  docker compose -p simple down -v 2>/dev/null || true
 )
 
 # 4) Bring up the Unified MCP stack with a distinct project name and remove orphans

@@ -208,7 +208,7 @@ stop_containers() {
     cd "$PROJECT_DIR"
     
     # Stop using compose files
-    for compose_file in "docker/docker-compose.simple.yml" "docker/docker-compose.unified-neural-mcp.yml" "docker-compose.yml"; do
+    for compose_file in "docker/docker-compose.unified-neural-mcp.yml"; do
         if [ -f "$compose_file" ]; then
             print_status "Stopping services from $compose_file"
             docker-compose -f "$compose_file" down --timeout 30 2>/dev/null || true
