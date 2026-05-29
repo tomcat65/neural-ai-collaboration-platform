@@ -193,3 +193,8 @@ secrets/
 
 # Scaffolding backups
 backups/
+
+# Captured container/runtime logs (regenerable; should never be tracked)
+*container-logs.md
+firebase-debug.log
+*.orig
