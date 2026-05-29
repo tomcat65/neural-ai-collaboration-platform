@@ -97,7 +97,16 @@ export class NeuralMCPServer {
       crossOriginEmbedderPolicy: false
     }));
 
-    this.app.use(cors());
+    // CORS: configurable allowlist via CORS_ORIGINS (comma-separated). Defaults
+    // to '*' to preserve existing behavior for non-browser MCP clients; set
+    // CORS_ORIGINS to lock the HTTP surface down when exposed beyond localhost.
+    const corsOrigins = (process.env.CORS_ORIGINS || '*')
+      .split(',')
+      .map((o) => o.trim())
+      .filter(Boolean);
+    this.app.use(cors({
+      origin: corsOrigins.includes('*') ? true : corsOrigins,
+    }));
 
     // Raw body parser for /ai-message (before JSON parser)
     // Limit aligned with validateRawBody MAX_RAW_BODY_SIZE (1MB)
@@ -3708,7 +3717,10 @@ export class NeuralMCPServer {
 // Start server if this file is run directly
 if (import.meta.url === `file://${process.argv[1]}`) {
   const port = parseInt(process.env.NEURAL_MCP_PORT || '6174');
-  const server = new NeuralMCPServer(port);
+  // Optional DB path override (defaults to ./data/unified-platform.db). Lets an
+  // isolated/test server run against a throwaway DB without touching prod data.
+  const dbPath = process.env.NEURAL_DB_PATH || undefined;
+  const server = new NeuralMCPServer(port, dbPath);
   
   server.start().catch((error) => {
     console.error('Failed to start Unified Neural MCP Server:', error);
