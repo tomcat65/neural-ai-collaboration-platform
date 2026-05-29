@@ -552,6 +552,32 @@ export class MemoryManager {
       }
     } catch { /* ok — table may not exist yet at this point */ }
 
+    // Core messaging table. Created here (not only via the standalone
+    // migrations/001 script, which is never invoked at startup) so a fresh
+    // database has ai_messages BEFORE the Phase B / tenant-column migrations
+    // below try to ALTER it. Without this, migrateUsersAndTenantColumns throws
+    // "no such table: ai_messages" on a fresh DB and aborts — leaving the
+    // bootstrap user and session_handoffs.tenant_id uncreated. Legacy data
+    // migration from shared_memory still lives in migrations/001.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS ai_messages (
+        id TEXT PRIMARY KEY,
+        legacy_shared_memory_id TEXT UNIQUE,
+        from_agent TEXT NOT NULL,
+        from_source TEXT NOT NULL,
+        to_agent TEXT NOT NULL,
+        content TEXT NOT NULL,
+        message_type TEXT DEFAULT 'info',
+        priority TEXT DEFAULT 'normal',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        read_at DATETIME,
+        metadata TEXT
+      )
+    `);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_ai_messages_to ON ai_messages(to_agent, created_at DESC)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_ai_messages_from ON ai_messages(from_agent, created_at DESC)`);
+    this.db.exec(`CREATE INDEX IF NOT EXISTS idx_ai_messages_type ON ai_messages(to_agent, message_type)`);
+
     // Phase B: Add trusted provenance columns to shared_memory and ai_messages
     try {
       const smCols = this.db.prepare('PRAGMA table_info(shared_memory)').all() as any[];
