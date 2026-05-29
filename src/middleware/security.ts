@@ -100,13 +100,29 @@ interface SecurityConfig {
   publicPaths: Set<string>;
 }
 
+/** Parse a positive integer from an env var, falling back to a default. */
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 const DEFAULT_CONFIG: SecurityConfig = {
   apiKeyHeader: 'x-api-key',
   apiKeyQueryParam: 'api_key',
   requireAuth: true, // MANDATORY - no fallback to open mode
 
-  generalRateLimit: { points: 100, duration: 60 }, // 100 requests per minute
-  messageRateLimit: { points: 20, duration: 60 },  // 20 messages per minute
+  // Rate limits are env-configurable to support load/contract testing and
+  // per-deployment tuning. Defaults preserve the original 100/min and 20/min.
+  generalRateLimit: {
+    points: envInt('GENERAL_RATE_LIMIT_POINTS', 100),
+    duration: envInt('GENERAL_RATE_LIMIT_DURATION', 60),
+  },
+  messageRateLimit: {
+    points: envInt('MESSAGE_RATE_LIMIT_POINTS', 20),
+    duration: envInt('MESSAGE_RATE_LIMIT_DURATION', 60),
+  },
 
   publicPaths: new Set(['/health', '/health.json', '/ready'])
 };
@@ -126,8 +142,28 @@ export function generateApiKey(): string {
  * Validates API key format
  */
 export function isValidApiKeyFormat(key: string): boolean {
-  // Accept keys starting with 'nac_' (new format) or any 32+ char string (legacy)
-  return /^nac_[a-f0-9]{64}$/.test(key) || key.length >= 32;
+  if (typeof key !== 'string') return false;
+  // New format: nac_ + 64 hex chars.
+  if (/^nac_[a-f0-9]{64}$/.test(key)) return true;
+  // Legacy format: 32–512 printable ASCII chars, no whitespace or control
+  // characters. Tightened from a bare `length >= 32` so garbage/multiline
+  // input is rejected before it reaches the comparison path.
+  return /^[\x21-\x7E]{32,512}$/.test(key);
+}
+
+/**
+ * Constant-time comparison for API keys to avoid leaking key material through
+ * response timing. Returns false on length mismatch without an early-exit.
+ */
+export function safeKeyEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) {
+    // Burn an equal-length compare so timing does not reveal the mismatch.
+    crypto.timingSafeEqual(bufA, bufA);
+    return false;
+  }
+  return crypto.timingSafeEqual(bufA, bufB);
 }
 
 // ============================================================================
@@ -564,7 +600,7 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
   }
 
   // Fall back to legacy (env-based) authentication
-  if (serverApiKey && providedKey === serverApiKey) {
+  if (serverApiKey && safeKeyEqual(providedKey, serverApiKey)) {
     // Legacy auth succeeded - assign default tenant if multi-tenant enabled
     if (MULTI_TENANT_ENABLED) {
       try {
