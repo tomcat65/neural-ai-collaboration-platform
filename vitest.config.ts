@@ -4,6 +4,9 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    // Boots a hermetic, isolated MCP server for the contract suite (see
+    // tests/global-setup.ts). Skipped automatically if NEURAL_URL is preset.
+    globalSetup: ['./tests/global-setup.ts'],
     include: ['src/**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}', 'tests/**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}'],
     exclude: [
       '**/node_modules/**',

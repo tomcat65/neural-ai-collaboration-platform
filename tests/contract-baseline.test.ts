@@ -340,7 +340,10 @@ describe('Neural Contract Baseline', () => {
     it('returns healthy status', async () => {
       const result = await httpGet('/health');
       expect(result.status).toBe('healthy');
-      expect(result.port).toBe(6174);
+      // Port is environment-dependent (the hermetic test server uses an alt
+      // port); assert it matches whatever BASE_URL points at.
+      const expectedPort = Number(new URL(BASE_URL).port) || 6174;
+      expect(result.port).toBe(expectedPort);
     });
   });
 
@@ -417,8 +420,8 @@ describe('Neural Contract Baseline', () => {
         'record_learning',
         'set_preferences',
         'get_individual_memory',
-        'translate_path',
-        'search_nodes',
+        // translate_path and search_nodes are intentionally NOT advertised in
+        // tools/list (hidden legacy aliases, still callable) — see README.
       ];
 
       const toolNames = tools.map((t: any) => t.name);
