@@ -31,6 +31,11 @@ import {
   classifyObservationSensitivity as classifyObservationSensitivityImpl,
 } from './authz.js';
 import {
+  createIndexes,
+  migrateAddTenantColumn,
+  migrateAgentRegistrations,
+} from './schema.js';
+import {
   setSystemConnected,
   recordSQLiteFallback,
   setDualWriteEnabled,
@@ -310,7 +315,7 @@ export class MemoryManager {
     `);
 
     // Migrate legacy shared_memory agent_registration rows
-    this.migrateAgentRegistrations();
+    migrateAgentRegistrations(this.db);
 
     // Session Handoffs Table — stores flag_for_next_session per project
     this.db.exec(`
@@ -571,38 +576,16 @@ export class MemoryManager {
     } catch { /* ok — table may not exist yet (pre-migration) */ }
 
     // Migration: Add tenant_id column to existing tables if missing BEFORE creating tenant indexes
-    this.migrateAddTenantColumn();
+    migrateAddTenantColumn(this.db);
 
     // Migration 002: Users table + tenant_id/user_id on ai_messages & session_handoffs
     this.migrateUsersAndTenantColumns();
 
     // Create indexes after migrations to avoid referencing missing columns on older databases
-    this.createIndexes();
+    createIndexes(this.db);
     this.backfillGraphLookupIndexIfEmpty();
 
     console.log('🧠 Memory database initialized');
-  }
-
-  private migrateAddTenantColumn(): void {
-    // Check and add tenant_id to existing tables (for backward compatibility)
-    const tables = ['individual_memory', 'shared_memory', 'tasks', 'shared_knowledge', 'consensus_history', 'project_artifacts'];
-
-    for (const table of tables) {
-      try {
-        // Check if tenant_id column exists
-        const pragma = this.db.prepare(`PRAGMA table_info(${table})`).all() as any[];
-        const hasTenantId = pragma.some((col: any) => col.name === 'tenant_id');
-
-        if (!hasTenantId) {
-          this.db.exec(`ALTER TABLE ${table} ADD COLUMN tenant_id TEXT DEFAULT 'default'`);
-          this.db.exec(`CREATE INDEX IF NOT EXISTS idx_${table}_tenant ON ${table}(tenant_id)`);
-          console.log(`🔧 Migration: Added tenant_id column to ${table}`);
-        }
-      } catch (error) {
-        // Table might not exist yet, which is fine
-        console.debug(`Migration: Could not check ${table}:`, error);
-      }
-    }
   }
 
   private migrateUsersAndTenantColumns(): void {
@@ -740,145 +723,6 @@ export class MemoryManager {
       }
     } catch {
       // ai_messages table may not exist yet
-    }
-  }
-
-  private createIndexes(): void {
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_individual_agent_id ON individual_memory(agent_id);
-      CREATE INDEX IF NOT EXISTS idx_individual_type ON individual_memory(memory_type);
-      CREATE INDEX IF NOT EXISTS idx_individual_importance ON individual_memory(importance);
-      CREATE INDEX IF NOT EXISTS idx_individual_tenant ON individual_memory(tenant_id);
-    `);
-
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_shared_type ON shared_memory(memory_type);
-      CREATE INDEX IF NOT EXISTS idx_shared_created_by ON shared_memory(created_by);
-      CREATE INDEX IF NOT EXISTS idx_shared_tenant ON shared_memory(tenant_id);
-    `);
-
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-      CREATE INDEX IF NOT EXISTS idx_tasks_assigned_to ON tasks(assigned_to);
-      CREATE INDEX IF NOT EXISTS idx_tasks_created_by ON tasks(created_by);
-      CREATE INDEX IF NOT EXISTS idx_tasks_tenant ON tasks(tenant_id);
-    `);
-
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_knowledge_type ON shared_knowledge(type);
-      CREATE INDEX IF NOT EXISTS idx_knowledge_source ON shared_knowledge(source);
-      CREATE INDEX IF NOT EXISTS idx_knowledge_confidence ON shared_knowledge(confidence);
-      CREATE INDEX IF NOT EXISTS idx_knowledge_tenant ON shared_knowledge(tenant_id);
-    `);
-
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_consensus_tenant ON consensus_history(tenant_id);
-    `);
-
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_artifacts_tenant ON project_artifacts(tenant_id);
-    `);
-
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_graph_lookup_key
-        ON graph_lookup_keys(tenant_id, lookup_key);
-      CREATE INDEX IF NOT EXISTS idx_graph_lookup_key_type
-        ON graph_lookup_keys(tenant_id, lookup_key, memory_type);
-      CREATE INDEX IF NOT EXISTS idx_graph_lookup_memory_id
-        ON graph_lookup_keys(tenant_id, memory_id);
-    `);
-  }
-
-  /**
-   * One-time migration: copy agent_registration and agent_identity rows
-   * from shared_memory into the canonical tables, then delete the originals.
-   */
-  private migrateAgentRegistrations(): void {
-    try {
-      // Migrate registrations
-      const regRows = this.db.prepare(
-        `SELECT id, tenant_id, content, created_by, created_at, updated_at
-         FROM shared_memory WHERE memory_type = 'agent_registration'`
-      ).all() as any[];
-
-      if (regRows.length > 0) {
-        const upsertReg = this.db.prepare(`
-          INSERT INTO agent_registrations (agent_id, tenant_id, name, capabilities_json, endpoint, metadata_json, status, registered_by, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
-          ON CONFLICT(agent_id, tenant_id) DO UPDATE SET
-            name = excluded.name,
-            capabilities_json = excluded.capabilities_json,
-            endpoint = excluded.endpoint,
-            metadata_json = excluded.metadata_json,
-            registered_by = excluded.registered_by,
-            updated_at = excluded.updated_at
-        `);
-        const deleteOld = this.db.prepare('DELETE FROM shared_memory WHERE id = ?');
-
-        const migrate = this.db.transaction(() => {
-          for (const row of regRows) {
-            try {
-              const data = JSON.parse(row.content);
-              upsertReg.run(
-                data.agentId || 'unknown',
-                row.tenant_id || 'default',
-                data.name || data.agentId || 'unknown',
-                JSON.stringify(data.capabilities || []),
-                data.endpoint || null,
-                JSON.stringify(data.metadata || {}),
-                row.created_by || data.metadata?.registeredBy || null,
-                row.created_at,
-                row.updated_at
-              );
-              deleteOld.run(row.id);
-            } catch (parseErr) {
-              console.warn(`⚠️ Skipping malformed agent_registration ${row.id}:`, parseErr);
-            }
-          }
-        });
-        migrate();
-        console.log(`📋 Migrated ${regRows.length} agent_registration rows to canonical table`);
-      }
-
-      // Migrate identity changes
-      const idRows = this.db.prepare(
-        `SELECT id, content, created_at
-         FROM shared_memory WHERE memory_type = 'agent_identity'`
-      ).all() as any[];
-
-      if (idRows.length > 0) {
-        const insertId = this.db.prepare(`
-          INSERT OR IGNORE INTO agent_identity_changes (id, previous_agent_id, updated_agent_id, updated_name, capabilities_json, metadata_json, updated_by, created_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-        const deleteOld = this.db.prepare('DELETE FROM shared_memory WHERE id = ?');
-
-        const migrate = this.db.transaction(() => {
-          for (const row of idRows) {
-            try {
-              const data = JSON.parse(row.content);
-              insertId.run(
-                row.id,
-                data.previousAgentId || '',
-                data.updatedAgentId || '',
-                data.updatedName || data.updatedAgentId || '',
-                JSON.stringify(data.capabilities || []),
-                JSON.stringify(data.metadata || {}),
-                data.updatedBy || null,
-                row.created_at
-              );
-              deleteOld.run(row.id);
-            } catch (parseErr) {
-              console.warn(`⚠️ Skipping malformed agent_identity ${row.id}:`, parseErr);
-            }
-          }
-        });
-        migrate();
-        console.log(`🪪 Migrated ${idRows.length} agent_identity rows to canonical table`);
-      }
-    } catch (err) {
-      // Non-fatal: shared_memory table may not exist yet on first run
-      console.warn('⚠️ Agent registration migration skipped:', err);
     }
   }
 
