@@ -238,6 +238,16 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
           type: 'boolean',
           description: 'Include canonical-agent rollups and aliases in addition to raw registrations',
           default: true,
+        },
+        limit: {
+          type: 'number',
+          description: 'Max raw registrations to return when listing all agents (server hard cap: 200). The canonical-agent rollup always covers ALL registrations regardless of this limit.',
+          default: 50,
+        },
+        offset: {
+          type: 'number',
+          description: 'Skip this many raw registrations for pagination (use nextOffset from a previous response).',
+          default: 0,
         }
       }
     }

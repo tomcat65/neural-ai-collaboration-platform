@@ -3196,6 +3196,8 @@ export class NeuralMCPServer {
 
         case 'get_agent_status': {
           const { agentId: targetAgentId, groupByCanonical = true } = args;
+          const statusLimit = Math.max(1, Math.min(Number(args.limit) || 50, 200));
+          const statusOffset = Math.max(0, Number(args.offset) || 0);
 
           let statusData;
           const db = this.memoryManager.getDb();
@@ -3231,6 +3233,16 @@ export class NeuralMCPServer {
               aliases: this.memoryManager.getAgentAliases(targetAgentId)
             };
           } else {
+            // All rows feed the canonical rollup (deduped, naturally bounded by
+            // distinct logical agents). The RAW agents list is the unbounded part
+            // — with 2,000+ ephemeral bridge registrations it was a ~1MB dump —
+            // so it is limit/offset paginated. Counts are reported so any
+            // truncation is explicit, never silent.
+            const totalRow = db.prepare(
+              `SELECT COUNT(*) c FROM agent_registrations WHERE tenant_id = ?`
+            ).get(tenantId) as { c: number };
+            const totalRegistrations = totalRow?.c ?? 0;
+
             const rows = db.prepare(
               `SELECT agent_id, name, capabilities_json, metadata_json, status, updated_at
                FROM agent_registrations
@@ -3238,7 +3250,8 @@ export class NeuralMCPServer {
                ORDER BY updated_at DESC`
             ).all(tenantId) as Array<{ agent_id: string; name: string; capabilities_json: string; metadata_json: string; status: string; updated_at: string }>;
 
-            const agents = rows.map(row => {
+            const pagedRows = rows.slice(statusOffset, statusOffset + statusLimit);
+            const agents = pagedRows.map(row => {
               const metadata = parseJson(row.metadata_json, {});
               return {
                 agentId: row.agent_id,
@@ -3248,6 +3261,7 @@ export class NeuralMCPServer {
                 lastSeen: row.updated_at
               };
             });
+            const nextOffset = statusOffset + statusLimit < rows.length ? statusOffset + statusLimit : null;
 
             const canonicalMap = new Map<string, any>();
             if (groupByCanonical) {
@@ -3282,13 +3296,23 @@ export class NeuralMCPServer {
               }
             }
 
+            // The canonical rollup can itself be large when ephemeral bridge IDs
+            // each infer to a distinct canonical agent. Cap it (most-recent first)
+            // and report the true total so the response stays bounded.
+            const allCanonical = groupByCanonical
+              ? Array.from(canonicalMap.values()).sort((a, b) => String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')))
+              : [];
+            const canonicalReturned = allCanonical.slice(0, statusLimit);
+
             statusData = {
-              totalAgents: agents.length,
+              totalRegistrations,
               totalCanonicalAgents: canonicalMap.size || undefined,
+              returnedRegistrations: agents.length,
+              returnedCanonicalAgents: groupByCanonical ? canonicalReturned.length : undefined,
+              offset: statusOffset,
+              nextOffset,
               agents,
-              canonicalAgents: groupByCanonical
-                ? Array.from(canonicalMap.values()).sort((a, b) => String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')))
-                : undefined
+              canonicalAgents: groupByCanonical ? canonicalReturned : undefined
             };
           }
 
