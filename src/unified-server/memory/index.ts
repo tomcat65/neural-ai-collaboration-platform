@@ -1545,6 +1545,15 @@ export class MemoryManager {
         });
 
         for (const wResult of vectorResults) {
+          // Propagate the vec0 distance so the caller can rank by semantic
+          // similarity. Without this the distance computed in rowToMemoryItem
+          // is dropped here, every semantic hit collapses to a flat score, and
+          // results fall back to arbitrary order (irrelevant rows float up).
+          const distance = (wResult.metadata && typeof (wResult.metadata as any).distance === 'number')
+            ? (wResult.metadata as any).distance
+            : undefined;
+          // vec0 default metric is L2; map to a bounded 0..1 similarity.
+          const semanticSimilarity = distance !== undefined ? 1 / (1 + distance) : undefined;
           results.push({
             id: wResult.id,
             type: 'shared',
@@ -1554,11 +1563,12 @@ export class MemoryManager {
               agentId: wResult.agentId,
               source: 'sqlite-vec'
             },
-            relevance: (wResult.priority || 5) / 10, // Convert back to 0-1 scale
+            relevance: semanticSimilarity ?? (wResult.priority || 5) / 10,
             source: `sqlite-vec:${wResult.agentId}`,
             timestamp: new Date(wResult.timestamp),
-            memoryType: wResult.type
-          });
+            memoryType: wResult.type,
+            ...(distance !== undefined ? { distance, semanticSimilarity } : {}),
+          } as SearchResult);
         }
       }
 
