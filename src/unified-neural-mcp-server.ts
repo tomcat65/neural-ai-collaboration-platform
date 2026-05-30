@@ -1781,11 +1781,21 @@ export class NeuralMCPServer {
             const lowerQuery = query.toLowerCase();
             const nameMatch = getEntityName(result)?.toLowerCase().includes(lowerQuery);
             const typeMatch = getDomainType(result)?.toLowerCase().includes(lowerQuery);
+            // Semantic similarity (0..1) propagated from the vec0 distance, if any.
+            // Previously this was dropped and every semantic hit got a flat 0.6,
+            // so results fell back to arbitrary order — irrelevant rows ranked
+            // above the bullseye. Use it to rank semantic hits in a band below
+            // exact matches (exact stays authoritative), so closer vectors win.
+            const semSim = typeof result.semanticSimilarity === 'number'
+              ? result.semanticSimilarity
+              : (typeof result.distance === 'number' ? 1 / (1 + result.distance) : null);
             const score = result.exactEntityMatch ? 1.1 :
                           result.exactObservationMatch ? 1.05 :
                           result.exactRelationMatch ? 1.0 :
                           nameMatch ? 1.0 :
-                          typeMatch ? 0.8 : 0.6;
+                          typeMatch ? 0.8 :
+                          semSim !== null ? 0.5 + 0.4 * semSim : // 0.5..0.9 band, distance-ranked
+                          0.6;
             const entry: any = {
               ...result,
               searchScore: score,
@@ -1795,7 +1805,7 @@ export class NeuralMCPServer {
               canonicalEntityName: getEntityName(result),
               memorySource: result.source?.startsWith('sqlite-vec:') ? 'sqlite-vec' :
                             result.source?.startsWith('weaviate:') ? 'sqlite-vec' : 'sqlite',
-              semanticSimilarity: null,
+              semanticSimilarity: semSim,
               matchedLookupKinds: parseMatchedLookupKinds(result.matchedLookupKinds),
               matchOrigins: Array.isArray(result.matchOrigins)
                 ? Array.from(new Set(result.matchOrigins.map((origin: any) => String(origin).trim()).filter(Boolean)))
@@ -2301,7 +2311,12 @@ export class NeuralMCPServer {
         case 'get_individual_memory': {
           const targetAgent = args.agentId || agent;
           const mem = this.memoryManager.getAgentMemory(targetAgent, tenantId);
-          return { content: [{ type: 'text', text: JSON.stringify(mem, null, 2) }] };
+          // getAgentMemory returns undefined when the agent has no snapshot.
+          // JSON.stringify(undefined) === undefined (not a string), which made
+          // content[0].text non-string and failed MCP response validation.
+          // Return a well-formed empty-state payload instead.
+          const payload = mem ?? { agentId: targetAgent, tenantId, found: false, preferences: {}, learnings: [], context: {} };
+          return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
         }
 
         // === SESSION PROTOCOL TOOLS ===
