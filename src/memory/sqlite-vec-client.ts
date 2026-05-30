@@ -116,7 +116,13 @@ export class SqliteVecClient {
     const priority = Number.isFinite(memory.priority) ? memory.priority : 5;
     const timestamp = Number.isFinite(memory.timestamp) ? memory.timestamp : Date.now();
     const embedding = await this.createEmbedding(content);
-    const embeddingJson = embedding ? JSON.stringify(embedding) : null;
+    // Store the JSON embedding copy ONLY in fallback mode. When the vec0
+    // extension is loaded, the binary vector in the vec0 table is the search
+    // path (searchWithVectors ranks by vec distance and never reads
+    // embedding_json), so persisting the JSON too is pure redundancy — it was
+    // ~71MB of the live DB. searchWithFallback is the only consumer of
+    // embedding_json, and it only runs when the extension is absent.
+    const embeddingJson = (!this.extensionLoaded && embedding) ? JSON.stringify(embedding) : null;
 
     const existing = this.db.prepare(
       `SELECT vector_rowid FROM ${this.indexTableName} WHERE memory_id = ?`
