@@ -5,11 +5,57 @@
  * touch only the better-sqlite3 handle, no instance state), each with a single
  * call site in initializeDatabase(), so they move out as plain functions.
  *
- * NOTE: the core CREATE TABLE DDL + the lazy ensure*Column guards remain in
- * MemoryManager for now — the latter are woven into runtime write paths and
- * are a separate (shimmed) extraction.
+ * NOTE: the core CREATE TABLE DDL remains in MemoryManager for now. The lazy
+ * ensure*Column guards live here as db-only helpers; MemoryManager keeps thin
+ * delegators that preserve per-instance "checked" memoization.
  */
 import type Database from 'better-sqlite3';
+
+/**
+ * Lazy column guards for ai_messages — idempotent ALTERs that add a column only
+ * if missing. Return true when the check completed (table exists), false when
+ * the table is not present yet, so callers can memoize only on success and
+ * retry on a fresh DB until the table is created.
+ */
+export function ensureReadAtColumn(db: Database.Database): boolean {
+  try {
+    const cols = db.prepare('PRAGMA table_info(ai_messages)').all() as any[];
+    if (!cols.some((c: any) => c.name === 'read_at')) {
+      db.prepare('ALTER TABLE ai_messages ADD COLUMN read_at TEXT').run();
+      console.log('📬 Added read_at column to ai_messages');
+    }
+    return true;
+  } catch {
+    return false; // table might not exist yet
+  }
+}
+
+export function ensureSummaryColumn(db: Database.Database): boolean {
+  try {
+    const cols = db.prepare('PRAGMA table_info(ai_messages)').all() as any[];
+    if (!cols.some((c: any) => c.name === 'summary')) {
+      db.prepare('ALTER TABLE ai_messages ADD COLUMN summary TEXT').run();
+      console.log('📋 Added summary column to ai_messages');
+    }
+    return true;
+  } catch {
+    return false; // table might not exist yet
+  }
+}
+
+export function ensureArchivedAtColumn(db: Database.Database): boolean {
+  try {
+    const cols = db.prepare('PRAGMA table_info(ai_messages)').all() as any[];
+    if (!cols.some((c: any) => c.name === 'archived_at')) {
+      db.prepare('ALTER TABLE ai_messages ADD COLUMN archived_at TEXT').run();
+      db.prepare('CREATE INDEX IF NOT EXISTS idx_ai_messages_archived ON ai_messages(archived_at)').run();
+      console.log('📦 Added archived_at column + index to ai_messages');
+    }
+    return true;
+  } catch {
+    return false; // table might not exist yet
+  }
+}
 
 /** Create secondary indexes. Run after migrations so referenced columns exist. */
 export function createIndexes(db: Database.Database): void {
