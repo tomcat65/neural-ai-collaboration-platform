@@ -1956,11 +1956,37 @@ export class NeuralMCPServer {
           // prepended so "read entity X" workflows land on canonical rows first.
           // For default/hybrid searches, deterministic graph matches are enough;
           // semantic search remains available through searchType:'semantic'.
-          const fallbackResults = exactAnchored
-            ? []
-            : await this.memoryManager.search(query, { shared: true }, tenantId, {
-                limit: Math.max(limit + offset, Math.min(250, (limit + offset) * 3)),
-              });
+          //
+          // This fallback runs ONLY when exact found nothing (exactAnchored=false),
+          // and it is the broad/semantic path that can hang on a cold embedding
+          // model or a huge result set. Cap it with a hard timeout so the request
+          // degrades to whatever exact rows we already have instead of hanging
+          // past the MCP request timeout (observed live).
+          let semanticDegraded = false;
+          let fallbackResults: any[] = [];
+          if (!exactAnchored) {
+            const SEMANTIC_TIMEOUT_MS = parseInt(process.env.SEARCH_SEMANTIC_TIMEOUT_MS || '4000', 10);
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              fallbackResults = await Promise.race([
+                this.memoryManager.search(query, { shared: true }, tenantId, {
+                  limit: Math.max(limit + offset, Math.min(250, (limit + offset) * 3)),
+                }),
+                new Promise<any[]>((_, reject) => {
+                  timer = setTimeout(
+                    () => reject(new Error(`broad search exceeded ${SEMANTIC_TIMEOUT_MS}ms`)),
+                    SEMANTIC_TIMEOUT_MS
+                  );
+                }),
+              ]);
+            } catch (err) {
+              semanticDegraded = true;
+              console.warn(`⚠️ Broad/semantic search degraded (returning exact matches only): ${err instanceof Error ? err.message : err}`);
+              fallbackResults = [];
+            } finally {
+              if (timer) clearTimeout(timer);
+            }
+          }
           const searchResults = [
             ...exactDirectResults,
             ...fallbackResults
@@ -2048,6 +2074,7 @@ export class NeuralMCPServer {
                   exactOnly,
                   exactAnchored,
                   semanticSkipped,
+                  semanticDegraded,
                   deduplicated: scoredResults.length !== dedupMap.size || redundantRepresentationCount > 0,
                   preDeduplicationCount: scoredResults.length,
                   preRepresentationDeduplicationCount,
