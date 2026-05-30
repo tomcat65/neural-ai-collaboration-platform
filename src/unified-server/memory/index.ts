@@ -34,6 +34,9 @@ import {
   createIndexes,
   migrateAddTenantColumn,
   migrateAgentRegistrations,
+  ensureReadAtColumn as ensureReadAtColumnImpl,
+  ensureSummaryColumn as ensureSummaryColumnImpl,
+  ensureArchivedAtColumn as ensureArchivedAtColumnImpl,
 } from './schema.js';
 import {
   setSystemConnected,
@@ -2717,34 +2720,14 @@ export class MemoryManager {
   private _readAtColumnChecked = false;
   private ensureReadAtColumn(): void {
     if (this._readAtColumnChecked) return;
-    try {
-      const cols = this.db.prepare("PRAGMA table_info(ai_messages)").all() as any[];
-      const hasReadAt = cols.some((c: any) => c.name === 'read_at');
-      if (!hasReadAt) {
-        this.db.prepare("ALTER TABLE ai_messages ADD COLUMN read_at TEXT").run();
-        console.log('📬 Added read_at column to ai_messages');
-      }
-      this._readAtColumnChecked = true;
-    } catch {
-      // Table might not exist yet — skip
-    }
+    if (ensureReadAtColumnImpl(this.db)) this._readAtColumnChecked = true;
   }
 
   // ─── Message Hygiene: summary column migration ───
   private _summaryColumnChecked = false;
   private ensureSummaryColumn(): void {
     if (this._summaryColumnChecked) return;
-    try {
-      const cols = this.db.prepare("PRAGMA table_info(ai_messages)").all() as any[];
-      const hasSummary = cols.some((c: any) => c.name === 'summary');
-      if (!hasSummary) {
-        this.db.prepare("ALTER TABLE ai_messages ADD COLUMN summary TEXT").run();
-        console.log('📋 Added summary column to ai_messages');
-      }
-      this._summaryColumnChecked = true;
-    } catch {
-      // Table might not exist yet — skip
-    }
+    if (ensureSummaryColumnImpl(this.db)) this._summaryColumnChecked = true;
   }
 
   /**
@@ -2763,18 +2746,7 @@ export class MemoryManager {
   private _archivedAtColumnChecked = false;
   private ensureArchivedAtColumn(): void {
     if (this._archivedAtColumnChecked) return;
-    try {
-      const cols = this.db.prepare("PRAGMA table_info(ai_messages)").all() as any[];
-      const hasArchivedAt = cols.some((c: any) => c.name === 'archived_at');
-      if (!hasArchivedAt) {
-        this.db.prepare("ALTER TABLE ai_messages ADD COLUMN archived_at TEXT").run();
-        this.db.prepare("CREATE INDEX IF NOT EXISTS idx_ai_messages_archived ON ai_messages(archived_at)").run();
-        console.log('📦 Added archived_at column + index to ai_messages');
-      }
-      this._archivedAtColumnChecked = true;
-    } catch {
-      // Table might not exist yet — skip
-    }
+    if (ensureArchivedAtColumnImpl(this.db)) this._archivedAtColumnChecked = true;
   }
 
   /**
