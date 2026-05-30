@@ -22,6 +22,7 @@ import {
   setTenantResolver,
   LocalTenantResolver,
   DEFAULT_REQUEST_CONTEXT,
+  checkAuthConfigured,
 } from './middleware/index.js';
 import type { RequestContext } from './middleware/index.js';
 import type { TenantRequest } from './middleware/index.js';
@@ -3768,6 +3769,15 @@ export class NeuralMCPServer {
 
 // Start server if this file is run directly
 if (import.meta.url === `file://${process.argv[1]}`) {
+  // Fail fast on a missing/malformed auth config. Prevents booting a server
+  // that looks healthy (/health is public) but rejects every authenticated
+  // request with AUTH_NOT_CONFIGURED and silently drops all MCP clients.
+  const authCheck = checkAuthConfigured();
+  if (!authCheck.ok) {
+    console.error(`❌ FATAL: ${authCheck.reason}`);
+    process.exit(1);
+  }
+
   const port = parseInt(process.env.NEURAL_MCP_PORT || '6174');
   // Optional DB path override (defaults to ./data/unified-platform.db). Lets an
   // isolated/test server run against a throwaway DB without touching prod data.

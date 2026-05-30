@@ -15,7 +15,8 @@ export {
   generateApiKey,
   isValidApiKeyFormat,
   getRateLimiterStatus,
-  setTenantResolver
+  setTenantResolver,
+  checkAuthConfigured
 } from './security.js';
 
 export type { TenantRequest } from './security.js';
