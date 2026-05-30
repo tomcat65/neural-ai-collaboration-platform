@@ -81,6 +81,29 @@ export class SqliteVecClient {
 
     this.initialized = true;
     console.log(`✅ sqlite-vec client initialized (${this.extensionLoaded ? 'vec0' : 'fallback'} mode)`);
+
+    // Warm the embedding model in the background. The transformer pipeline is
+    // loaded lazily on the first createEmbedding() call (dynamic import + model
+    // load), which can take several seconds — long enough for the FIRST semantic
+    // search to exceed the MCP request timeout (observed in live diagnostics).
+    // Kicking it off here (non-blocking) means the model is usually warm before
+    // any user query arrives, so semantic recall stops intermittently timing out.
+    void this.warmEmbeddingModel();
+  }
+
+  /** Pre-load the embedding pipeline so the first semantic query isn't a cold start. */
+  async warmEmbeddingModel(): Promise<void> {
+    if (this.transformerUnavailable) return;
+    const startedAt = Date.now();
+    try {
+      const pipeline = await this.getEmbeddingPipeline();
+      if (pipeline) {
+        await this.createEmbedding('warmup'); // resident weights, not just an import
+        console.log(`✅ embedding model warmed in ${Date.now() - startedAt}ms`);
+      }
+    } catch (error: any) {
+      console.warn(`⚠️ embedding model warmup failed (non-fatal): ${error?.message || error}`);
+    }
   }
 
   async storeMemory(memory: MemoryItem): Promise<string> {
