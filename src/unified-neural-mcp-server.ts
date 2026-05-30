@@ -714,15 +714,58 @@ export class NeuralMCPServer {
     });
 
     // ─── Data Management API ─────────────────────────────────────
+    // Feature gate: these endpoints are disabled unless ENABLE_DATA_MANAGEMENT=1,
+    // and then require data:read (GET) or data:write (mutating) scope — or
+    // admin/owner (JWT), or the local single-key operator. This single gate
+    // replaces the per-endpoint authorizeGraphRead checks, which let destructive
+    // ops (import / snapshots / restore) through on a read-level check and left
+    // several snapshot/backup endpoints with no scope check at all.
+    const isDataManagementEnabled = () => process.env.ENABLE_DATA_MANAGEMENT === '1';
+    const authorizeDataManagement = (
+      context: RequestContext,
+      access: 'read' | 'write'
+    ): { authorized: boolean; reason?: string } => {
+      if (context.authType === 'dev') return { authorized: true };
+      if (context.authType === 'jwt') {
+        if (context.roles.includes('admin') || context.roles.includes('owner')) return { authorized: true };
+        return { authorized: false, reason: 'Data management requires admin or owner role' };
+      }
+      if (context.authType === 'api_key') {
+        const scopes = context.scopes || [];
+        const hasAdminScope = scopes.includes('*') || scopes.includes('data:admin');
+        const hasRequestedScope = access === 'read'
+          ? scopes.includes('data:read') || scopes.includes('data:write')
+          : scopes.includes('data:write');
+        if (hasAdminScope || hasRequestedScope) return { authorized: true };
+        // Local single API_KEY path: no persisted apiKeyId/scopes — allowed only
+        // because the operator explicitly enabled this surface via env.
+        if (!context.apiKeyId && scopes.length === 0) return { authorized: true };
+        return { authorized: false, reason: `Data management requires data:${access} scope` };
+      }
+      return { authorized: false, reason: 'Unknown auth type' };
+    };
+    this.app.use('/api/data', (req, res, next) => {
+      if (!isDataManagementEnabled()) {
+        res.status(403).json({
+          error: 'Forbidden',
+          message: 'Data management endpoints are disabled. Set ENABLE_DATA_MANAGEMENT=1 to enable.',
+          code: 'DATA_MANAGEMENT_DISABLED',
+        });
+        return;
+      }
+      const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+      const access: 'read' | 'write' = req.method === 'GET' ? 'read' : 'write';
+      const verdict = authorizeDataManagement(context, access);
+      if (!verdict.authorized) {
+        res.status(403).json({ error: 'Forbidden', message: verdict.reason, code: 'DATA_MANAGEMENT_FORBIDDEN' });
+        return;
+      }
+      next();
+    });
 
     this.app.get('/api/data/entity-prefixes', async (req, res) => {
       try {
         const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
-        const authResult = this.memoryManager.authorizeGraphRead(context);
-        if (!authResult.authorized) {
-          res.status(403).json({ error: 'Forbidden', message: authResult.reason });
-          return;
-        }
         const prefixes = this.memoryManager.listEntityPrefixes(context.tenantId);
         res.json({ prefixes });
       } catch (error: any) {
@@ -734,12 +777,6 @@ export class NeuralMCPServer {
     this.app.get('/api/data/export', async (req, res) => {
       try {
         const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
-        const authResult = this.memoryManager.authorizeGraphRead(context);
-        if (!authResult.authorized) {
-          res.status(403).json({ error: 'Forbidden', message: authResult.reason });
-          return;
-        }
-
         const namePrefix = req.query.namePrefix as string | undefined;
         const entityNamesRaw = req.query.entityNames as string | undefined;
         const entityNames = entityNamesRaw ? entityNamesRaw.split(',').map(n => n.trim()) : undefined;
@@ -780,12 +817,6 @@ export class NeuralMCPServer {
     this.app.post('/api/data/import', async (req, res) => {
       try {
         const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
-        const authResult = this.memoryManager.authorizeGraphRead(context);
-        if (!authResult.authorized) {
-          res.status(403).json({ error: 'Forbidden', message: authResult.reason });
-          return;
-        }
-
         const backup = req.body;
         if (!backup || !backup.schemaVersion) {
           res.status(400).json({ error: 'Invalid backup payload: missing schemaVersion' });
@@ -809,12 +840,6 @@ export class NeuralMCPServer {
     this.app.delete('/api/data/retire', async (req, res) => {
       try {
         const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
-        const authResult = this.memoryManager.authorizeGraphRead(context);
-        if (!authResult.authorized) {
-          res.status(403).json({ error: 'Forbidden', message: authResult.reason });
-          return;
-        }
-
         const { entityNames, backupFirst, reason } = req.body;
         if (!entityNames || !Array.isArray(entityNames) || entityNames.length === 0) {
           res.status(400).json({ error: 'entityNames array is required' });
