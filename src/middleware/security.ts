@@ -108,6 +108,34 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+/**
+ * Startup guard: verify the server has a usable auth configuration.
+ *
+ * Without this, a boot with no API_KEY (e.g. `docker compose up` that didn't
+ * export API_KEY from .env) starts a server that reports /health = healthy but
+ * rejects EVERY authenticated request with AUTH_NOT_CONFIGURED — a healthy
+ * container running a dead service, with all MCP clients silently dropped.
+ * Failing fast here turns that latent footgun into a loud, immediate crash.
+ *
+ * Returns { ok } so callers can decide to throw/exit; mirrors the exact
+ * condition authMiddleware uses (single-key mode requires API_KEY).
+ */
+export function checkAuthConfigured(): { ok: boolean; reason?: string } {
+  if (MULTI_TENANT_ENABLED) return { ok: true }; // JWT/tenant mode validates per-request
+  const serverApiKey = process.env.API_KEY || process.env.NEURAL_API_KEY;
+  if (!serverApiKey || serverApiKey.trim().length === 0) {
+    return {
+      ok: false,
+      reason: 'No API_KEY configured. Set API_KEY (or NEURAL_API_KEY), or enable MULTI_TENANT_ENABLED=true. '
+        + 'In Docker, export API_KEY from .env before compose (see ~/bin/neural-unified-up) or add env_file to the compose service.',
+    };
+  }
+  if (!isValidApiKeyFormat(serverApiKey)) {
+    return { ok: false, reason: 'API_KEY is set but malformed (needs 32+ printable chars, no whitespace/control).' };
+  }
+  return { ok: true };
+}
+
 const DEFAULT_CONFIG: SecurityConfig = {
   apiKeyHeader: 'x-api-key',
   apiKeyQueryParam: 'api_key',
