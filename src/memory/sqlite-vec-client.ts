@@ -360,16 +360,27 @@ export class SqliteVecClient {
     options: { query: string; agentId?: string; memoryType?: string; tenantId: string; limit: number },
     queryEmbedding: number[]
   ): IndexRow[] {
+    // vec0 KNN requires the `k = ?` constraint inside the MATCH query itself
+    // (a trailing LIMIT throws "A LIMIT or 'k = ?' constraint is required").
+    // Do the KNN as a standalone CTE against the vec0 table, then JOIN back to
+    // the index table for tenant/type/agent filtering. Because filters apply
+    // AFTER knn, over-fetch k so post-filtering still returns enough rows.
+    const overfetch = Math.min(500, Math.max(options.limit * 5, 50));
     let sql = `
+      WITH knn AS (
+        SELECT rowid, distance
+        FROM ${this.vectorTableName}
+        WHERE embedding MATCH ? AND k = ?
+      )
       SELECT
         m.memory_id, m.agent_id, m.tenant_id, m.memory_type, m.content, m.timestamp_ms,
-        m.tags_json, m.priority, m.relationships_json, m.embedding_json, v.distance
-      FROM ${this.indexTableName} m
-      JOIN ${this.vectorTableName} v ON v.rowid = m.vector_rowid
+        m.tags_json, m.priority, m.relationships_json, m.embedding_json, knn.distance
+      FROM knn
+      JOIN ${this.indexTableName} m ON m.vector_rowid = knn.rowid
       WHERE m.tenant_id = ?
     `;
 
-    const params: Array<string | number> = [options.tenantId];
+    const params: Array<string | number> = [JSON.stringify(queryEmbedding), overfetch, options.tenantId];
 
     if (options.agentId) {
       sql += ' AND m.agent_id = ?';
@@ -381,8 +392,8 @@ export class SqliteVecClient {
       params.push(options.memoryType);
     }
 
-    sql += ' AND v.embedding MATCH ? ORDER BY distance ASC LIMIT ?';
-    params.push(JSON.stringify(queryEmbedding), options.limit);
+    sql += ' ORDER BY knn.distance ASC LIMIT ?';
+    params.push(options.limit);
 
     return this.db.prepare(sql).all(...params) as IndexRow[];
   }

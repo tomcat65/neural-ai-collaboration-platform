@@ -247,6 +247,10 @@ export interface SearchResult {
   contentSize?: number;
   totalChunks?: number;
   chunkSize?: number;
+  /** Raw vec0 distance for semantic hits (lower = closer). */
+  distance?: number;
+  /** Bounded 0..1 semantic similarity derived from distance. */
+  semanticSimilarity?: number;
 }
 
 export interface MemoryUpdate {
