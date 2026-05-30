@@ -17,10 +17,12 @@ services:
     container_name: neural-ai-vue-dashboard
     ports:
       - "5176:5176"
+    # API_KEY comes from .env via env_file. The dashboard's entrypoint resolves
+    # ${NEURAL_API_KEY:-${API_KEY:-}}, so it picks up API_KEY automatically.
+    # (Previously `NEURAL_API_KEY=${API_KEY}` here resolved to "" whenever the
+    # shell var wasn't exported, masking the working fallback — removed.)
     env_file:
       - ../.env
-    environment:
-      - NEURAL_API_KEY=${API_KEY}
     depends_on:
       unified-neural-mcp:
         condition: service_healthy

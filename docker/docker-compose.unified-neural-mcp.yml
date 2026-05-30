@@ -7,11 +7,18 @@ services:
     ports:
       - "6174:6174"  # Unified Neural MCP Server
       - "3004:3004"  # Message Hub WebSocket
+    # Load secrets/config from the project-root .env regardless of the shell's
+    # exported vars or the directory compose is invoked from. This is the source
+    # of truth for API_KEY — do NOT also list API_KEY under `environment:` below,
+    # because `environment:` overrides `env_file:` and an empty shell ${API_KEY}
+    # would blank it (the empty-key footgun). Pair with the startup fail-fast
+    # guard (checkAuthConfigured): a missing key now crashes loudly.
+    env_file:
+      - ../.env
     environment:
       - NEURAL_MCP_PORT=6174
       - MESSAGE_HUB_PORT=3004
       - NODE_ENV=production
-      - API_KEY=${API_KEY}
       - ENABLE_ADVANCED_MEMORY=true
       - ENABLE_CROSS_PLATFORM=true
       - SQLITE_VEC_CACHE_DIR=/app/data/models
