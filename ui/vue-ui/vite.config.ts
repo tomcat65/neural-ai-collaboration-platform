@@ -44,6 +44,12 @@ export default defineConfig(({ mode }) => {
           }
         }
       }
+    },
+    // Vitest config (jsdom env for the Pinia store parsing tests).
+    test: {
+      globals: true,
+      environment: 'jsdom',
+      include: ['src/**/*.{test,spec}.ts']
     }
   }
 })

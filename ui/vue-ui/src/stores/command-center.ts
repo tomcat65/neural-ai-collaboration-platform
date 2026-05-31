@@ -631,5 +631,8 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     setFilter,
     setActiveProject,
     clearFilter,
+    // Exposed for focused parsing tests (see command-center.spec.ts).
+    fetchAgents,
+    fetchAnalytics,
   }
 })
