@@ -126,4 +126,35 @@ describe('Message Lifecycle (Task 1200)', () => {
       expect(result.totalMessages).toBeGreaterThanOrEqual(3);
     });
   });
+
+  describe('archive_messages by messageIds (Engram comms surface)', () => {
+    const idAgent = `archive_id_test_${Date.now()}`;
+    const idSender = `sender_${Date.now()}_byid`;
+    let ids: string[] = [];
+
+    beforeAll(async () => {
+      for (let i = 0; i < 2; i++) {
+        await mcpCall('send_ai_message', {
+          from: idSender, to: idAgent, content: `archive-by-id msg ${i}`, messageType: 'info',
+        });
+      }
+      const res = await mcpCall('get_ai_messages', { agentId: idAgent, unreadOnly: false, limit: 10 });
+      ids = (res.messages || []).map((m: any) => m.id);
+    });
+
+    it('archives a specific message by id (scope=specific), leaving the rest', async () => {
+      expect(ids.length).toBeGreaterThanOrEqual(2);
+      const target = ids[0];
+      const result = await mcpCall('archive_messages', { agentId: idAgent, messageIds: [target] });
+      expect(result.status).toBe('ok');
+      expect(result.scope).toBe('specific');
+      expect(result.archived).toBe(1);
+
+      // The targeted message is archived (excluded by default); the rest remain.
+      const after = await mcpCall('get_ai_messages', { agentId: idAgent, unreadOnly: false, limit: 10 });
+      const remainingIds = (after.messages || []).map((m: any) => m.id);
+      expect(remainingIds).not.toContain(target);
+      expect(remainingIds.length).toBe(ids.length - 1);
+    });
+  });
 });
