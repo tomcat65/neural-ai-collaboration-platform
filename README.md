@@ -75,7 +75,7 @@ so rebuilds never touch your DB. Back up before migrations (consistent online
 
 ## MCP Tools
 
-`tools/list` advertises **25 tools**. The authoritative, always-current reference is
+`tools/list` advertises **29 tools**. The authoritative, always-current reference is
 **[docs/TOOLS_SCHEMA.md](docs/TOOLS_SCHEMA.md)** (regenerate with `npm run docs:tools`
 from `src/shared/toolSchemas.ts`). Summary:
 
@@ -86,11 +86,12 @@ from `src/shared/toolSchemas.ts`). Summary:
   `mark_messages_read`, `archive_messages`
 - **Agent management:** `register_agent`, `set_agent_identity`, `get_agent_status`
 - **Session / context:** `get_agent_context`, `begin_session`, `end_session`
-- **Identity (Pass-2, optional):** `inspect_identity_candidates`, `get_entity_context`
+- **Identity (Pass-2, optional):** `inspect_identity_candidates`, `get_entity_context`,
+  `execute_pass2_phase_c`
+- **Individual memory:** `record_learning`, `set_preferences`, `get_individual_memory`
 - **User profile:** `get_user_profile`, `update_user_profile`
-- **Also callable via case-handler (not in `tools/list`):** `record_learning`,
-  `set_preferences`, `get_individual_memory`, `translate_path`, `search_nodes`
-  (deprecated alias for `search_entities` graph mode)
+- **Also callable via case-handler (not in `tools/list`):** `translate_path`,
+  `search_nodes` (deprecated alias for `search_entities` graph mode)
 
 ### List tools
 ```bash

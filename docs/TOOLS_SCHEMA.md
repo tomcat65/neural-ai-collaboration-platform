@@ -1246,3 +1246,78 @@ Parameters
 }
 ```
 
+### record_learning
+Record a learning entry into an agent's individual memory
+
+Parameters
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "agentId": {
+      "type": "string",
+      "description": "Target agent ID (defaults to caller)"
+    },
+    "context": {
+      "type": "string",
+      "description": "Context where the learning occurred"
+    },
+    "lesson": {
+      "type": "string",
+      "description": "What was learned"
+    },
+    "confidence": {
+      "type": "number",
+      "description": "Confidence level 0-1",
+      "default": 0.8
+    }
+  },
+  "required": [
+    "context",
+    "lesson"
+  ]
+}
+```
+
+### set_preferences
+Update agent preferences in individual memory
+
+Parameters
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "agentId": {
+      "type": "string",
+      "description": "Target agent ID (defaults to caller)"
+    },
+    "preferences": {
+      "type": "object",
+      "description": "Partial preferences object to merge"
+    }
+  },
+  "required": [
+    "preferences"
+  ]
+}
+```
+
+### get_individual_memory
+Retrieve an agent's individual memory snapshot
+
+Parameters
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "agentId": {
+      "type": "string",
+      "description": "Agent ID (defaults to caller)"
+    }
+  }
+}
+```
+

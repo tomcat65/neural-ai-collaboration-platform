@@ -1,5 +1,13 @@
 # Multi-Tenant Isolation & Quotas Design
 
+> ⚠️ **HISTORICAL DESIGN — NOT IMPLEMENTED / NOT CURRENT ARCHITECTURE.**
+> Multi-tenancy — and the Auth0/JWT/RBAC, tenant quotas, Redis rate-limiting, and
+> Weaviate/Neo4j stores this document assumes — was **cut** in the Engram re-scope to a
+> personal, single-user, local-first memory server (SQLite + `sqlite-vec`, bound to
+> localhost, near-zero auth). This file is retained only as a record of the abandoned
+> multi-tenant design; it does **not** describe how the server works today. See
+> [README.md](../README.md) for the current architecture.
+
 ## Phase 4.6: Design Document
 
 ### Overview
