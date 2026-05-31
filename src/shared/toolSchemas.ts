@@ -681,6 +681,42 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
       required: ['entityName'],
     },
   },
+  record_learning: {
+    name: 'record_learning',
+    description: 'Record a learning entry into an agent\'s individual memory',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'Target agent ID (defaults to caller)' },
+        context: { type: 'string', description: 'Context where the learning occurred' },
+        lesson: { type: 'string', description: 'What was learned' },
+        confidence: { type: 'number', description: 'Confidence level 0-1', default: 0.8 },
+      },
+      required: ['context', 'lesson'],
+    },
+  },
+  set_preferences: {
+    name: 'set_preferences',
+    description: 'Update agent preferences in individual memory',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'Target agent ID (defaults to caller)' },
+        preferences: { type: 'object', description: 'Partial preferences object to merge' },
+      },
+      required: ['preferences'],
+    },
+  },
+  get_individual_memory: {
+    name: 'get_individual_memory',
+    description: 'Retrieve an agent\'s individual memory snapshot',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'Agent ID (defaults to caller)' },
+      },
+    },
+  },
 };
 
 export const getUnifiedToolDefinitions = (...names: (keyof typeof UnifiedToolSchemas)[]): ToolDefinition[] => {

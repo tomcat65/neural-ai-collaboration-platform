@@ -12,13 +12,9 @@ const checks: { file: string; requiredSnippets: string[] }[] = [
       'inputSchema: UnifiedToolSchemas.get_agent_status.inputSchema',
     ],
   },
-  {
-    file: 'src/mcp-http-server.ts',
-    requiredSnippets: [
-      'import { UnifiedToolSchemas } from',
-      'inputSchema: UnifiedToolSchemas.send_ai_message.inputSchema',
-    ],
-  },
+  // NOTE: src/mcp-http-server.ts was consolidated into the unified server
+  // (commit 1d5f38c, "Server consolidation"); the unified server above is now
+  // the sole HTTP MCP entrypoint, so there is no separate file to check here.
 ];
 
 let ok = true;

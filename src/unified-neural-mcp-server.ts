@@ -1595,40 +1595,19 @@ export class NeuralMCPServer {
 
         // === INDIVIDUAL MEMORY ===
         {
-          name: 'record_learning',
-          description: 'Record a learning entry into an agent\'s individual memory',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              agentId: { type: 'string', description: 'Target agent ID (defaults to caller)' },
-              context: { type: 'string', description: 'Context where the learning occurred' },
-              lesson: { type: 'string', description: 'What was learned' },
-              confidence: { type: 'number', description: 'Confidence level 0-1', default: 0.8 }
-            },
-            required: ['context', 'lesson']
-          }
+          name: UnifiedToolSchemas.record_learning.name,
+          description: UnifiedToolSchemas.record_learning.description,
+          inputSchema: UnifiedToolSchemas.record_learning.inputSchema
         },
         {
-          name: 'set_preferences',
-          description: 'Update agent preferences in individual memory',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              agentId: { type: 'string', description: 'Target agent ID (defaults to caller)' },
-              preferences: { type: 'object', description: 'Partial preferences object to merge' }
-            },
-            required: ['preferences']
-          }
+          name: UnifiedToolSchemas.set_preferences.name,
+          description: UnifiedToolSchemas.set_preferences.description,
+          inputSchema: UnifiedToolSchemas.set_preferences.inputSchema
         },
         {
-          name: 'get_individual_memory',
-          description: 'Retrieve an agent\'s individual memory snapshot',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              agentId: { type: 'string', description: 'Agent ID (defaults to caller)' }
-            }
-          }
+          name: UnifiedToolSchemas.get_individual_memory.name,
+          description: UnifiedToolSchemas.get_individual_memory.description,
+          inputSchema: UnifiedToolSchemas.get_individual_memory.inputSchema
         }
       ]
     };
