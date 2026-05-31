@@ -127,8 +127,11 @@ describe('search_entities Dedup (Task 1300)', () => {
       return name && name.toLowerCase() === dedupEntityName.toLowerCase();
     });
 
-    // The surviving entry should have a name match score of 1.0
+    // The surviving entry should be the highest-scoring representation. An
+    // exact entity-name match scores 1.1 (exactEntityMatch tier); a plain name
+    // match is 1.0. Assert the dedup kept a top-tier match (>= 1.0), not a
+    // brittle exact 1.0 that predates the exactEntityMatch scoring tier.
     expect(matching.length).toBe(1);
-    expect(matching[0].searchScore).toBe(1.0);
+    expect(matching[0].searchScore).toBeGreaterThanOrEqual(1.0);
   });
 });

@@ -113,9 +113,14 @@ describe('Message Lifecycle (Task 1200)', () => {
     });
 
     it('get_ai_messages includes archived when includeArchived=true', async () => {
+      // By this point the messages have been marked read (earlier test) AND
+      // archived. get_ai_messages defaults to unreadOnly:true, so we must pass
+      // unreadOnly:false to retrieve read+archived messages. (Verified: with
+      // unreadOnly defaulting true this returns 0; with false it returns them.)
       const result = await mcpCall('get_ai_messages', {
         agentId: testAgent,
         includeArchived: true,
+        unreadOnly: false,
       });
       // Should see the archived messages
       expect(result.totalMessages).toBeGreaterThanOrEqual(3);
