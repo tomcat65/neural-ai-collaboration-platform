@@ -1690,6 +1690,28 @@ export class NeuralMCPServer {
           const exactSearch = normalizedSearchType === 'exact';
           const semanticSearch = normalizedSearchType === 'semantic';
 
+          // Recall-quality type weighting. The searchable corpus is ~85% chat
+          // messages + raw observations vs ~10% curated entities, so raw vector
+          // distance buries entities: an eval over 10 representative queries
+          // found an entity in the top-5 only 4/10 times (none in top-10 for
+          // 6/10). Weight the semantic similarity by source type so curated
+          // knowledge surfaces above equally-similar chatter, and plumbing rows
+          // (registrations/preferences/identity) are pushed down. Conservative
+          // by design (a nudge, not a veto) and env-tunable.
+          const typeWeight = (mt: string | undefined): number => {
+            switch (mt) {
+              case 'entity': return parseFloat(process.env.RECALL_W_ENTITY || '1.0');
+              case 'observation': return parseFloat(process.env.RECALL_W_OBSERVATION || '0.95');
+              case 'relation': return parseFloat(process.env.RECALL_W_RELATION || '0.9');
+              case 'learning': return parseFloat(process.env.RECALL_W_LEARNING || '0.85');
+              case 'ai_message': return parseFloat(process.env.RECALL_W_MESSAGE || '0.8');
+              case 'agent_registration':
+              case 'agent_identity':
+              case 'preferences': return parseFloat(process.env.RECALL_W_PLUMBING || '0.3');
+              default: return 0.8;
+            }
+          };
+
           const parseOriginalContent = (content: any): any | null => {
             if (!content?.original || typeof content.original !== 'string') return null;
             try {
@@ -1789,12 +1811,17 @@ export class NeuralMCPServer {
             const semSim = typeof result.semanticSimilarity === 'number'
               ? result.semanticSimilarity
               : (typeof result.distance === 'number' ? 1 / (1 + result.distance) : null);
+            // Apply type weighting to the semantic band so curated entities/
+            // observations outrank equally-similar chat messages and plumbing.
+            const weightedSemSim = semSim !== null
+              ? semSim * typeWeight(getStorageMemoryType(result))
+              : null;
             const score = result.exactEntityMatch ? 1.1 :
                           result.exactObservationMatch ? 1.05 :
                           result.exactRelationMatch ? 1.0 :
                           nameMatch ? 1.0 :
                           typeMatch ? 0.8 :
-                          semSim !== null ? 0.5 + 0.4 * semSim : // 0.5..0.9 band, distance-ranked
+                          weightedSemSim !== null ? 0.5 + 0.4 * weightedSemSim : // 0.5..0.9 band, type-weighted
                           0.6;
             const entry: any = {
               ...result,
