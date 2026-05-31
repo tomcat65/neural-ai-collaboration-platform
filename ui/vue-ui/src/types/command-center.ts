@@ -2,19 +2,32 @@
 
 export interface AgentStatusResponse {
   agents: ApiAgent[]
+  // New canonical contract (Engram dashboard adaptation, server PR #18). Older
+  // payloads omit these; the store falls back when they're absent.
+  totalRegistrations?: number
+  totalCanonicalAgents?: number
+  returnedCanonicalAgents?: number
+  raw?: boolean
 }
 
 export type AgentStatus = 'active' | 'idle' | 'offline'
 
 export interface ApiAgent {
-  agentId: string
-  name: string
-  type: string
+  // Canonical contract fields (preferred). canonicalAgentId is the deduped
+  // logical-agent id; isEphemeral flags per-process bridge registrations the
+  // server now identifies (so the client no longer guesses from id prefixes).
+  canonicalAgentId?: string
+  displayName?: string
+  isEphemeral?: boolean
+  // Legacy fields (kept for back-compat with older server payloads).
+  agentId?: string
+  name?: string
+  type?: string
   // Backward-compat: older backends may still emit 'online'
   status: AgentStatus | 'online'
   eventsCount: number
-  successRate: number
-  averageResponseTime: number
+  successRate?: number
+  averageResponseTime?: number
   lastSeen: string
   capabilities: string[]
 }
@@ -41,6 +54,11 @@ export interface AnalyticsResponse {
     entityCount: number
     relationCount: number
     observationCount: number
+    // Real DB size from SQLite PRAGMA (server PR #18). null if unavailable →
+    // client falls back to the legacy estimate.
+    actualDbBytes?: number | null
+    dbSizeSource?: string | null
+    dbSizeAt?: string | null
   }
   trends: {
     labels: string[]
