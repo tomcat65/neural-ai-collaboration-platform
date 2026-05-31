@@ -95,4 +95,34 @@ describe('Dashboard API contract', () => {
     expect(o.dbSizeSource).toBe('pragma');
     expect(typeof o.dbSizeAt).toBe('string');
   });
+
+  it('/api/recent-events exposes read/archived state + per-agent unread counts', async () => {
+    const db = server.getMemoryManager().getDb();
+    const ins = db.prepare(`
+      INSERT INTO ai_messages
+        (id, from_agent, from_source, to_agent, content, message_type, tenant_id, created_at, read_at, archived_at)
+      VALUES (?, ?, 'test', ?, ?, 'info', 'default', ?, ?, ?)
+    `);
+    const t = (n: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, n)).toISOString();
+    // unread: read_at null, archived_at null
+    ins.run('m-unread', 'codex-desktop', 'claude-engram', 'hi unread', t(1), null, null);
+    // read: read_at set
+    ins.run('m-read', 'codex-desktop', 'claude-engram', 'hi read', t(2), t(3), null);
+    // archived: archived_at set
+    ins.run('m-archived', 'codex-desktop', 'claude-engram', 'hi archived', t(4), null, t(5));
+
+    const body = await getJson('/api/recent-events');
+    expect(Array.isArray(body.messages)).toBe(true);
+    const byId: Record<string, any> = Object.fromEntries(body.messages.map((m: any) => [m.id, m]));
+
+    // Every message carries the lifecycle columns (null when unset).
+    expect(byId['m-unread']).toHaveProperty('read_at');
+    expect(byId['m-unread']).toHaveProperty('archived_at');
+    expect(byId['m-unread'].read_at).toBeNull();
+    expect(byId['m-read'].read_at).not.toBeNull();
+    expect(byId['m-archived'].archived_at).not.toBeNull();
+
+    // Per-recipient unread = not read AND not archived => only m-unread.
+    expect(body.unreadByAgent['claude-engram']).toBe(1);
+  });
 });

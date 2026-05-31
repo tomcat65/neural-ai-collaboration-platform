@@ -1132,27 +1132,40 @@ export class NeuralMCPServer {
         const db = this.memoryManager.getDb();
 
         let messages: any[] = [];
+        const unreadByAgent: Record<string, number> = {};
         try {
+          // read_at IS NULL => unread; archived_at IS NULL => not archived. The
+          // dashboard derives isRead/isArchived from these (Engram comms surface).
+          const cols = 'id, from_agent, to_agent, content, message_type, created_at, read_at, archived_at';
           if (since) {
             messages = db.prepare(
-              `SELECT id, from_agent, to_agent, content, message_type, created_at
+              `SELECT ${cols}
                FROM ai_messages
                WHERE tenant_id = ? AND created_at > ?
                ORDER BY created_at DESC LIMIT ?`
             ).all(tenantId, since, limit) as any[];
           } else {
             messages = db.prepare(
-              `SELECT id, from_agent, to_agent, content, message_type, created_at
+              `SELECT ${cols}
                FROM ai_messages
                WHERE tenant_id = ?
                ORDER BY created_at DESC LIMIT ?`
             ).all(tenantId, limit) as any[];
           }
+          // Per-recipient unread counts across the whole tenant (not just the
+          // returned page), so the inbox badge stays accurate past the limit.
+          const unreadRows = db.prepare(
+            `SELECT to_agent, COUNT(*) as cnt
+             FROM ai_messages
+             WHERE tenant_id = ? AND read_at IS NULL AND archived_at IS NULL
+             GROUP BY to_agent`
+          ).all(tenantId) as any[];
+          for (const r of unreadRows) unreadByAgent[r.to_agent] = r.cnt;
         } catch {
           // ai_messages may not exist
         }
 
-        res.json({ messages });
+        res.json({ messages, unreadByAgent });
       } catch (error: any) {
         console.error('Dashboard recent-events error:', error);
         res.status(500).json({ error: error.message || 'Failed to get recent events' });
