@@ -143,7 +143,10 @@ describe('Trusted Provenance (Phase B)', () => {
         content: 'prov retrieval test',
       });
 
-      const messages = await mcpCall('get_ai_messages', { agentId: receiver });
+      // get_ai_messages defaults to compact:true, which returns a `summary`
+      // (not full content.content) — full text lives in get_message_detail.
+      // Request compact:false to assert on the full content here.
+      const messages = await mcpCall('get_ai_messages', { agentId: receiver, compact: false });
       expect(messages.messages.length).toBeGreaterThanOrEqual(1);
       // Messages have nested content: messages[i].content.content
       expect(messages.messages[0].content.content).toBe('prov retrieval test');
