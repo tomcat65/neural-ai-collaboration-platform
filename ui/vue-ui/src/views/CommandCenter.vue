@@ -145,7 +145,7 @@ onUnmounted(() => {
   <div class="command-center">
     <!-- Topbar -->
     <header class="cc-topbar">
-      <h1 class="topbar-title">NEURAL COMMAND CENTER</h1>
+      <h1 class="topbar-title">ENGRAM COMMAND CENTER</h1>
       <span v-if="store.activeProject" class="project-scope">&#x1F4C1; {{ store.activeProject }}</span>
       <div class="topbar-right">
         <!-- Font size controls -->

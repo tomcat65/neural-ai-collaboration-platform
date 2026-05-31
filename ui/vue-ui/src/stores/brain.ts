@@ -22,7 +22,7 @@ export interface Observation {
 }
 
 const MOCK_NODES: GraphNode[] = [
-  { name: 'neural-mcp', entityType: 'project', observationCount: 12, id: '1', createdAt: '2026-01-15T10:00:00Z' },
+  { name: 'engram', entityType: 'project', observationCount: 12, id: '1', createdAt: '2026-01-15T10:00:00Z' },
   { name: 'tommy', entityType: 'person', observationCount: 8, id: '2', createdAt: '2026-01-15T10:01:00Z' },
   { name: 'claude-code', entityType: 'tool', observationCount: 15, id: '3', createdAt: '2026-01-15T10:02:00Z' },
   { name: 'brain-viz', entityType: 'feature', observationCount: 6, id: '4', createdAt: '2026-01-20T09:00:00Z' },
@@ -35,11 +35,11 @@ const MOCK_NODES: GraphNode[] = [
 ]
 
 const MOCK_LINKS: GraphLink[] = [
-  { source: 'tommy', target: 'neural-mcp', relationType: 'owns' },
-  { source: 'claude-code', target: 'neural-mcp', relationType: 'contributes_to' },
-  { source: 'brain-viz', target: 'neural-mcp', relationType: 'part_of' },
+  { source: 'tommy', target: 'engram', relationType: 'owns' },
+  { source: 'claude-code', target: 'engram', relationType: 'contributes_to' },
+  { source: 'brain-viz', target: 'engram', relationType: 'part_of' },
   { source: 'knowledge-graph', target: 'brain-viz', relationType: 'enables' },
-  { source: 'spectra', target: 'neural-mcp', relationType: 'manages' },
+  { source: 'spectra', target: 'engram', relationType: 'manages' },
   { source: 'vue-dashboard', target: 'brain-viz', relationType: 'implements' },
   { source: 'codex', target: 'spectra', relationType: 'reviews_for' },
   { source: 'three-js', target: 'brain-viz', relationType: 'powers' }
