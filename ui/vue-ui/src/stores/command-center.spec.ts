@@ -96,4 +96,52 @@ describe('command-center store — canonical agent-status + DB size parsing', ()
     expect(store.systemHealth.dbSize.startsWith('~')).toBe(true)
     expect(store.systemHealth.dbSize).toMatch(/MB$/)
   })
+
+  it('derives read/unread/archived state + unread total from /api/recent-events', async () => {
+    vi.stubGlobal('fetch', mockFetch({
+      '/api/recent-events': {
+        messages: [
+          { id: 'u1', from_agent: 'codex-desktop', to_agent: 'claude-engram', content: 'unread', message_type: 'info', created_at: '2026-05-31 10:00:00', read_at: null, archived_at: null },
+          { id: 'r1', from_agent: 'codex-desktop', to_agent: 'claude-engram', content: 'read', message_type: 'info', created_at: '2026-05-31 10:01:00', read_at: '2026-05-31 10:05:00', archived_at: null },
+          { id: 'a1', from_agent: 'codex-desktop', to_agent: 'claude-engram', content: 'archived', message_type: 'info', created_at: '2026-05-31 10:02:00', read_at: null, archived_at: '2026-05-31 10:06:00' },
+        ],
+        unreadByAgent: { 'claude-engram': 5 },
+      },
+    }))
+    const store = useCommandCenterStore()
+    await store.fetchMessages()
+
+    const byId = Object.fromEntries(store.messages.map((m) => [m.id, m]))
+    expect(byId['u1'].isRead).toBe(false)
+    expect(byId['u1'].isArchived).toBe(false)
+    expect(byId['r1'].isRead).toBe(true)
+    expect(byId['r1'].readAt).toBeInstanceOf(Date)
+    expect(byId['a1'].isArchived).toBe(true)
+
+    // Server-provided unread total (accurate past the returned page).
+    expect(store.totalUnread).toBe(5)
+  })
+
+  it('readState filter: all hides archived, unread shows only unread, archived only archived', async () => {
+    vi.stubGlobal('fetch', mockFetch({
+      '/api/recent-events': {
+        messages: [
+          { id: 'u1', from_agent: 'a', to_agent: 'b', content: 'unread', message_type: 'info', created_at: '2026-05-31 10:00:00', read_at: null, archived_at: null },
+          { id: 'r1', from_agent: 'a', to_agent: 'b', content: 'read', message_type: 'info', created_at: '2026-05-31 10:01:00', read_at: '2026-05-31 10:05:00', archived_at: null },
+          { id: 'a1', from_agent: 'a', to_agent: 'b', content: 'archived', message_type: 'info', created_at: '2026-05-31 10:02:00', read_at: null, archived_at: '2026-05-31 10:06:00' },
+        ],
+      },
+    }))
+    const store = useCommandCenterStore()
+    await store.fetchMessages()
+
+    // default 'all' hides archived
+    expect(store.filteredMessages.map((m) => m.id).sort()).toEqual(['r1', 'u1'])
+
+    store.setFilter({ readState: 'unread' })
+    expect(store.filteredMessages.map((m) => m.id)).toEqual(['u1'])
+
+    store.setFilter({ readState: 'archived' })
+    expect(store.filteredMessages.map((m) => m.id)).toEqual(['a1'])
+  })
 })

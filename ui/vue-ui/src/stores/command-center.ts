@@ -75,6 +75,7 @@ function toAgent(a: ApiAgent): Agent {
 // duplicate id from an older raw payload without a dedicated pass.
 
 function toMessage(m: ApiMessage): Message {
+  const readAt = m.read_at ? parseUTC(m.read_at) : null
   return {
     id: m.id,
     fromAgent: m.from_agent,
@@ -83,6 +84,9 @@ function toMessage(m: ApiMessage): Message {
     messageType: m.message_type,
     createdAt: parseUTC(m.created_at),
     isExpanded: false,
+    isRead: readAt != null,
+    isArchived: m.archived_at != null,
+    readAt,
   }
 }
 
@@ -151,8 +155,15 @@ export const useCommandCenterStore = defineStore('command-center', () => {
   const lastError = ref<string | null>(null)
   const isLoading = ref(true)
 
-  const filter = ref<MessageFilter>({ search: '', agent: '', type: '' })
+  const filter = ref<MessageFilter>({ search: '', agent: '', type: '', readState: 'all' })
   const activeProject = ref<string>('')  // '' = All Projects
+
+  // Per-recipient unread counts from the server (tenant-wide; accurate past the
+  // page limit). Drives the unread badges + inbox.
+  const unreadByAgent = ref<Record<string, number>>({})
+  const totalUnread = computed(() =>
+    Object.values(unreadByAgent.value).reduce((sum, n) => sum + n, 0)
+  )
 
   // since-cursor for incremental message fetching
   let messageCursor: string | null = null
@@ -265,6 +276,15 @@ export const useCommandCenterStore = defineStore('command-center', () => {
       list = list.filter((m) => isMessageAboutProject(m, proj))
     }
     const f = filter.value
+    // Read-state: 'all' hides archived; 'unread' = unread & not archived;
+    // 'archived' = archived only.
+    if (f.readState === 'archived') {
+      list = list.filter((m) => m.isArchived)
+    } else if (f.readState === 'unread') {
+      list = list.filter((m) => !m.isRead && !m.isArchived)
+    } else {
+      list = list.filter((m) => !m.isArchived)
+    }
     if (f.agent) {
       list = list.filter((m) => m.fromAgent === f.agent || m.toAgent === f.agent)
     }
@@ -383,6 +403,7 @@ export const useCommandCenterStore = defineStore('command-center', () => {
         url += `&since=${encodeURIComponent(messageCursor)}`
       }
       const data = await fetchJSON<RecentEventsResponse>(url)
+      if (data.unreadByAgent) unreadByAgent.value = data.unreadByAgent
       const newMsgs = (data.messages || []).map(toMessage)
 
       if (newMsgs.length > 0) {
@@ -593,7 +614,7 @@ export const useCommandCenterStore = defineStore('command-center', () => {
   }
 
   function clearFilter() {
-    filter.value = { search: '', agent: '', type: '' }
+    filter.value = { search: '', agent: '', type: '', readState: 'all' }
   }
 
   return {
@@ -608,9 +629,11 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     isLoading,
     filter,
     activeProject,
+    unreadByAgent,
 
     // Computed
     realAgents,
+    totalUnread,
     activeAgents,
     offlineAgents,
     filteredMessages,
@@ -634,5 +657,6 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     // Exposed for focused parsing tests (see command-center.spec.ts).
     fetchAgents,
     fetchAnalytics,
+    fetchMessages,
   }
 })

@@ -34,6 +34,9 @@ export interface ApiAgent {
 
 export interface RecentEventsResponse {
   messages: ApiMessage[]
+  // Per-recipient unread counts (read_at IS NULL AND archived_at IS NULL),
+  // tenant-wide. Optional for back-compat with older servers.
+  unreadByAgent?: Record<string, number>
 }
 
 export interface ApiMessage {
@@ -43,6 +46,10 @@ export interface ApiMessage {
   content: string
   message_type: string
   created_at: string
+  // Message-lifecycle state (Engram comms surface server contract). null/absent
+  // on older payloads => treated as unread / not archived.
+  read_at?: string | null
+  archived_at?: string | null
 }
 
 export interface AnalyticsResponse {
@@ -133,6 +140,10 @@ export interface Message {
   messageType: string
   createdAt: Date
   isExpanded: boolean
+  // Derived lifecycle state (from ApiMessage.read_at / archived_at).
+  isRead: boolean
+  isArchived: boolean
+  readAt: Date | null
 }
 
 export interface KnowledgeChange {
@@ -168,10 +179,13 @@ export interface AttentionItem {
   dismissed: boolean
 }
 
+export type MessageReadState = 'all' | 'unread' | 'archived'
+
 export type MessageFilter = {
   search: string
   agent: string
   type: string
+  readState: MessageReadState
 }
 
 export type ThemeName = 'dark' | 'light'
