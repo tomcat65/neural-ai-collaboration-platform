@@ -102,10 +102,15 @@ const ENTITY_TYPE_TO_AGENT: Record<string, string> = {
 }
 
 // Static alias overrides for known graph entities → real agent IDs.
-// The spectra-* Pass-2 aliases were removed as dead under Engram strip-in-place;
-// the generic claude_code_subagent type mapping above is retained. Add entries
-// here only if a real graph entity needs to resolve to a messaging agent id.
-const ENTITY_ALIAS: Record<string, string> = {}
+// NOTE: spectra-* aliases retained — spectra is a separate case to review later
+// (Tomás), NOT removed as part of this Phase-1 dashboard pass.
+const ENTITY_ALIAS: Record<string, string> = {
+  'spectra-builder-agent': 'claude-code',
+  'spectra-verifier-agent': 'claude-code',
+  'spectra-planner-agent': 'claude-code',
+  'spectra-reviewer-agent': 'claude-code',
+  'spectra-auditor-agent': 'claude-code',
+}
 
 /** Resolve a graph entity to the real messaging agent ID it maps to */
 function resolveEntityToAgent(entityName: string, entityType: string): string | null {
