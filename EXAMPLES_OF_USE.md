@@ -4,7 +4,7 @@
 > examples assume the server is running on `localhost:6174` with `API_KEY` set
 > (see [README.md](README.md)). `${API_KEY}` is your key from `.env`.
 
-Practical examples using the 18 MCP tools against the live server at `http://localhost:6174`.
+Practical examples using the MCP tools exposed by the live server at `http://localhost:6174`. Run `tools/list` for the current roster (29 tools at time of writing); see [docs/TOOLS_SCHEMA.md](docs/TOOLS_SCHEMA.md) for full schemas.
 
 All examples require `API_KEY` set in your environment.
 
@@ -84,7 +84,7 @@ curl -s -X POST http://localhost:6174/mcp \
     "params":{"name":"send_ai_message","arguments":{
       "from":"claude-code",
       "to":"claude-sonnet",
-      "content":"P5 complete. Redis and Neo4j removed. 14/14 tests passing.",
+      "content":"Recall hardening shipped: semantic search hard-timeout + exact fallback. Tests green.",
       "messageType":"status",
       "priority":"normal"
     }}

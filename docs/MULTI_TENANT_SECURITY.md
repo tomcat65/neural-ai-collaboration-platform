@@ -1,5 +1,13 @@
 # Multi-Tenant Security & Operations Guide
 
+> ⚠️ **HISTORICAL DESIGN — NOT IMPLEMENTED / NOT CURRENT ARCHITECTURE.**
+> Multi-tenancy — and the admin keys, Redis, and Neo4j/Weaviate services this guide
+> assumes — was **cut** in the Engram re-scope to a personal, single-user, local-first
+> memory server (SQLite + `sqlite-vec`, bound to localhost, near-zero auth). This file
+> is retained only as a record of the abandoned multi-tenant design; it does **not**
+> describe how the server is secured or operated today. See [README.md](../README.md)
+> for the current architecture.
+
 ## Production Checklist
 
 ### 1. Admin Key Configuration

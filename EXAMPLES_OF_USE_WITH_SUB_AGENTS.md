@@ -272,7 +272,7 @@ curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
   - Hidden from tool listings as of this version; planned removal by Q4 2025.
 - 401 on `/mcp`: ensure `API_KEY` present in `.env` and in the bridge `env`.
 - Claude agents don’t auto‑enable MCP: provide `mcpConfig` or inline `mcp_servers` + include `"mcp__neural"` in `allowedTools`.
-- Weaviate/Neo4j down: non‑graph tools operate; `read_graph` and semantic search will degrade gracefully.
+- No external datastore to go down: storage is a single SQLite DB (+ `sqlite-vec` for vectors), not Weaviate/Neo4j/Redis. If the vector index isn't loaded, exact/graph tools and `read_graph` keep working and semantic search degrades to exact/lexical rather than failing.
 - Performance checks: list tools to confirm end‑to‑end path
   ```bash
   curl -s -H 'Content-Type: application/json' -H "x-api-key: ${API_KEY}" \
