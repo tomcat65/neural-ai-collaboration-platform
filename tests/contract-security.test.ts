@@ -441,15 +441,26 @@ describe('Security Contract Tests (NE-S6)', () => {
       expect(bundle.handoff).toBeNull();
     });
 
-    it('unreadMessages is count-only (no full message content leaked)', async () => {
+    it('unreadMessages inlines compact previews (object with count + bounded previews, no full-content dump)', async () => {
       const bundle = await mcpCall('get_agent_context', {
         agentId: testAgentId,
       });
 
-      // Must be { count, hint }, not an array of message objects
+      // Shape: an object { count, hint, messages? } — never a bare array.
       expect(Array.isArray(bundle.unreadMessages)).toBe(false);
       expect(typeof bundle.unreadMessages.count).toBe('number');
       expect(bundle.unreadMessages.hint).toBeDefined();
+
+      // Inlined previews (so agents see messages on context-load without a
+      // second call) are bounded and compact, not a full-content firehose.
+      if (Array.isArray(bundle.unreadMessages.messages)) {
+        expect(bundle.unreadMessages.messages.length).toBeLessThanOrEqual(5);
+        for (const m of bundle.unreadMessages.messages) {
+          expect(typeof m.preview).toBe('string');
+          // Preview is a compact summary, capped (truncation marker allowed).
+          expect(m.preview.length).toBeLessThanOrEqual(201);
+        }
+      }
     });
   });
 

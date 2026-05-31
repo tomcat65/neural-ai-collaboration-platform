@@ -1981,15 +1981,49 @@ export class MemoryManager {
       }
     }
 
-    // 2. Unread messages — count only via SQL COUNT (tenant-scoped)
+    // 2. Unread messages — count + inlined compact previews (tenant-scoped).
+    // Previously this returned ONLY a count, so an agent that loads context at
+    // the start of a turn saw "you have N unread" but not the content, and had
+    // to make a second get_ai_messages call. Agents that don't (or can't poll,
+    // e.g. Cowork / web chats) never saw their messages. Inlining compact
+    // previews here makes the single context-load deliver the actual messages,
+    // so cross-agent comms work without any polling. Excludes archived; newest
+    // first; uses the idx_ai_messages_read_path index; previews use the compact
+    // `summary` column. Capped small (budget trimming can drop these first).
     try {
       this.ensureReadAtColumn();
+      this.ensureArchivedAtColumn();
+      this.ensureSummaryColumn();
+      const previewLimit = 5;
       const countRow = this.db.prepare(
-        'SELECT COUNT(*) as cnt FROM ai_messages WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL'
+        'SELECT COUNT(*) as cnt FROM ai_messages WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL'
       ).get(agentId, tenantId) as any;
+      const unreadCount = countRow?.cnt ?? 0;
+      const previewRows = unreadCount > 0 ? this.db.prepare(
+        `SELECT id, from_agent, message_type, priority, created_at, summary, content
+         FROM ai_messages
+         WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL
+         ORDER BY created_at DESC LIMIT ?`
+      ).all(agentId, tenantId, previewLimit) as any[] : [];
+      const messages = previewRows.map((m: any) => {
+        const raw = (typeof m.summary === 'string' && m.summary.length > 0) ? m.summary : (m.content || '');
+        const preview = raw.length > 200 ? raw.slice(0, 200) + '…' : raw;
+        return {
+          id: m.id,
+          from: m.from_agent,
+          type: m.message_type,
+          priority: m.priority,
+          timestamp: m.created_at,
+          preview,
+        };
+      });
       bundle.unreadMessages = {
-        count: countRow?.cnt ?? 0,
-        hint: 'Use get_ai_messages(agentId) to retrieve',
+        count: unreadCount,
+        messages,
+        truncated: unreadCount > messages.length,
+        hint: unreadCount > messages.length
+          ? `Showing ${messages.length} of ${unreadCount} unread (compact previews). Use get_ai_messages(agentId) for the rest, get_message_detail(messageId) for full content.`
+          : 'Compact previews shown. Use get_ai_messages(agentId) to mark read, get_message_detail(messageId) for full content.',
       };
     } catch { /* ai_messages table may not exist */ }
 
@@ -2150,6 +2184,16 @@ export class MemoryManager {
       if (bundle.project?._summaryWrapped && estimateTokens() > maxTokens) {
         delete bundle.project._summaryWrapped;
         sectionsDropped.push('projectSummary');
+      }
+
+      // 2b. Drop inlined message previews (keep count + hint). Per the priority
+      // order, message bodies are low — trim them before observations/guardrails.
+      if (bundle.unreadMessages?.messages?.length > 0 && estimateTokens() > maxTokens) {
+        const total = bundle.unreadMessages.count;
+        delete bundle.unreadMessages.messages;
+        bundle.unreadMessages.truncated = total > 0;
+        bundle.unreadMessages.hint = 'Previews omitted for token budget. Use get_ai_messages(agentId) to retrieve.';
+        sectionsDropped.push('messagePreviews');
       }
 
       // 3. Drop recent decisions
