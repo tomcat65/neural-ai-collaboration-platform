@@ -2,7 +2,7 @@
   <div class="brain-view">
     <div class="brain-header">
       <router-link to="/" class="back-link">Back to Dashboard</router-link>
-      <h1 class="brain-title">Neural Brain</h1>
+      <h1 class="brain-title">Engram Brain</h1>
       <label class="zero-obs-toggle">
         <input type="checkbox" v-model="brainStore.showZeroObs" />
         Show 0-obs

@@ -1,9 +1,9 @@
 {
-  "name": "neural-ai-dashboard",
+  "name": "engram-dashboard",
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Neural AI Collaboration Platform Dashboard",
+  "description": "Engram Dashboard",
   "scripts": {
     "dev": "vite --port 5176",
     "build": "vite build",
