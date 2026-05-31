@@ -2838,20 +2838,35 @@ export class MemoryManager {
   }
 
   /**
-   * Task 1200: Archive messages older than N days for an agent.
-   * Returns count of messages archived.
+   * Task 1200 / Engram comms surface: archive messages for an agent — either
+   * specific messageIds (per-message archive, used by the dashboard inbox), or
+   * all messages older than N days. Both paths are scoped to the agent's own
+   * recipient aliases. Returns count of messages archived.
    */
   archiveMessages(
     agentId: string,
-    olderThanDays: number,
-    tenantId: string = 'default'
+    olderThanDays?: number,
+    tenantId: string = 'default',
+    messageIds?: string[]
   ): number {
     this.ensureArchivedAtColumn();
     const now = new Date().toISOString();
-    const cutoff = new Date(Date.now() - olderThanDays * 86400000).toISOString();
     const recipientAliases = this.getAgentAliases(agentId);
     const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
 
+    if (messageIds && messageIds.length > 0) {
+      // Archive specific messages by id (still scoped to this agent's inbox).
+      const placeholders = messageIds.map(() => '?').join(',');
+      const result = this.db.prepare(
+        `UPDATE ai_messages
+         SET archived_at = ?
+         WHERE id IN (${placeholders}) AND to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND archived_at IS NULL`
+      ).run(now, ...messageIds, ...recipientAliases, tenantId);
+      return result.changes;
+    }
+
+    // Otherwise archive by age cutoff (default 30 days).
+    const cutoff = new Date(Date.now() - (olderThanDays ?? 30) * 86400000).toISOString();
     const result = this.db.prepare(
       `UPDATE ai_messages
        SET archived_at = ?

@@ -3099,8 +3099,14 @@ export class NeuralMCPServer {
         }
 
         case 'archive_messages': {
-          const { agentId: archiveAgentId, olderThanDays = 30 } = args;
-          const archivedCount = this.memoryManager.archiveMessages(archiveAgentId, olderThanDays, tenantId);
+          const { agentId: archiveAgentId, olderThanDays, messageIds: archiveIds } = args;
+          const byId = Array.isArray(archiveIds) && archiveIds.length > 0;
+          const archivedCount = this.memoryManager.archiveMessages(
+            archiveAgentId,
+            byId ? undefined : (olderThanDays ?? 30),
+            tenantId,
+            byId ? archiveIds : undefined
+          );
           return {
             content: [{
               type: 'text',
@@ -3108,7 +3114,8 @@ export class NeuralMCPServer {
                 status: 'ok',
                 agentId: archiveAgentId,
                 archived: archivedCount,
-                olderThanDays,
+                scope: byId ? 'specific' : 'older_than_days',
+                ...(byId ? { messageIds: archiveIds } : { olderThanDays: olderThanDays ?? 30 }),
               }, null, 2)
             }]
           };

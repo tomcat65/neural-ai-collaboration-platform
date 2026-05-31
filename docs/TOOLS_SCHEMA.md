@@ -1087,7 +1087,7 @@ Parameters
 ```
 
 ### archive_messages
-Archive messages older than N days for an agent. Archived messages are excluded from get_ai_messages by default.
+Archive messages for an agent — either specific messageIds, or all messages older than N days. Archived messages are excluded from get_ai_messages by default.
 
 Parameters
 
@@ -1099,15 +1099,21 @@ Parameters
       "type": "string",
       "description": "Agent whose messages to archive"
     },
+    "messageIds": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Specific message IDs to archive. If provided, olderThanDays is ignored."
+    },
     "olderThanDays": {
       "type": "number",
-      "description": "Archive messages older than this many days",
+      "description": "Archive messages older than this many days (used when messageIds is omitted)",
       "default": 30
     }
   },
   "required": [
-    "agentId",
-    "olderThanDays"
+    "agentId"
   ]
 }
 ```
