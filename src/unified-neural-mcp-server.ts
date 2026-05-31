@@ -1022,63 +1022,100 @@ export class NeuralMCPServer {
         const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
         const tenantId = context.tenantId || 'default';
         const db = this.memoryManager.getDb();
+        // Canonical-only roster by default; ?raw=true returns every registration.
+        const includeRaw = req.query.raw === 'true' || req.query.includeEphemeral === 'true';
 
-        // Query shared_memory by memory_type='agent_registration' (not text LIKE search)
-        let agentRows: any[] = [];
+        // Read from the canonical agent_registrations table (same source as the
+        // get_agent_status MCP tool), not the legacy shared_memory blobs.
+        let rows: any[] = [];
         try {
-          agentRows = db.prepare(
-            `SELECT id, content, created_by, created_at, updated_at
-             FROM shared_memory
-             WHERE tenant_id = ? AND memory_type = 'agent_registration'
-             ORDER BY updated_at DESC`
+          rows = db.prepare(
+            `SELECT agent_id, name, capabilities_json, metadata_json, status, updated_at, created_at
+             FROM agent_registrations WHERE tenant_id = ? ORDER BY updated_at DESC`
           ).all(tenantId) as any[];
         } catch {
-          // table may not exist
+          // table may not exist yet
         }
 
-        const agents = agentRows.map((row: any) => {
-          let content: any = {};
+        const parseJson = (raw: string | null | undefined, fallback: any) => {
+          if (!raw) return fallback;
+          try { return JSON.parse(raw); } catch { return fallback; }
+        };
+        // An id minted per bridge process: agent-<host>-<pid digits>-<base36ts>.
+        const isEphemeralId = (id: string) => /^agent-.+-\d+-.+$/.test(id);
+        const computeStatus = (lastSeen: string) => {
+          const ageMs = lastSeen ? Date.now() - new Date(lastSeen).getTime() : Infinity;
+          if (ageMs < 5 * 60 * 1000) return 'active';
+          if (ageMs < 30 * 60 * 1000) return 'idle';
+          return 'offline';
+        };
+        const messageCountFor = (agentId: string) => {
           try {
-            content = JSON.parse(row.content);
-          } catch {
-            // ignore malformed JSON
-          }
-          const agentId = content.agentId || row.created_by || 'unknown';
-          const name = content.name || agentId;
-
-          // Count messages for this agent (tenant-scoped)
-          let messageCount = 0;
-          try {
-            const msgRow = db.prepare(
+            const r = db.prepare(
               'SELECT COUNT(*) as cnt FROM ai_messages WHERE tenant_id = ? AND (from_agent = ? OR to_agent = ?)'
             ).get(tenantId, agentId, agentId) as { cnt: number } | undefined;
-            messageCount = msgRow?.cnt ?? 0;
-          } catch {
-            // ai_messages table may not exist
+            return r?.cnt ?? 0;
+          } catch { return 0; }
+        };
+
+        if (includeRaw) {
+          // Raw mode: one item per registration row (diagnostics).
+          const agents = rows.map((row: any) => {
+            const metadata = parseJson(row.metadata_json, {});
+            const lastSeen = row.updated_at || row.created_at || new Date().toISOString();
+            return {
+              canonicalAgentId: this.memoryManager.inferCanonicalAgentId(row.agent_id, row.name, metadata),
+              agentId: row.agent_id,
+              displayName: row.name || row.agent_id,
+              status: computeStatus(lastSeen),
+              isEphemeral: isEphemeralId(row.agent_id),
+              lastSeen,
+              eventsCount: messageCountFor(row.agent_id),
+              capabilities: parseJson(row.capabilities_json, []),
+            };
+          });
+          res.json({ totalRegistrations: rows.length, returnedRegistrations: agents.length, raw: true, agents });
+          return;
+        }
+
+        // Default: canonical rollup — one entry per logical agent, ephemerals folded in.
+        const canonicalMap = new Map<string, any>();
+        for (const row of rows) {
+          const metadata = parseJson(row.metadata_json, {});
+          const canonicalAgentId = this.memoryManager.inferCanonicalAgentId(row.agent_id, row.name, metadata);
+          const lastSeen = row.updated_at || row.created_at || '';
+          const existing = canonicalMap.get(canonicalAgentId);
+          if (!existing) {
+            canonicalMap.set(canonicalAgentId, {
+              canonicalAgentId,
+              displayName: row.name || canonicalAgentId,
+              status: computeStatus(lastSeen),
+              isEphemeral: isEphemeralId(canonicalAgentId),
+              lastSeen,
+              capabilities: parseJson(row.capabilities_json, []),
+              _sessions: 1,
+            });
+          } else {
+            existing._sessions += 1;
+            if (String(lastSeen) > String(existing.lastSeen)) {
+              existing.lastSeen = lastSeen;
+              existing.displayName = row.name || existing.displayName;
+              existing.status = computeStatus(lastSeen);
+            }
+            existing.capabilities = Array.from(new Set([...existing.capabilities, ...parseJson(row.capabilities_json, [])]));
           }
+        }
+        const agents = Array.from(canonicalMap.values())
+          .map((a) => ({ ...a, eventsCount: messageCountFor(a.canonicalAgentId) }))
+          .sort((x, y) => String(y.lastSeen).localeCompare(String(x.lastSeen)));
 
-          // Determine status based on last activity
-          const lastSeen = row.updated_at || row.created_at;
-          const ageMs = lastSeen ? Date.now() - new Date(lastSeen).getTime() : Infinity;
-          let status: string;
-          if (ageMs < 5 * 60 * 1000) status = 'active';
-          else if (ageMs < 30 * 60 * 1000) status = 'idle';
-          else status = 'offline';
-
-          return {
-            agentId,
-            name,
-            type: content.metadata?.registeredBy || 'agent',
-            status,
-            eventsCount: messageCount,
-            successRate: 1.0,
-            averageResponseTime: 0,
-            lastSeen: lastSeen || new Date().toISOString(),
-            capabilities: content.capabilities || [],
-          };
+        res.json({
+          totalRegistrations: rows.length,
+          totalCanonicalAgents: agents.length,
+          returnedCanonicalAgents: agents.length,
+          raw: false,
+          agents,
         });
-
-        res.json({ agents });
       } catch (error: any) {
         console.error('Dashboard agent-status error:', error);
         res.status(500).json({ error: error.message || 'Failed to get agent status' });
@@ -1203,6 +1240,24 @@ export class NeuralMCPServer {
           // ai_messages may not exist
         }
 
+        // Real DB size from SQLite PRAGMA (page_count * page_size), replacing the
+        // dashboard's byte-estimate heuristic which is wildly off after compaction.
+        let actualDbBytes: number | null = null;
+        let dbSizeSource: string | null = null;
+        let dbSizeAt: string | null = null;
+        try {
+          const sizeRow = db.prepare(
+            'SELECT (SELECT page_count FROM pragma_page_count()) * (SELECT page_size FROM pragma_page_size()) AS bytes'
+          ).get() as { bytes: number } | undefined;
+          if (sizeRow && typeof sizeRow.bytes === 'number') {
+            actualDbBytes = sizeRow.bytes;
+            dbSizeSource = 'pragma';
+            dbSizeAt = new Date().toISOString();
+          }
+        } catch {
+          // pragma may be unavailable; leave actualDbBytes null and let the client fall back
+        }
+
         const memUsage = process.memoryUsage();
         res.json({
           overview: {
@@ -1213,6 +1268,9 @@ export class NeuralMCPServer {
             entityCount,
             relationCount,
             observationCount,
+            actualDbBytes,
+            dbSizeSource,
+            dbSizeAt,
           },
           trends: {
             labels: trendLabels,
