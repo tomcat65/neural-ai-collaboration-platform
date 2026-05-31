@@ -3,6 +3,8 @@
 const http = require('http');
 const readline = require('readline');
 const os = require('os');
+const fs = require('fs');
+const path = require('path');
 
 // Create readline interface for STDIO
 const rl = readline.createInterface({
@@ -19,11 +21,36 @@ let nextId = 1;
 const SERVER_HOSTNAME = process.env.MCP_HOST || 'localhost';
 const SERVER_PORT = parseInt(process.env.MCP_PORT || '6174', 10);
 // Default sender for AI messages.
-// If not provided via env, generate a stable, ephemeral ID per bridge process.
 const shortHost = os.hostname().split('.')?.[0] || 'host';
-const GENERATED_FROM = `agent-${shortHost}-${process.pid}-${Date.now().toString(36)}`;
 const ENV_FROM = process.env.FROM || process.env.MCP_FROM;
-let currentFrom = ENV_FROM || GENERATED_FROM;
+
+// Stable per-host identity. Previously this minted a NEW id per process
+// (`agent-<host>-<pid>-<ts>`) and auto-registered it, so every CLI launch left
+// a throwaway agent row forever (~1,949 of 2,003 registrations on the live DB).
+// Instead, persist one stable id per host to a cache file and reuse it across
+// processes, so reconnects keep the same identity and the registry stops
+// growing. Env FROM/MCP_FROM still overrides everything.
+function loadOrCreateStableFrom() {
+  const dir = process.env.MCP_BRIDGE_STATE_DIR
+    || path.join(os.homedir() || os.tmpdir(), '.neural-mcp');
+  const file = path.join(dir, `bridge-identity-${shortHost}.json`);
+  try {
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (saved && typeof saved.agentId === 'string' && saved.agentId.length > 0) {
+      return saved.agentId;
+    }
+  } catch (_) { /* no cache yet */ }
+  const id = `agent-${shortHost}`;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ agentId: id, createdAt: new Date().toISOString() }, null, 2));
+  } catch (err) {
+    process.stderr.write(`[MCP STDIO Bridge] Could not persist identity (${err.message}); using in-memory id\n`);
+  }
+  return id;
+}
+
+let currentFrom = ENV_FROM || loadOrCreateStableFrom();
 let identityGenerated = !ENV_FROM;
 let currentName = process.env.AGENT_NAME || process.env.MCP_AGENT_NAME || `stdio-bridge-${shortHost}`;
 const DEFAULT_CAPABILITIES = ['mcp-client', 'bridge', 'ai-to-ai-messaging'];
