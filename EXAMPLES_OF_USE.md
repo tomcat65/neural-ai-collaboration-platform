@@ -1,4 +1,8 @@
-# Neural AI Collaboration Platform - Usage Examples
+# Engram (shared-memory-mcp) — Usage Examples
+
+> Personal, local-first agent memory + cross-agent messaging over MCP. All
+> examples assume the server is running on `localhost:6174` with `API_KEY` set
+> (see [README.md](README.md)). `${API_KEY}` is your key from `.env`.
 
 Practical examples using the 18 MCP tools against the live server at `http://localhost:6174`.
 
@@ -313,16 +317,20 @@ curl -s -X POST http://localhost:6174/mcp \
 # Health check (public, no auth)
 curl -s http://localhost:6174/health | jq
 
-# Readiness (shows SQLite + Weaviate status)
+# Readiness (shows SQLite + vector status)
 curl -s -H "X-API-Key: ${API_KEY}" http://localhost:6174/ready | jq
 
 # Full system status
 curl -s -H "X-API-Key: ${API_KEY}" http://localhost:6174/system/status | jq
 ```
 
-## Semantic Search (Weaviate)
+## Semantic Search (sqlite-vec)
 
-When Weaviate is connected, `search_entities` supports semantic search:
+`search_entities` is **exact-first** (name/alias/graph matches anchor results);
+the vector path runs only when exact finds nothing, is hard-timeout'd
+(`SEARCH_SEMANTIC_TIMEOUT_MS`, default 4000) and degrades to exact rather than
+hanging. Results carry `semanticSimilarity`; entities/observations are weighted
+above chat messages (`RECALL_W_*`). Embeddings are local (`all-MiniLM-L6-v2`).
 ```bash
 # Semantic search (vector similarity)
 curl -s -X POST http://localhost:6174/mcp \
@@ -347,38 +355,52 @@ curl -s -X POST http://localhost:6174/mcp \
   }' | jq
 ```
 
-## Multi-Agent Workflow Example
+## Cross-Agent Collaboration (the ledger pattern)
 
-A practical workflow using three agents:
+The durable way two agents collaborate: **messages are the turn-signal; a shared
+knowledge-graph entity is the system of record.** Don't hold the work in the message
+stream (it's transient) — append it as observations to a shared task entity.
 
-```typescript
-// Agent 1 (claude-code): Store architecture decision
-await send_ai_message({
-  from: "claude-code",
-  to: "claude-sonnet",
-  content: "Migrated to SQLite + Weaviate. All contract tests passing.",
-  messageType: "status"
-});
+```bash
+# 1. Create a shared task entity (the "ledger") + bootstrap note for future agents
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{"jsonrpc":"2.0","id":60,"method":"tools/call","params":{"name":"create_entities","arguments":{
+    "entities":[{"name":"dashboard-refactor","entityType":"task",
+      "agentBootstrap":["Read this entity first; converse via observations, not chat."],
+      "observations":["TASK: refactor the dashboard agent roster. Collaborators: claude-code, codex-desktop."]}]}}}' | jq
 
-// Agent 2 (claude-sonnet): Coordinate next step
-const messages = await get_ai_messages({
-  agentId: "claude-sonnet",
-  unreadOnly: true,
-  markAsRead: true
-});
+# 2. Each substantive turn = ONE observation on the entity, attributed + typed.
+#    kind ∈ proposal|decision|question|blocker|progress|done|correction
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{"jsonrpc":"2.0","id":61,"method":"tools/call","params":{"name":"add_observations","arguments":{
+    "agentId":"codex-desktop",
+    "observations":[{"entityName":"dashboard-refactor","kind":"proposal",
+      "contents":["PROPOSAL: move identity logic server-side; UI trusts the contract."]}]}}}' | jq
 
-await send_ai_message({
-  from: "claude-sonnet",
-  to: "codex",
-  content: "Review the migration. Check data integrity.",
-  messageType: "task"
-});
+# 3. Disagree without overwriting — kind:correction + supersedes the prior observation id
+#    Converge by recording ONE kind:decision that supersedes the open question(s).
 
-// Agent 3 (codex): Record findings
-await record_learning({
-  agentId: "codex",
-  context: "migration review",
-  lesson: "Zero data loss confirmed across 2,598 shared_memory rows",
-  confidence: 1.0
-});
+# 4. Ping the peer ONLY as a turn-signal (the substance is already on the ledger)
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{"jsonrpc":"2.0","id":62,"method":"tools/call","params":{"name":"send_ai_message","arguments":{
+    "from":"codex-desktop","to":"claude-code","messageType":"collaboration",
+    "content":"Recorded a proposal on dashboard-refactor — your turn (read the ledger)."}}}' | jq
+
+# 5. Read the LEDGER (authoritative), not just the inbox — filter to a peer's posts
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{"jsonrpc":"2.0","id":63,"method":"tools/call","params":{"name":"search_entities","arguments":{
+    "query":"dashboard-refactor","searchType":"exact","agentFilter":"codex-desktop"}}}' | jq
 ```
+
+**Why it's durable:** observations are append-only with provenance, so both agents
+write concurrently with no locking, threads merge cleanly, and the full decision
+history survives restarts and inbox churn. `get_agent_context` also **inlines unread
+message previews**, so an agent sees what's waiting on a single context load — no
+polling required (polling, where available, just lowers latency).
+
+In Claude Code, the `coordinate-agents` skill runs this whole loop:
+*"coordinate with cowork and codex-desktop"*.
