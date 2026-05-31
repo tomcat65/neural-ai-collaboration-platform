@@ -18,17 +18,23 @@ import type {
   ContainerInfo,
 } from '@/types/command-center'
 
-// Filter out test/ephemeral agents — keep only real project agents
+// Test-only agent id prefixes (these are genuinely test fixtures, not real
+// agents). NOTE: 'agent-' is intentionally NOT here anymore — the server now
+// flags per-process bridge registrations via isEphemeral, and stable ids like
+// 'agent-<host>' are real agents. Ephemerality comes from the server, not id
+// prefixes (Engram dashboard adaptation, server PR #18).
 const TEST_AGENT_PREFIXES = [
   '_tenant_iso_', '_session_test_', '_broadcast_test_',
   '_security_test_', '_contract_test_',
-  'agent-',   // ephemeral desktop sessions like agent-ErikaDesktop-*
   'sender_',  // test senders
   'prov_',    // provenance test agents
 ]
 
 function isRealAgent(a: ApiAgent): boolean {
-  return !TEST_AGENT_PREFIXES.some((p) => a.agentId.startsWith(p))
+  const id = a.canonicalAgentId || a.agentId || ''
+  // Server-driven ephemerality is authoritative when present.
+  if (a.isEphemeral) return false
+  return !TEST_AGENT_PREFIXES.some((p) => id.startsWith(p))
 }
 
 /** Parse API timestamps — server returns UTC without 'Z' suffix */
@@ -48,10 +54,13 @@ function normalizeAgentStatus(status: ApiAgent['status']): AgentStatus {
 }
 
 function toAgent(a: ApiAgent): Agent {
+  // Prefer the canonical contract fields; fall back to legacy fields for older
+  // server payloads.
+  const id = a.canonicalAgentId || a.agentId || 'unknown'
   return {
-    id: a.agentId,
-    name: a.agentId,
-    displayName: a.name || a.agentId,
+    id,
+    name: id,
+    displayName: a.displayName || a.name || id,
     status: normalizeAgentStatus(a.status),
     lastSeen: parseUTC(a.lastSeen),
     messageCount: a.eventsCount,
@@ -60,23 +69,10 @@ function toAgent(a: ApiAgent): Agent {
   }
 }
 
-/** Deduplicate agents by agentId — keep the registration with the most recent lastSeen */
-function deduplicateAgents(agents: Agent[]): Agent[] {
-  const map = new Map<string, Agent>()
-  for (const a of agents) {
-    const existing = map.get(a.id)
-    if (!existing || a.lastSeen > existing.lastSeen) {
-      // Merge message counts from duplicates
-      if (existing) {
-        a.messageCount = a.messageCount + existing.messageCount
-      }
-      map.set(a.id, a)
-    } else if (existing) {
-      existing.messageCount = existing.messageCount + a.messageCount
-    }
-  }
-  return Array.from(map.values())
-}
+// NOTE: client-side deduplicateAgents() was removed — /api/agent-status now
+// returns a canonical roster (one entry per logical agent) by default, so the
+// client no longer needs to dedupe. Defensive fallback below handles a stray
+// duplicate id from an older raw payload without a dedicated pass.
 
 function toMessage(m: ApiMessage): Message {
   return {
@@ -105,7 +101,9 @@ const ENTITY_TYPE_TO_AGENT: Record<string, string> = {
   claude_code_subagent: 'claude-code',
 }
 
-// Static alias overrides for known graph entities → real agent IDs
+// Static alias overrides for known graph entities → real agent IDs.
+// NOTE: spectra-* aliases retained — spectra is a separate case to review later
+// (Tomás), NOT removed as part of this Phase-1 dashboard pass.
 const ENTITY_ALIAS: Record<string, string> = {
   'spectra-builder-agent': 'claude-code',
   'spectra-verifier-agent': 'claude-code',
@@ -420,7 +418,18 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     try {
       const data = await fetchJSON<AgentStatusResponse>('/api/agent-status')
       const all = (data.agents || []).map(toAgent)
-      agents.value = deduplicateAgents(all)
+      // Server returns a canonical roster (deduped) — no client dedup needed.
+      // Defensive: collapse any accidental duplicate id (e.g. older raw payload),
+      // keeping the most-recently-seen and summing message counts.
+      const byId = new Map<string, Agent>()
+      for (const a of all) {
+        const prev = byId.get(a.id)
+        if (!prev) { byId.set(a.id, a); continue }
+        const keep = a.lastSeen > prev.lastSeen ? a : prev
+        keep.messageCount = a.messageCount + prev.messageCount
+        byId.set(a.id, keep)
+      }
+      agents.value = Array.from(byId.values())
     } catch (e: any) {
       console.error('fetchAgents failed:', e)
     }
@@ -436,14 +445,20 @@ export const useCommandCenterStore = defineStore('command-center', () => {
         { name: 'vue-dashboard', port: '5176', status: 'healthy', mem: '—', uptime: '—' },
       ]
 
-      // Estimate DB size from data counts (avg ~3KB per message, ~5KB per entity+observations)
-      const estimatedBytes =
-        (o.totalEvents || 0) * 3000 +
-        (o.entityCount || 0) * 2000 +
-        (o.observationCount || 0) * 4000
-      const dbMB = estimatedBytes > 0
-        ? `~${(estimatedBytes / 1024 / 1024).toFixed(1)} MB`
-        : '—'
+      // Prefer the server's real DB size (SQLite PRAGMA, server PR #18). Fall
+      // back to the rough estimate only when the server doesn't supply it.
+      let dbMB: string
+      if (typeof o.actualDbBytes === 'number' && o.actualDbBytes > 0) {
+        dbMB = `${(o.actualDbBytes / 1024 / 1024).toFixed(1)} MB`
+      } else {
+        const estimatedBytes =
+          (o.totalEvents || 0) * 3000 +
+          (o.entityCount || 0) * 2000 +
+          (o.observationCount || 0) * 4000
+        dbMB = estimatedBytes > 0
+          ? `~${(estimatedBytes / 1024 / 1024).toFixed(1)} MB`
+          : '—'
+      }
 
       systemHealth.value = {
         totalMessages: o.totalEvents,
@@ -616,5 +631,8 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     setFilter,
     setActiveProject,
     clearFilter,
+    // Exposed for focused parsing tests (see command-center.spec.ts).
+    fetchAgents,
+    fetchAnalytics,
   }
 })
