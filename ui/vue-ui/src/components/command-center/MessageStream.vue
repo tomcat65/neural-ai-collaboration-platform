@@ -57,6 +57,8 @@ function priorityClass(msg: Message): string {
   if (t === 'query') return 'priority-query'
   return ''
 }
+
+const READ_STATES = ['all', 'unread', 'archived'] as const
 </script>
 
 <template>
@@ -64,6 +66,7 @@ function priorityClass(msg: Message): string {
     <!-- Header + Filter Bar -->
     <div class="panel-header">
       <span class="panel-title">Message Stream</span>
+      <span v-if="store.totalUnread > 0" class="unread-pill" :title="`${store.totalUnread} unread`">{{ store.totalUnread }} unread</span>
       <span class="msg-count">{{ store.filteredMessages.length }}/{{ store.messages.length }}</span>
     </div>
 
@@ -91,8 +94,17 @@ function priorityClass(msg: Message): string {
         <option value="">All types</option>
         <option v-for="t in store.messageTypes" :key="t" :value="t">{{ t }}</option>
       </select>
+      <div class="read-state-seg" role="group" aria-label="Read state filter">
+        <button
+          v-for="opt in READ_STATES"
+          :key="opt"
+          class="seg-btn"
+          :class="{ active: store.filter.readState === opt }"
+          @click="store.setFilter({ readState: opt })"
+        >{{ opt }}</button>
+      </div>
       <button
-        v-if="store.filter.search || store.filter.agent || store.filter.type"
+        v-if="store.filter.search || store.filter.agent || store.filter.type || store.filter.readState !== 'all'"
         class="filter-clear"
         @click="store.clearFilter()"
       >
@@ -106,16 +118,19 @@ function priorityClass(msg: Message): string {
         v-for="msg in store.filteredMessages"
         :key="msg.id"
         class="message-card"
-        :class="[priorityClass(msg), { expanded: msg.isExpanded }]"
+        :class="[priorityClass(msg), { expanded: msg.isExpanded, unread: !msg.isRead && !msg.isArchived, archived: msg.isArchived }]"
         @click="store.toggleMessageExpanded(msg.id)"
       >
         <div class="msg-header">
           <div class="msg-routing">
+            <span v-if="!msg.isRead && !msg.isArchived" class="unread-dot" title="Unread"></span>
             <span class="msg-from">{{ msg.fromAgent }}</span>
             <span class="msg-arrow">&#8594;</span>
             <span class="msg-to">{{ msg.toAgent }}</span>
           </div>
           <div class="msg-meta">
+            <span v-if="msg.isArchived" class="msg-state-badge archived-badge" title="Archived">archived</span>
+            <span v-else-if="msg.isRead" class="msg-state-badge read-badge" :title="msg.readAt ? `Read ${formatDate(msg.readAt)} ${formatTime(msg.readAt)}` : 'Read'">read</span>
             <span class="msg-type-badge" :style="{ color: typeColor(msg.messageType), borderColor: typeColor(msg.messageType) }">
               {{ msg.messageType }}
             </span>
@@ -343,5 +358,88 @@ select.filter-input {
   text-align: center;
   color: var(--cc-text-muted);
   font-size: calc(0.8rem * var(--cc-font-scale, 1));
+}
+
+/* ── Comms surface: read-state ───────────────────────────────── */
+.unread-pill {
+  margin-left: auto;
+  margin-right: 0.4rem;
+  font-size: calc(0.58rem * var(--cc-font-scale, 1));
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #11151c;
+  background: var(--cc-amber);
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+}
+
+.read-state-seg {
+  display: flex;
+  border: 1px solid var(--cc-border);
+  border-radius: 4px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.seg-btn {
+  background: var(--cc-surface-2);
+  color: var(--cc-text-muted);
+  border: none;
+  border-left: 1px solid var(--cc-border);
+  padding: 0.3rem 0.45rem;
+  cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: calc(0.64rem * var(--cc-font-scale, 1));
+  text-transform: capitalize;
+}
+
+.seg-btn:first-child { border-left: none; }
+
+.seg-btn.active {
+  background: var(--cc-cyan);
+  color: #11151c;
+  font-weight: 600;
+}
+
+.unread-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cc-amber);
+  flex-shrink: 0;
+}
+
+.message-card.unread {
+  border-left-color: var(--cc-amber);
+}
+
+.message-card.unread .msg-from {
+  color: var(--cc-text);
+}
+
+.message-card.archived {
+  opacity: 0.6;
+}
+
+.msg-state-badge {
+  font-size: calc(0.55rem * var(--cc-font-scale, 1));
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.read-badge {
+  color: var(--cc-text-muted);
+  border: 1px solid var(--cc-border);
+}
+
+.archived-badge {
+  color: var(--cc-text-muted);
+  background: var(--cc-surface-2);
+  border: 1px solid var(--cc-border);
 }
 </style>
