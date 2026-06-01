@@ -4,6 +4,7 @@ import { useCommandCenterStore } from '@/stores/command-center'
 import { useTheme } from '@/composables/useTheme'
 import AgentRoster from '@/components/command-center/AgentRoster.vue'
 import MessageStream from '@/components/command-center/MessageStream.vue'
+import InboxPanel from '@/components/command-center/InboxPanel.vue'
 import KnowledgeActivity from '@/components/command-center/KnowledgeActivity.vue'
 import SystemHealthPanel from '@/components/command-center/SystemHealthPanel.vue'
 import AttentionQueue from '@/components/command-center/AttentionQueue.vue'
@@ -275,6 +276,7 @@ onUnmounted(() => {
 
       <!-- Right Column -->
       <aside class="cc-col cc-col-right">
+        <InboxPanel />
         <KnowledgeActivity />
         <AttentionQueue />
       </aside>

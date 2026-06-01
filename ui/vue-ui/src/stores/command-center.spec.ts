@@ -144,4 +144,57 @@ describe('command-center store — canonical agent-status + DB size parsing', ()
     store.setFilter({ readState: 'archived' })
     expect(store.filteredMessages.map((m) => m.id)).toEqual(['a1'])
   })
+
+  it('unreadInbox groups unread messages by recipient with server counts', async () => {
+    vi.stubGlobal('fetch', mockFetch({
+      '/api/recent-events': {
+        messages: [
+          { id: 'm1', from_agent: 'a', to_agent: 'claude-engram', content: 'x', message_type: 'info', created_at: '2026-05-31 10:00:00', read_at: null, archived_at: null },
+          { id: 'm2', from_agent: 'b', to_agent: 'claude-engram', content: 'y', message_type: 'info', created_at: '2026-05-31 10:01:00', read_at: null, archived_at: null },
+          { id: 'm3', from_agent: 'a', to_agent: 'codex-desktop', content: 'z', message_type: 'info', created_at: '2026-05-31 10:02:00', read_at: null, archived_at: null },
+          { id: 'm4', from_agent: 'a', to_agent: 'claude-engram', content: 'read', message_type: 'info', created_at: '2026-05-31 10:03:00', read_at: '2026-05-31 10:05:00', archived_at: null },
+        ],
+        unreadByAgent: { 'claude-engram': 2, 'codex-desktop': 1 },
+      },
+    }))
+    const store = useCommandCenterStore()
+    await store.fetchMessages()
+
+    const ce = store.unreadInbox.find((g) => g.agent === 'claude-engram')
+    const cd = store.unreadInbox.find((g) => g.agent === 'codex-desktop')
+    expect(ce?.count).toBe(2)
+    expect(ce?.previews.map((m) => m.id).sort()).toEqual(['m1', 'm2']) // m4 excluded (already read)
+    expect(cd?.count).toBe(1)
+    expect(cd?.previews.map((m) => m.id)).toEqual(['m3'])
+  })
+
+  it('markRead POSTs mark_messages_read to /api/tools with the message ids', async () => {
+    const fetchSpy = mockFetch({
+      '/api/recent-events': { messages: [], unreadByAgent: {} },
+      '/api/tools/mark_messages_read': { status: 'ok' },
+    })
+    vi.stubGlobal('fetch', fetchSpy)
+    const store = useCommandCenterStore()
+    await store.markRead('claude-engram', ['u1', 'u2'])
+
+    const call: any = fetchSpy.mock.calls.find((c: any[]) => String(c[0]).includes('/api/tools/mark_messages_read'))
+    expect(call).toBeTruthy()
+    expect(call[1].method).toBe('POST')
+    expect(JSON.parse(call[1].body)).toEqual({ agentId: 'claude-engram', messageIds: ['u1', 'u2'] })
+  })
+
+  it('archive POSTs archive_messages to /api/tools with the message ids', async () => {
+    const fetchSpy = mockFetch({
+      '/api/recent-events': { messages: [], unreadByAgent: {} },
+      '/api/tools/archive_messages': { status: 'ok' },
+    })
+    vi.stubGlobal('fetch', fetchSpy)
+    const store = useCommandCenterStore()
+    await store.archive('claude-engram', ['a1'])
+
+    const call: any = fetchSpy.mock.calls.find((c: any[]) => String(c[0]).includes('/api/tools/archive_messages'))
+    expect(call).toBeTruthy()
+    expect(call[1].method).toBe('POST')
+    expect(JSON.parse(call[1].body)).toEqual({ agentId: 'claude-engram', messageIds: ['a1'] })
+  })
 })
