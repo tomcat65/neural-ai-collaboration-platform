@@ -226,6 +226,7 @@ describe('data-steward store (Phase 2b-ui.2 — import + full-DB restore)', () =
     expect(String(post[0])).toContain('/api/data/snapshots/snap-A/restore')
     expect(JSON.parse(post[1].body)).toEqual({ confirm: true })
     expect(result.preRestoreBackup).toBe('pre-restore-123.db')
+    expect(result.refreshFailed).toBe(false)
     // whole store swapped -> re-initialized from the restored DB
     expect(store.prefixes).toContain('restored-engram')
     expect(store.busy).toBeNull()
@@ -258,6 +259,7 @@ describe('data-steward store (Phase 2b-ui.2 — import + full-DB restore)', () =
     const result = await store.restoreSnapshot('snap-A') // resolves, does NOT throw
 
     expect(result.preRestoreBackup).toBe('pre-restore-9.db')
+    expect(result.refreshFailed).toBe(true) // restore ok, but the post-swap refresh failed
     expect(store.error).toBeNull() // a best-effort refresh failure is not surfaced as an error
     expect(store.busy).toBeNull()
   })

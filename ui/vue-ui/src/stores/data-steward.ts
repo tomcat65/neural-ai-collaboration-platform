@@ -326,7 +326,7 @@ export const useDataStewardStore = defineStore('data-steward', () => {
    */
   async function restoreSnapshot(
     snapshotId: string
-  ): Promise<{ restoredFrom: string; preRestoreBackup: string }> {
+  ): Promise<{ restoredFrom: string; preRestoreBackup: string; refreshFailed: boolean }> {
     busy.value = 'restore-db'
     error.value = null
     try {
@@ -336,15 +336,18 @@ export const useDataStewardStore = defineStore('data-steward', () => {
         { confirm: true }
       )
       // The restore itself has SUCCEEDED here. The post-swap refresh is BEST-EFFORT:
-      // during the brief offline/reopen window a refresh GET can transiently fail, and
-      // that must NOT mask the successful restore or hide the preRestoreBackup undo
-      // handle. Swallow refresh errors and still return the restore result.
+      // during the brief offline/reopen window a refresh GET can transiently fail. That
+      // must NOT mask the successful restore or hide the preRestoreBackup undo handle —
+      // so we always return the restore result, and report refreshFailed SEPARATELY so
+      // the UI can show a "restored, but the views may be stale — reload" notice instead
+      // of a failed-restore error.
+      let refreshFailed = false
       try {
         await Promise.all([fetchPrefixes(), fetchSnapshots(), fetchLocations(), fetchTrash(), fetchAudit()])
       } catch {
-        /* best-effort refresh — the restore already succeeded */
+        refreshFailed = true
       }
-      return result
+      return { ...result, refreshFailed }
     } catch (e: any) {
       error.value = e?.message || 'restore failed'
       throw e

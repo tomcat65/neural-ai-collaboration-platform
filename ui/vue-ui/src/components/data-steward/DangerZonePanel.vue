@@ -9,7 +9,7 @@ import ConfirmDialog from '@/components/data-steward/ConfirmDialog.vue'
 
 const store = useDataStewardStore()
 const target = ref<Snapshot | null>(null)
-const result = ref<{ restoredFrom: string; preRestoreBackup: string } | null>(null)
+const result = ref<{ restoredFrom: string; preRestoreBackup: string; refreshFailed: boolean } | null>(null)
 
 const restoring = computed(() => store.busy === 'restore-db')
 
@@ -47,9 +47,13 @@ async function confirmRestore() {
       agents may see errors for a moment).
     </p>
 
-    <div v-if="result" class="result">
+    <div v-if="result" class="result" :class="{ stale: result.refreshFailed }">
       ✓ Restored from <code>{{ result.restoredFrom }}</code>. Your previous state was saved as
       <code>{{ result.preRestoreBackup }}</code> in Backups — restore that to undo.
+      <div v-if="result.refreshFailed" class="stale-note">
+        ⚠ The restore succeeded, but refreshing the views failed — the data shown may be stale.
+        Reload the page to see the restored state.
+      </div>
     </div>
 
     <ul class="snap-list">
@@ -93,6 +97,8 @@ async function confirmRestore() {
 .warn b { color: var(--cc-red); }
 .result { margin: 0.5rem 0.6rem 0; padding: 0.5rem 0.6rem; border: 1px solid var(--cc-green); background: var(--cc-green-dim, transparent); border-radius: 5px; font-size: calc(0.68rem * var(--cc-font-scale, 1)); color: var(--cc-text-dim); }
 .result code { color: var(--cc-green); font-family: 'JetBrains Mono', monospace; }
+.result.stale { border-color: var(--cc-amber); }
+.stale-note { margin-top: 0.4rem; color: var(--cc-amber); font-size: calc(0.66rem * var(--cc-font-scale, 1)); line-height: 1.5; }
 .snap-list { list-style: none; margin: 0; padding: 0.5rem 0.6rem; overflow-y: auto; max-height: 280px; display: flex; flex-direction: column; gap: 0.35rem; }
 .snap { display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0.55rem; border: 1px solid var(--cc-border); border-radius: 5px; background: var(--cc-surface-2); }
 .snap-info { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 0.1rem; }
