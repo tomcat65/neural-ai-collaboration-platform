@@ -165,6 +165,30 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     Object.values(unreadByAgent.value).reduce((sum, n) => sum + n, 0)
   )
 
+  // Per-recipient unread inbox: group unread (not archived) messages by recipient
+  // (toAgent), newest first, using the server's tenant-wide count. Drives InboxPanel.
+  const unreadInbox = computed<{ agent: string; count: number; previews: Message[] }[]>(() => {
+    const groups = new Map<string, Message[]>()
+    for (const m of messages.value) {
+      if (m.isRead || m.isArchived) continue
+      const arr = groups.get(m.toAgent)
+      if (arr) arr.push(m)
+      else groups.set(m.toAgent, [m])
+    }
+    const seen = new Set<string>()
+    const entries: { agent: string; count: number; previews: Message[] }[] = []
+    for (const [agent, msgs] of groups) {
+      seen.add(agent)
+      msgs.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      entries.push({ agent, count: unreadByAgent.value[agent] ?? msgs.length, previews: msgs.slice(0, 5) })
+    }
+    // Agents with server-side unread but no loaded previews (count-only row).
+    for (const [agent, count] of Object.entries(unreadByAgent.value)) {
+      if (count > 0 && !seen.has(agent)) entries.push({ agent, count, previews: [] })
+    }
+    return entries.sort((a, b) => b.count - a.count)
+  })
+
   // since-cursor for incremental message fetching
   let messageCursor: string | null = null
 
@@ -617,6 +641,56 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     filter.value = { search: '', agent: '', type: '', readState: 'all' }
   }
 
+  // ── Comms write actions (Engram comms surface, PR3) ──────────
+  // Reuse the server's authenticated generic POST /api/tools/:toolName (codex
+  // decision 234700b1). A tiny client-side allowlist keeps the dashboard to the
+  // two explicit message-lifecycle tools — never arbitrary tool calls.
+  const WRITE_TOOL_ALLOWLIST = new Set(['mark_messages_read', 'archive_messages'])
+  async function postTool(toolName: string, args: Record<string, unknown>): Promise<void> {
+    if (!WRITE_TOOL_ALLOWLIST.has(toolName)) {
+      throw new Error(`Dashboard is not allowed to call tool: ${toolName}`)
+    }
+    const res = await fetch(`/api/tools/${toolName}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(args),
+    })
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  }
+
+  /** Mark specific messages — or all unread for an agent when ids omitted — read. Optimistic, then refetch. */
+  async function markRead(agentId: string, messageIds?: string[]) {
+    const ids = messageIds ? new Set(messageIds) : null
+    for (const m of messages.value) {
+      const hit = ids ? ids.has(m.id) : (m.toAgent === agentId && !m.isArchived)
+      if (hit && !m.isRead) { m.isRead = true; m.readAt = new Date() }
+    }
+    if (unreadByAgent.value[agentId] != null) {
+      unreadByAgent.value[agentId] = ids ? Math.max(0, unreadByAgent.value[agentId] - ids.size) : 0
+    }
+    try {
+      await postTool('mark_messages_read', messageIds ? { agentId, messageIds } : { agentId })
+    } finally {
+      await fetchMessages()
+    }
+  }
+
+  /** Archive specific messages for an agent. Optimistic, then refetch. */
+  async function archive(agentId: string, messageIds: string[]) {
+    const ids = new Set(messageIds)
+    for (const m of messages.value) {
+      if (ids.has(m.id)) m.isArchived = true
+    }
+    if (unreadByAgent.value[agentId] != null) {
+      unreadByAgent.value[agentId] = Math.max(0, unreadByAgent.value[agentId] - ids.size)
+    }
+    try {
+      await postTool('archive_messages', { agentId, messageIds })
+    } finally {
+      await fetchMessages()
+    }
+  }
+
   return {
     // State
     agents,
@@ -645,6 +719,7 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     messageTypes,
     agentNames,
     attentionItems,
+    unreadInbox,
 
     // Actions
     initialize,
@@ -654,6 +729,8 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     setFilter,
     setActiveProject,
     clearFilter,
+    markRead,
+    archive,
     // Exposed for focused parsing tests (see command-center.spec.ts).
     fetchAgents,
     fetchAnalytics,
