@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
-import { useCommandCenterStore } from './command-center'
+import { useCommandCenterStore, isFixtureEntity } from './command-center'
 
 function mockFetch(routes: Record<string, any>) {
   return vi.fn(async (url: string) => {
@@ -196,5 +196,55 @@ describe('command-center store — canonical agent-status + DB size parsing', ()
     expect(call).toBeTruthy()
     expect(call[1].method).toBe('POST')
     expect(JSON.parse(call[1].body)).toEqual({ agentId: 'claude-engram', messageIds: ['a1'] })
+  })
+
+  // ── Redesign Phase 0 ─────────────────────────────────────────
+  it('Phase 0: isFixtureEntity flags test fixtures, keeps real entities', () => {
+    expect(isFixtureEntity('Houston Blenders Voice Launch 1777490848475', 'project')).toBe(true) // stamped name
+    expect(isFixtureEntity('Houston Blenders Voice Timestamp 20260429194025-32716', 'project')).toBe(true)
+    expect(isFixtureEntity('hb', 'project-smoke-test')).toBe(true) // fixture type
+    expect(isFixtureEntity('_contract_test_x', 'project')).toBe(true) // prefix
+    expect(isFixtureEntity('engram', 'project')).toBe(false)
+    expect(isFixtureEntity('houston-blenders', 'project')).toBe(false) // real project (no stamp)
+  })
+
+  it('Phase 0: cleanKnowledge hides fixtures unless showTestData', () => {
+    const store = useCommandCenterStore()
+    store.knowledge.push(
+      { entityName: 'engram', entityType: 'project', observationCount: 5, latestObservation: 'x', updatedAt: new Date(), isNew: false },
+      { entityName: 'Houston Blenders Voice Launch 1777490848475', entityType: 'project', observationCount: 1, latestObservation: 'y', updatedAt: new Date(), isNew: false },
+    )
+    expect(store.cleanKnowledge.map((k) => k.entityName)).toEqual(['engram'])
+    store.setShowTestData(true)
+    expect(store.cleanKnowledge.length).toBe(2)
+  })
+
+  it('Phase 0: digest selectors group threads, flag needs-you, compute pulse', async () => {
+    vi.stubGlobal('fetch', mockFetch({
+      '/api/recent-events': {
+        messages: [
+          { id: 't1', from_agent: 'codex-desktop', to_agent: 'claude-engram', content: 'hi', message_type: 'info', created_at: '2026-05-31 10:00:00', read_at: null, archived_at: null },
+          { id: 't2', from_agent: 'claude-engram', to_agent: 'codex-desktop', content: 'reply', message_type: 'info', created_at: '2026-05-31 10:01:00', read_at: '2026-05-31 10:02:00', archived_at: null },
+          { id: 'q1', from_agent: 'codex-desktop', to_agent: 'tomas', content: 'decision needed?', message_type: 'query', created_at: '2026-05-31 10:03:00', read_at: null, archived_at: null },
+        ],
+        unreadByAgent: { 'claude-engram': 1, tomas: 1 },
+      },
+    }))
+    const store = useCommandCenterStore()
+    await store.fetchMessages()
+
+    // t1 + t2 collapse into one agent-pair thread; q1 is its own.
+    expect(store.messageThreads.length).toBe(2)
+    const cc = store.messageThreads.find((t) => t.key.includes('claude-engram') && t.key.includes('codex-desktop'))
+    expect(cc?.count).toBe(2)
+    expect(cc?.unreadCount).toBe(1) // t1 unread, t2 read
+
+    // needs-you: q1 is unread, to a human alias (tomas) AND a query.
+    expect(store.needsYou.map((m) => m.id)).toEqual(['q1'])
+
+    // pulse headline counts
+    expect(store.pulse.threads).toBe(2)
+    expect(store.pulse.needsYou).toBe(1)
+    expect(store.pulse.unread).toBe(2) // totalUnread = sum(unreadByAgent)
   })
 })

@@ -16,6 +16,9 @@ import type {
   GraphExportResponse,
   GraphLink,
   ContainerInfo,
+  MessageThread,
+  ProjectDigest,
+  Pulse,
 } from '@/types/command-center'
 
 // Test-only agent id prefixes (these are genuinely test fixtures, not real
@@ -92,11 +95,45 @@ function toMessage(m: ApiMessage): Message {
 
 const MAX_MESSAGES = 500
 
-// Filter out test project entities
+// ── Data hygiene (Engram redesign Phase 0) ──────────────────────
+// The graph is polluted with test/smoke fixtures (e.g. 121+ "Houston Blenders
+// Voice Launch/Timestamp <stamp>" entities from memory-system tests). Hide them
+// from the human-facing dashboard by name-prefix, generated-stamp names (13+
+// digit epoch / YYYYMMDDHHMMSS handles), fixture entity TYPES, and an editable
+// extra substring list. A "show test data" toggle bypasses this.
 const TEST_ENTITY_PREFIXES = ['_session_test_', '_contract_test_', '_security_test_', '_tenant_iso_']
+const FIXTURE_STAMP_RE = /\d{13,}/                  // epoch-ms / long generated handles
+const FIXTURE_TYPE_RE = /smoke|fixture|[-_]test$/i  // project-smoke-test, *_test, *-fixture
+const NOISE_NAME_SUBSTRINGS: string[] = []          // editable extra noise (case-insensitive)
 
+export function isFixtureEntity(name: string, entityType = ''): boolean {
+  if (!name) return true
+  const n = name.toLowerCase()
+  if (TEST_ENTITY_PREFIXES.some((p) => n.startsWith(p))) return true
+  if (FIXTURE_STAMP_RE.test(name)) return true
+  if (entityType && FIXTURE_TYPE_RE.test(entityType)) return true
+  if (NOISE_NAME_SUBSTRINGS.some((s) => n.includes(s.toLowerCase()))) return true
+  return false
+}
+
+// Back-compat: a "real" (non-fixture) project, name only.
 function isRealProject(name: string): boolean {
-  return !TEST_ENTITY_PREFIXES.some((p) => name.startsWith(p))
+  return !isFixtureEntity(name)
+}
+
+// ── Needs-You detection (Engram redesign Phase 0) ───────────────
+// HUMAN_ALIASES: configurable agent ids that represent the human operator.
+// EDIT this set to match your ids — it is explicit config, not guessed.
+const HUMAN_ALIASES = new Set(['tomas', 'tommy', 'tomcat65'])
+const NEEDS_YOU_TYPES = new Set(['query', 'question', 'urgent'])
+
+// A message "needs you" if it is unread + unarchived AND either addressed to a
+// human alias or an explicit question/query. (priority/expected_reply signals
+// need the server to expose priority on /api/recent-events — a later add.)
+function messageNeedsYou(m: Message): boolean {
+  if (m.isRead || m.isArchived) return false
+  if (HUMAN_ALIASES.has(m.toAgent.toLowerCase())) return true
+  return NEEDS_YOU_TYPES.has(m.messageType.toLowerCase())
 }
 
 // ── Entity → Agent Resolver ─────────────────────────────────
@@ -148,6 +185,8 @@ export const useCommandCenterStore = defineStore('command-center', () => {
   })
   const dismissedAttentionIds = ref<Set<string>>(new Set())
   const availableProjects = ref<ProjectInfo[]>([])
+  // Data-hygiene toggle: when true, fixtures/test entities are shown (default off).
+  const showTestData = ref(false)
   const graphLinks = ref<GraphLink[]>([])  // relations from knowledge graph
   const graphNodes = ref<{ name: string; entityType: string }[]>([])  // entity type lookups
 
@@ -360,13 +399,21 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     return Array.from(names).sort()
   })
 
+  // Noise-filtered knowledge feed (fixtures hidden unless showTestData), top 50.
+  const cleanKnowledge = computed<KnowledgeChange[]>(() => {
+    const base = showTestData.value
+      ? knowledge.value
+      : knowledge.value.filter((k) => !isFixtureEntity(k.entityName, k.entityType))
+    return base.slice(0, 50)
+  })
+
   // Knowledge filtered by graph relations (1-hop) with fallback to content match
   const filteredKnowledge = computed(() => {
-    if (!activeProject.value) return knowledge.value
+    if (!activeProject.value) return cleanKnowledge.value
     const related = projectRelatedEntities.value
     const proj = activeProject.value.toLowerCase()
 
-    return knowledge.value.filter((k) => {
+    return cleanKnowledge.value.filter((k) => {
       const name = k.entityName.toLowerCase()
       // Direct graph relation (1-hop neighbor)
       if (related.has(name)) return true
@@ -383,6 +430,68 @@ export const useCommandCenterStore = defineStore('command-center', () => {
       return false
     })
   })
+
+  // ── Digest / selector model (Engram redesign Phase 0) ─────────
+  // Threads = deterministic grouping of (non-archived) messages by agent-pair,
+  // newest first, with counts + unread + needs-you + a latest-line preview.
+  const messageThreads = computed<MessageThread[]>(() => {
+    const map = new Map<string, Message[]>()
+    for (const m of messages.value) {
+      if (m.isArchived) continue
+      const key = [m.fromAgent, m.toAgent].sort().join(' ↔ ')
+      const arr = map.get(key)
+      if (arr) arr.push(m)
+      else map.set(key, [m])
+    }
+    const threads: MessageThread[] = []
+    for (const [key, msgs] of map) {
+      msgs.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      const latest = msgs[0]
+      threads.push({
+        key,
+        participants: key.split(' ↔ '),
+        count: msgs.length,
+        unreadCount: msgs.filter((m) => !m.isRead).length,
+        needsYou: msgs.some(messageNeedsYou),
+        latestLine: latest.content.length > 120 ? latest.content.slice(0, 120) + '…' : latest.content,
+        latestAt: latest.createdAt,
+      })
+    }
+    return threads.sort((a, b) => b.latestAt.getTime() - a.latestAt.getTime())
+  })
+
+  // Flat triage list: messages that need the human, newest first.
+  const needsYou = computed<Message[]>(() =>
+    messages.value.filter(messageNeedsYou).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+  )
+
+  // Per-project activity rollup (reuses the project-relevance heuristic).
+  const projectDigests = computed<ProjectDigest[]>(() =>
+    availableProjects.value
+      .map((p) => {
+        const proj = p.name.toLowerCase()
+        const msgs = messages.value.filter((m) => !m.isArchived && isMessageAboutProject(m, proj))
+        const knowledgeChanges = cleanKnowledge.value.filter((k) => k.entityName.toLowerCase().includes(proj)).length
+        return {
+          project: p.name,
+          messageCount: msgs.length,
+          unreadCount: msgs.filter((m) => !m.isRead).length,
+          knowledgeChanges,
+        }
+      })
+      .filter((d) => d.messageCount > 0 || d.knowledgeChanges > 0)
+      .sort((a, b) => b.unreadCount - a.unreadCount || b.messageCount - a.messageCount)
+  )
+
+  // Headline counts for the overview Pulse band.
+  const pulse = computed<Pulse>(() => ({
+    activeAgents: activeAgents.value.length,
+    unread: totalUnread.value,
+    needsYou: needsYou.value.length,
+    threads: messageThreads.value.length,
+    projects: availableProjects.value.length,
+    knowledgeChanges: cleanKnowledge.value.length,
+  }))
 
   const attentionItems = computed<AttentionItem[]>(() => {
     return messages.value
@@ -531,7 +640,7 @@ export const useCommandCenterStore = defineStore('command-center', () => {
       const projects: ProjectInfo[] = []
       for (const node of data.nodes || []) {
         const t = (node.entityType || '').toLowerCase()
-        if ((t === 'project' || t === 'spectra-project') && isRealProject(node.name) && !seen.has(node.name)) {
+        if ((t === 'project' || t === 'spectra-project') && !isFixtureEntity(node.name, node.entityType) && !seen.has(node.name)) {
           seen.add(node.name)
           projects.push({ name: node.name, observationCount: node.observationCount })
         }
@@ -568,9 +677,11 @@ export const useCommandCenterStore = defineStore('command-center', () => {
         }
       }
 
-      // Merge with nodes, sort by most recent observation — filter out test entities
+      // Merge with nodes, sort by most recent observation. Keep RAW here (incl.
+      // fixtures) so the showTestData toggle can reveal them; the noise filter is
+      // applied reactively in cleanKnowledge.
       const changes: KnowledgeChange[] = (data.nodes || [])
-        .filter((node) => node.name && isRealProject(node.name))
+        .filter((node) => node.name)
         .map((node) => {
           const obs = obsMap.get(node.name)
           return {
@@ -583,7 +694,7 @@ export const useCommandCenterStore = defineStore('command-center', () => {
           }
         })
         .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
-        .slice(0, 50)
+        .slice(0, 200)
 
       knowledge.value = changes
     } catch (e: any) {
@@ -639,6 +750,10 @@ export const useCommandCenterStore = defineStore('command-center', () => {
 
   function clearFilter() {
     filter.value = { search: '', agent: '', type: '', readState: 'all' }
+  }
+
+  function setShowTestData(v: boolean) {
+    showTestData.value = v
   }
 
   // ── Comms write actions (Engram comms surface, PR3) ──────────
@@ -704,6 +819,7 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     filter,
     activeProject,
     unreadByAgent,
+    showTestData,
 
     // Computed
     realAgents,
@@ -712,6 +828,11 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     offlineAgents,
     filteredMessages,
     filteredKnowledge,
+    cleanKnowledge,
+    messageThreads,
+    needsYou,
+    projectDigests,
+    pulse,
     projectAgentNames,
     projectRelatedEntities,
     graphProjectParticipants,
@@ -729,6 +850,7 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     setFilter,
     setActiveProject,
     clearFilter,
+    setShowTestData,
     markRead,
     archive,
     // Exposed for focused parsing tests (see command-center.spec.ts).

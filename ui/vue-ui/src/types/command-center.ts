@@ -189,3 +189,33 @@ export type MessageFilter = {
 }
 
 export type ThemeName = 'dark' | 'light'
+
+// ── Digest / selector model (Engram redesign Phase 0) ───────────
+// A summarized message thread (deterministic grouping by agent-pair).
+export interface MessageThread {
+  key: string
+  participants: string[]
+  count: number
+  unreadCount: number
+  needsYou: boolean
+  latestLine: string
+  latestAt: Date
+}
+
+// Per-project activity rollup for the overview.
+export interface ProjectDigest {
+  project: string
+  messageCount: number
+  unreadCount: number
+  knowledgeChanges: number
+}
+
+// Headline counts for the overview Pulse band.
+export interface Pulse {
+  activeAgents: number
+  unread: number
+  needsYou: number
+  threads: number
+  projects: number
+  knowledgeChanges: number
+}
