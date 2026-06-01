@@ -95,6 +95,8 @@ describe('/api/data trash lifecycle (Phase 2b)', () => {
     await auth(supertest(app).post(`/api/data/trash/${retire.body.trashId}/restore`)).expect(200);
     expect(liveCount('Recoverable')).toBe(1);  // back in the live store
     expect(trashCount()).toBe(0);              // trash entry consumed
+    const audit = server.getMemoryManager().queryAuditLog(undefined, 'trash_restore', 10);
+    expect(audit.some((a: any) => a.entity_name === retire.body.trashId)).toBe(true);
   });
 
   it('purge removes a trash entry permanently', async () => {
@@ -105,6 +107,8 @@ describe('/api/data trash lifecycle (Phase 2b)', () => {
     const purge = await auth(supertest(app).delete(`/api/data/trash/${retire.body.trashId}`)).expect(200);
     expect(purge.body.purged).toBe(1);
     expect(trashCount()).toBe(0);
+    const audit = server.getMemoryManager().queryAuditLog(undefined, 'trash_purge', 10);
+    expect(audit.some((a: any) => a.entity_name === retire.body.trashId)).toBe(true);
   });
 
   it('retire of a non-existent entity is a no-op: 404, nothing deleted, nothing trashed', async () => {
@@ -118,5 +122,12 @@ describe('/api/data trash lifecycle (Phase 2b)', () => {
   it('restore of an unknown trashId is 404', async () => {
     boot();
     await auth(supertest(app).post('/api/data/trash/nope-not-real/restore')).expect(404);
+  });
+
+  it('purge of an unknown trashId is 404 with no success audit', async () => {
+    boot();
+    await auth(supertest(app).delete('/api/data/trash/nope-not-real')).expect(404);
+    const audit = server.getMemoryManager().queryAuditLog(undefined, 'trash_purge', 10);
+    expect(audit.length).toBe(0); // no audit row written for a no-op purge
   });
 });

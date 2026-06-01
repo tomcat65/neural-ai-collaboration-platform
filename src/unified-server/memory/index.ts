@@ -7414,6 +7414,14 @@ export class MemoryManager {
     if (!row) throw new Error(`Trash entry not found: ${trashId}`);
     const backup = JSON.parse(row.backup);
     const restored = await this.importEntities(backup, tenantId);
+    // Never drop the backup on a PARTIAL restore: importEntities collects
+    // row-level errors instead of throwing, so preserve the trash entry (for
+    // retry) and fail loudly unless the restore fully succeeded.
+    if (restored.errors && restored.errors.length > 0) {
+      throw new Error(
+        `Restore incomplete (${restored.errors.length} error(s)); trash preserved for retry: ${restored.errors.slice(0, 3).join('; ')}`
+      );
+    }
     this.db.prepare(`DELETE FROM data_trash WHERE trash_id = ? AND tenant_id = ?`).run(trashId, tenantId);
     return { trashId, restored };
   }

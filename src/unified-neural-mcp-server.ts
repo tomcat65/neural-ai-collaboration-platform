@@ -905,6 +905,11 @@ export class NeuralMCPServer {
       try {
         const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
         const result = this.memoryManager.purgeTrash(req.params.id, context.tenantId);
+        if (result.purged === 0) {
+          // Unknown target — a no-op; do NOT write a success audit.
+          res.status(404).json({ error: `Trash entry not found: ${req.params.id}` });
+          return;
+        }
         this.memoryManager.auditLog(
           'trash_purge',
           context.userId || context.apiKeyId || 'unknown',
