@@ -1,13 +1,14 @@
 <script setup lang="ts">
-// Data Steward (Phase 2a, non-destructive). The human custodian console over the
-// agent memory store: SEE (Library), PORT (Backups), and AUDIT. Delete/restore/
-// import are deferred to 2b (behind their own review). All data comes from the
-// server data-management API (/api/data/*), gated by ENABLE_DATA_MANAGEMENT.
+// Data Steward. The human custodian console over the agent memory store: SEE
+// (Library), CURATE (delete → Trash → restore / purge), PORT (Backups), and AUDIT.
+// Full-DB restore + logical import land in 2b-ui.2. All data comes from the server
+// data-management API (/api/data/*), gated by ENABLE_DATA_MANAGEMENT.
 import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useDataStewardStore } from '@/stores/data-steward'
 import { useTheme } from '@/composables/useTheme'
 import LibraryPanel from '@/components/data-steward/LibraryPanel.vue'
+import TrashPanel from '@/components/data-steward/TrashPanel.vue'
 import BackupsPanel from '@/components/data-steward/BackupsPanel.vue'
 import AuditPanel from '@/components/data-steward/AuditPanel.vue'
 
@@ -59,6 +60,7 @@ function openCommandCenter() {
       <div v-else class="grid">
         <LibraryPanel class="col-lib" />
         <div class="col-side">
+          <TrashPanel />
           <BackupsPanel />
           <AuditPanel />
         </div>
