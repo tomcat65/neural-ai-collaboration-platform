@@ -24,6 +24,15 @@ export interface Snapshot {
   locationId?: string
   locationLabel?: string
 }
+/** A durable server-side Trash entry (metadata only — the backup payload is never listed). */
+export interface TrashEntry {
+  trashId: string
+  retiredAt: string
+  reason: string | null
+  entityNames: string[]
+  counts: { entities: number; observations: number; relations: number }
+  restoredAt: string | null
+}
 export interface BackupLocation {
   id: string
   path: string
@@ -64,6 +73,7 @@ export const useDataStewardStore = defineStore('data-steward', () => {
   const snapshots = ref<Snapshot[]>([])
   const locations = ref<BackupLocation[]>([])
   const auditEntries = ref<AuditEntry[]>([])
+  const trash = ref<TrashEntry[]>([]) // durable server-side Trash (2b)
   // null = unknown; false = /admin/audit-log unreachable (admin endpoints/proxy off).
   const auditAvailable = ref<boolean | null>(null)
   const loading = ref(false)
@@ -87,6 +97,39 @@ export const useDataStewardStore = defineStore('data-steward', () => {
     }
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
     if (available.value === null) available.value = true
+    return (await res.json()) as T
+  }
+
+  // Mutating call (POST/DELETE) with the same disabled-flag detection as getJSON,
+  // surfacing the server's error message (e.g. 404 "Trash entry not found").
+  async function sendJSON<T>(url: string, method: 'POST' | 'DELETE', body?: unknown): Promise<T> {
+    const res = await fetch(url, {
+      method,
+      headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+    if (res.status === 403) {
+      let code = ''
+      try {
+        code = ((await res.clone().json()) as { code?: string })?.code || ''
+      } catch {
+        /* non-JSON 403 */
+      }
+      if (code === 'DATA_MANAGEMENT_DISABLED') {
+        available.value = false
+        throw new DataMgmtDisabled()
+      }
+    }
+    if (!res.ok) {
+      let msg = `${res.status} ${res.statusText}`
+      try {
+        const j = (await res.clone().json()) as { error?: string }
+        if (j?.error) msg = j.error
+      } catch {
+        /* non-JSON error body */
+      }
+      throw new Error(msg)
+    }
     return (await res.json()) as T
   }
 
@@ -172,13 +215,79 @@ export const useDataStewardStore = defineStore('data-steward', () => {
     }
   }
 
+  // ---- 2b: destructive Trash lifecycle (delete → trash → restore / purge) ----
+
+  /** List the durable server-side Trash (metadata only — no payloads). */
+  async function fetchTrash(): Promise<void> {
+    const data = await getJSON<{ trash: TrashEntry[] }>('/api/data/trash')
+    trash.value = data.trash || []
+  }
+
+  /**
+   * Retire (soft-delete) explicit entity NAMES. The server writes a verified Trash
+   * entry BEFORE hard-deleting, so this is recoverable via restoreTrash(). Refreshes
+   * the Library + Trash views and clears the stale preview on success.
+   */
+  async function retire(
+    entityNames: string[],
+    reason?: string
+  ): Promise<{ trashId: string; counts: { entities: number; observations: number; relations: number }; deleted: number }> {
+    busy.value = 'retire'
+    error.value = null
+    try {
+      const result = await sendJSON<{
+        trashId: string
+        counts: { entities: number; observations: number; relations: number }
+        deleted: number
+      }>('/api/data/retire', 'DELETE', { entityNames, reason })
+      await Promise.all([fetchTrash(), fetchPrefixes()])
+      preview.value = null
+      return result
+    } catch (e: any) {
+      error.value = e?.message || 'retire failed'
+      throw e
+    } finally {
+      busy.value = null
+    }
+  }
+
+  /** Restore a trashed set by trashId (re-imports its stored backup atomically). */
+  async function restoreTrash(trashId: string): Promise<void> {
+    busy.value = 'restore:' + trashId
+    error.value = null
+    try {
+      await sendJSON('/api/data/trash/' + encodeURIComponent(trashId) + '/restore', 'POST')
+      await Promise.all([fetchTrash(), fetchPrefixes()])
+    } catch (e: any) {
+      error.value = e?.message || 'restore failed'
+      throw e
+    } finally {
+      busy.value = null
+    }
+  }
+
+  /** Permanently purge a trash entry — its backup is gone for good (no recovery). */
+  async function purgeTrash(trashId: string): Promise<void> {
+    busy.value = 'purge:' + trashId
+    error.value = null
+    try {
+      await sendJSON('/api/data/trash/' + encodeURIComponent(trashId), 'DELETE')
+      await fetchTrash()
+    } catch (e: any) {
+      error.value = e?.message || 'purge failed'
+      throw e
+    } finally {
+      busy.value = null
+    }
+  }
+
   /** Initial load — probes the feature flag and loads the non-destructive views. */
   async function initialize(): Promise<void> {
     loading.value = true
     error.value = null
     try {
       await fetchPrefixes() // probes availability (may set available=false)
-      await Promise.all([fetchSnapshots(), fetchLocations(), fetchAudit()])
+      await Promise.all([fetchSnapshots(), fetchLocations(), fetchAudit(), fetchTrash()])
     } catch (e: any) {
       if (e instanceof DataMgmtDisabled) {
         // available is already false → the view shows the disabled state.
@@ -198,6 +307,7 @@ export const useDataStewardStore = defineStore('data-steward', () => {
     snapshots,
     locations,
     auditEntries,
+    trash,
     auditAvailable,
     loading,
     busy,
@@ -211,5 +321,9 @@ export const useDataStewardStore = defineStore('data-steward', () => {
     exportPreview,
     downloadExport,
     createSnapshot,
+    fetchTrash,
+    retire,
+    restoreTrash,
+    purgeTrash,
   }
 })
