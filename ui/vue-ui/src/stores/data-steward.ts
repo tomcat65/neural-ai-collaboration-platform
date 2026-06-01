@@ -302,7 +302,12 @@ export const useDataStewardStore = defineStore('data-steward', () => {
     error.value = null
     try {
       const result = await sendJSON<Record<string, unknown>>('/api/data/import', 'POST', backup)
-      await Promise.all([fetchPrefixes(), fetchTrash()])
+      // Best-effort refresh — a refresh failure must not mask a successful import.
+      try {
+        await Promise.all([fetchPrefixes(), fetchTrash()])
+      } catch {
+        /* best-effort refresh — the import already succeeded */
+      }
       return result
     } catch (e: any) {
       error.value = e?.message || 'import failed'
@@ -330,8 +335,15 @@ export const useDataStewardStore = defineStore('data-steward', () => {
         'POST',
         { confirm: true }
       )
-      // The whole DB was swapped — refresh every view to reflect the restored state.
-      await Promise.all([fetchPrefixes(), fetchSnapshots(), fetchLocations(), fetchTrash(), fetchAudit()])
+      // The restore itself has SUCCEEDED here. The post-swap refresh is BEST-EFFORT:
+      // during the brief offline/reopen window a refresh GET can transiently fail, and
+      // that must NOT mask the successful restore or hide the preRestoreBackup undo
+      // handle. Swallow refresh errors and still return the restore result.
+      try {
+        await Promise.all([fetchPrefixes(), fetchSnapshots(), fetchLocations(), fetchTrash(), fetchAudit()])
+      } catch {
+        /* best-effort refresh — the restore already succeeded */
+      }
       return result
     } catch (e: any) {
       error.value = e?.message || 'restore failed'

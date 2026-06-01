@@ -241,6 +241,27 @@ describe('data-steward store (Phase 2b-ui.2 — import + full-DB restore)', () =
     expect(store.busy).toBeNull()
   })
 
+  it('restoreSnapshot still succeeds (surfaces the safety backup) when a post-swap refresh GET transiently fails', async () => {
+    // codex blocker (PR #36): the restore POST succeeds, but a refresh GET fails during
+    // the brief offline/reopen window — that must NOT mask the success or hide preRestoreBackup.
+    const fetchSpy = mockFetchMethod({
+      'POST /api/data/snapshots': { body: { restoredFrom: 'snap-A.db', preRestoreBackup: 'pre-restore-9.db' } },
+      'GET /api/data/entity-prefixes': { status: 500, body: { error: 'db reopening' } }, // transient
+      'GET /api/data/snapshots': { body: { snapshots: [] } },
+      'GET /api/data/backup-locations': { body: { locations: [] } },
+      'GET /api/data/trash': { body: { trash: [] } },
+      'GET /admin/audit-log': { body: [] },
+    })
+    vi.stubGlobal('fetch', fetchSpy)
+    const store = useDataStewardStore()
+
+    const result = await store.restoreSnapshot('snap-A') // resolves, does NOT throw
+
+    expect(result.preRestoreBackup).toBe('pre-restore-9.db')
+    expect(store.error).toBeNull() // a best-effort refresh failure is not surfaced as an error
+    expect(store.busy).toBeNull()
+  })
+
   it('importBackup POSTs the backup, reports inserted/skipped, and refreshes', async () => {
     const backup = { schemaVersion: 1, counts: { entities: 2, observations: 5, relations: 1 }, entities: [], observations: [], relations: [] }
     const fetchSpy = mockFetchMethod({
