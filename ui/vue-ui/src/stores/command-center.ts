@@ -122,17 +122,34 @@ function isRealProject(name: string): boolean {
 }
 
 // ── Needs-You detection (Engram redesign Phase 0) ───────────────
-// HUMAN_ALIASES: configurable agent ids that represent the human operator.
-// EDIT this set to match your ids — it is explicit config, not guessed.
-const HUMAN_ALIASES = new Set(['tomas', 'tommy', 'tomcat65'])
+// HUMAN_ALIASES are the agent ids that represent the human operator. This is
+// EXPLICIT config, never guessed from message content, and it is genuinely
+// configurable: the DEFAULT below is overridden at load by the
+// VITE_HUMAN_ALIASES env var (comma/space-separated), and at runtime by the
+// store's setHumanAliases() action.
+const DEFAULT_HUMAN_ALIASES = ['tomas', 'tommy', 'tomcat65']
 const NEEDS_YOU_TYPES = new Set(['query', 'question', 'urgent'])
 
+// Parse a comma/space-separated alias list into a lowercased Set; falls back to
+// `fallback` when the input is empty/undefined.
+export function parseHumanAliases(
+  raw: string | undefined | null,
+  fallback: string[] = DEFAULT_HUMAN_ALIASES,
+): Set<string> {
+  const ids = (raw ?? '')
+    .split(/[,\s]+/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean)
+  return new Set(ids.length ? ids : fallback.map((s) => s.toLowerCase()))
+}
+
 // A message "needs you" if it is unread + unarchived AND either addressed to a
-// human alias or an explicit question/query. (priority/expected_reply signals
+// human alias or an explicit query/question/urgent. `humanAliases` is injected
+// so the rule stays a pure, testable function. (priority/expected_reply signals
 // need the server to expose priority on /api/recent-events — a later add.)
-function messageNeedsYou(m: Message): boolean {
+export function messageNeedsYou(m: Message, humanAliases: Set<string>): boolean {
   if (m.isRead || m.isArchived) return false
-  if (HUMAN_ALIASES.has(m.toAgent.toLowerCase())) return true
+  if (humanAliases.has(m.toAgent.toLowerCase())) return true
   return NEEDS_YOU_TYPES.has(m.messageType.toLowerCase())
 }
 
@@ -184,9 +201,16 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     dbSize: '—',
   })
   const dismissedAttentionIds = ref<Set<string>>(new Set())
-  const availableProjects = ref<ProjectInfo[]>([])
+  // Raw project list — ALL project-typed nodes incl. fixtures, retained so the
+  // showTestData toggle can reveal them; availableProjects (computed) filters.
+  const rawProjects = ref<ProjectInfo[]>([])
   // Data-hygiene toggle: when true, fixtures/test entities are shown (default off).
   const showTestData = ref(false)
+  // Human-alias config (blocker-3 fix): genuinely configurable — seeded from the
+  // VITE_HUMAN_ALIASES env var, overridable at runtime via setHumanAliases().
+  const humanAliases = ref<Set<string>>(
+    parseHumanAliases((import.meta.env as unknown as Record<string, string | undefined>).VITE_HUMAN_ALIASES),
+  )
   const graphLinks = ref<GraphLink[]>([])  // relations from knowledge graph
   const graphNodes = ref<{ name: string; entityType: string }[]>([])  // entity type lookups
 
@@ -407,6 +431,16 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     return base.slice(0, 50)
   })
 
+  // Project list with fixtures hidden unless showTestData (blocker-1 fix: the
+  // toggle now reaches the project list, not just the knowledge feed). Projects
+  // are type-constrained to project|spectra-project, so name-only fixture
+  // detection is sufficient here.
+  const availableProjects = computed<ProjectInfo[]>(() =>
+    showTestData.value
+      ? rawProjects.value
+      : rawProjects.value.filter((p) => !isFixtureEntity(p.name)),
+  )
+
   // Knowledge filtered by graph relations (1-hop) with fallback to content match
   const filteredKnowledge = computed(() => {
     if (!activeProject.value) return cleanKnowledge.value
@@ -452,7 +486,7 @@ export const useCommandCenterStore = defineStore('command-center', () => {
         participants: key.split(' ↔ '),
         count: msgs.length,
         unreadCount: msgs.filter((m) => !m.isRead).length,
-        needsYou: msgs.some(messageNeedsYou),
+        needsYou: msgs.some((m) => messageNeedsYou(m, humanAliases.value)),
         latestLine: latest.content.length > 120 ? latest.content.slice(0, 120) + '…' : latest.content,
         latestAt: latest.createdAt,
       })
@@ -462,10 +496,15 @@ export const useCommandCenterStore = defineStore('command-center', () => {
 
   // Flat triage list: messages that need the human, newest first.
   const needsYou = computed<Message[]>(() =>
-    messages.value.filter(messageNeedsYou).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+    messages.value
+      .filter((m) => messageNeedsYou(m, humanAliases.value))
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
   )
 
-  // Per-project activity rollup (reuses the project-relevance heuristic).
+  // Per-project activity rollup. BEST-EFFORT / HEURISTIC: messages carry no
+  // canonical projectId, so association is inferred via isMessageAboutProject
+  // (agent-name / headline / repeated-mention) — surface as best-effort in the
+  // UI, never as canonical. See docs/PLAN-Dashboard-Redesign-Phase-0.md §6.
   const projectDigests = computed<ProjectDigest[]>(() =>
     availableProjects.value
       .map((p) => {
@@ -640,12 +679,14 @@ export const useCommandCenterStore = defineStore('command-center', () => {
       const projects: ProjectInfo[] = []
       for (const node of data.nodes || []) {
         const t = (node.entityType || '').toLowerCase()
-        if ((t === 'project' || t === 'spectra-project') && !isFixtureEntity(node.name, node.entityType) && !seen.has(node.name)) {
+        // Keep ALL project-typed nodes (incl. fixtures) so showTestData can reveal
+        // them; fixture filtering moved to the availableProjects computed (blocker-1).
+        if ((t === 'project' || t === 'spectra-project') && !seen.has(node.name)) {
           seen.add(node.name)
           projects.push({ name: node.name, observationCount: node.observationCount })
         }
       }
-      availableProjects.value = projects.sort((a, b) => b.observationCount - a.observationCount)
+      rawProjects.value = projects.sort((a, b) => b.observationCount - a.observationCount)
     } catch (e: any) {
       console.error('fetchProjects failed:', e)
     }
@@ -694,8 +735,10 @@ export const useCommandCenterStore = defineStore('command-center', () => {
           }
         })
         .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
-        .slice(0, 200)
 
+      // Retain the FULL sorted raw set (no premature cap): cleanKnowledge applies
+      // the fixture filter and THEN the visible cutoff, so real entities are never
+      // dropped before filtering. (blocker-2 fix)
       knowledge.value = changes
     } catch (e: any) {
       console.error('fetchKnowledge failed:', e)
@@ -756,6 +799,11 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     showTestData.value = v
   }
 
+  // Runtime override for the human-alias set (blocker-3: genuinely configurable).
+  function setHumanAliases(ids: string[]) {
+    humanAliases.value = new Set(ids.map((s) => s.trim().toLowerCase()).filter(Boolean))
+  }
+
   // ── Comms write actions (Engram comms surface, PR3) ──────────
   // Reuse the server's authenticated generic POST /api/tools/:toolName (codex
   // decision 234700b1). A tiny client-side allowlist keeps the dashboard to the
@@ -813,6 +861,7 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     knowledge,
     systemHealth,
     availableProjects,
+    rawProjects,
     isConnected,
     lastError,
     isLoading,
@@ -820,6 +869,7 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     activeProject,
     unreadByAgent,
     showTestData,
+    humanAliases,
 
     // Computed
     realAgents,
@@ -851,11 +901,14 @@ export const useCommandCenterStore = defineStore('command-center', () => {
     setActiveProject,
     clearFilter,
     setShowTestData,
+    setHumanAliases,
     markRead,
     archive,
     // Exposed for focused parsing tests (see command-center.spec.ts).
     fetchAgents,
     fetchAnalytics,
     fetchMessages,
+    fetchKnowledge,
+    fetchProjects,
   }
 })

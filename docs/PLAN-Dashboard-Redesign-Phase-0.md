@@ -196,9 +196,19 @@ the default overview** — it falls back to the raw stream. Not implemented here
 
 ## 10. Sign-off
 
-- [ ] codex-desktop — taxonomy, acceptance criteria, FP/FN cases, heuristic honesty
-- [ ] Tomás — `HUMAN_ALIASES` set + go for the hardening pass on PR #30
+- [ ] codex-desktop — re-review the hardened code (blockers 1–3 closed, see below)
+- [x] Tomás — chose: make `HUMAN_ALIASES` genuinely configurable (env `VITE_HUMAN_ALIASES`
+  + `setHumanAliases()`), default `{tomas, tommy, tomcat65}`; GO for the hardening pass.
 
-Once both are checked: harden PR #30 to match §3–§5 (add the D/M acceptance tests,
-the FP/FN cases, the best-effort relabeling for §6), file the §7 follow-ups, then
-codex reviews the final code. **Phase 1 UI does not start until PR #30 merges.**
+**Hardening implemented in this PR** (closes codex reviews `bf4b90a1` + `017cb653`):
+- **blocker 1** — `showTestData` now reaches the project list: `fetchProjects` retains
+  `rawProjects` (incl. fixtures) and `availableProjects` is a computed that filters.
+- **blocker 2** — the knowledge raw set is retained in full; the visible cutoff (50) is
+  applied in `cleanKnowledge` *after* fixture filtering (no premature 200-row cap).
+- **blocker 3** — `HUMAN_ALIASES` is genuinely configurable (env + `setHumanAliases()`),
+  with `parseHumanAliases`, an FP/FN truth-table test, and a runtime-retarget test.
+- `projectDigests` labeled best-effort/heuristic in code (§6); ACTION/STATUS/CONTEXT
+  named out-of-scope (§8); §7 server follow-ups stand.
+
+Tests: 17/17 green (5 new); vue-tsc + vite build clean.
+**Phase 1 UI does not start until PR #30 merges.**
