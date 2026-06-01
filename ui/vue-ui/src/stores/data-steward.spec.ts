@@ -204,3 +204,69 @@ describe('data-steward store (Phase 2b — destructive trash lifecycle)', () => 
     expect(store.available).toBe(false)
   })
 })
+
+describe('data-steward store (Phase 2b-ui.2 — import + full-DB restore)', () => {
+  beforeEach(() => { setActivePinia(createPinia()) })
+
+  it('restoreSnapshot POSTs {confirm:true}, returns the safety backup, and re-initializes every view', async () => {
+    const fetchSpy = mockFetchMethod({
+      'POST /api/data/snapshots': { body: { restoredFrom: 'snap-A.db', preRestoreBackup: 'pre-restore-123.db' } },
+      'GET /api/data/entity-prefixes': { body: { prefixes: ['restored-engram'] } },
+      'GET /api/data/snapshots': { body: { snapshots: [] } },
+      'GET /api/data/backup-locations': { body: { locations: [] } },
+      'GET /api/data/trash': { body: { trash: [] } },
+      'GET /admin/audit-log': { body: [] },
+    })
+    vi.stubGlobal('fetch', fetchSpy)
+    const store = useDataStewardStore()
+
+    const result = await store.restoreSnapshot('snap-A')
+
+    const post = fetchSpy.mock.calls.find((c: any) => c[1]?.method === 'POST')!
+    expect(String(post[0])).toContain('/api/data/snapshots/snap-A/restore')
+    expect(JSON.parse(post[1].body)).toEqual({ confirm: true })
+    expect(result.preRestoreBackup).toBe('pre-restore-123.db')
+    // whole store swapped -> re-initialized from the restored DB
+    expect(store.prefixes).toContain('restored-engram')
+    expect(store.busy).toBeNull()
+  })
+
+  it('restoreSnapshot surfaces a server error (e.g. failed integrity check)', async () => {
+    vi.stubGlobal('fetch', mockFetchMethod({
+      'POST /api/data/snapshots': { status: 500, body: { error: 'Snapshot failed integrity check' } },
+    }))
+    const store = useDataStewardStore()
+    await expect(store.restoreSnapshot('bad')).rejects.toThrow(/integrity check/)
+    expect(store.error).toMatch(/integrity check/)
+    expect(store.busy).toBeNull()
+  })
+
+  it('importBackup POSTs the backup, reports inserted/skipped, and refreshes', async () => {
+    const backup = { schemaVersion: 1, counts: { entities: 2, observations: 5, relations: 1 }, entities: [], observations: [], relations: [] }
+    const fetchSpy = mockFetchMethod({
+      'POST /api/data/import': { body: { inserted: { entities: 2, observations: 5, relations: 1 }, skipped: { entities: 0, observations: 0, relations: 0 }, errors: [] } },
+      'GET /api/data/entity-prefixes': { body: { prefixes: ['engram', 'imported'] } },
+      'GET /api/data/trash': { body: { trash: [] } },
+    })
+    vi.stubGlobal('fetch', fetchSpy)
+    const store = useDataStewardStore()
+
+    const result = await store.importBackup(backup as any)
+
+    const post = fetchSpy.mock.calls.find((c: any) => c[1]?.method === 'POST')!
+    expect(String(post[0])).toContain('/api/data/import')
+    expect(JSON.parse(post[1].body).schemaVersion).toBe(1)
+    expect((result.inserted as any).observations).toBe(5)
+    expect(store.prefixes).toContain('imported')
+    expect(store.busy).toBeNull()
+  })
+
+  it('importBackup surfaces a server error (e.g. unsupported schema version)', async () => {
+    vi.stubGlobal('fetch', mockFetchMethod({
+      'POST /api/data/import': { status: 500, body: { error: 'Unsupported schema version: 2' } },
+    }))
+    const store = useDataStewardStore()
+    await expect(store.importBackup({ schemaVersion: 2 } as any)).rejects.toThrow(/Unsupported schema/)
+    expect(store.error).toMatch(/Unsupported schema/)
+  })
+})

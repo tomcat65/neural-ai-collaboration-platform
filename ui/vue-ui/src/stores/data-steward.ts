@@ -33,6 +33,15 @@ export interface TrashEntry {
   counts: { entities: number; observations: number; relations: number }
   restoredAt: string | null
 }
+/** A logical backup payload — the JSON produced by "Download backup" / the export API. */
+export interface LogicalBackup {
+  schemaVersion: number
+  counts?: { entities: number; observations: number; relations: number }
+  entities?: unknown[]
+  observations?: unknown[]
+  relations?: unknown[]
+  [k: string]: unknown
+}
 export interface BackupLocation {
   id: string
   path: string
@@ -281,6 +290,57 @@ export const useDataStewardStore = defineStore('data-steward', () => {
     }
   }
 
+  // ---- 2b-ui.2: PORT-in (logical import) + full-DB restore Danger Zone ----
+
+  /**
+   * Import a logical backup (entities+observations+relations) into the live store.
+   * Additive — the server uses INSERT OR IGNORE, so existing ids are skipped (never
+   * overwritten). Refreshes the Library + Trash on success.
+   */
+  async function importBackup(backup: LogicalBackup): Promise<Record<string, unknown>> {
+    busy.value = 'import'
+    error.value = null
+    try {
+      const result = await sendJSON<Record<string, unknown>>('/api/data/import', 'POST', backup)
+      await Promise.all([fetchPrefixes(), fetchTrash()])
+      return result
+    } catch (e: any) {
+      error.value = e?.message || 'import failed'
+      throw e
+    } finally {
+      busy.value = null
+    }
+  }
+
+  /**
+   * Restore the ENTIRE database from a snapshot (the nuclear option). The server
+   * integrity-checks the snapshot, saves a pre-restore safety backup, then closes /
+   * copies / reopens the DB in-process (the store is briefly offline during the swap).
+   * Because the whole store is replaced, we re-initialize every view on success.
+   * Returns { restoredFrom, preRestoreBackup } so the UI can surface the safety backup.
+   */
+  async function restoreSnapshot(
+    snapshotId: string
+  ): Promise<{ restoredFrom: string; preRestoreBackup: string }> {
+    busy.value = 'restore-db'
+    error.value = null
+    try {
+      const result = await sendJSON<{ restoredFrom: string; preRestoreBackup: string }>(
+        '/api/data/snapshots/' + encodeURIComponent(snapshotId) + '/restore',
+        'POST',
+        { confirm: true }
+      )
+      // The whole DB was swapped — refresh every view to reflect the restored state.
+      await Promise.all([fetchPrefixes(), fetchSnapshots(), fetchLocations(), fetchTrash(), fetchAudit()])
+      return result
+    } catch (e: any) {
+      error.value = e?.message || 'restore failed'
+      throw e
+    } finally {
+      busy.value = null
+    }
+  }
+
   /** Initial load — probes the feature flag and loads the non-destructive views. */
   async function initialize(): Promise<void> {
     loading.value = true
@@ -325,5 +385,7 @@ export const useDataStewardStore = defineStore('data-steward', () => {
     retire,
     restoreTrash,
     purgeTrash,
+    importBackup,
+    restoreSnapshot,
   }
 })

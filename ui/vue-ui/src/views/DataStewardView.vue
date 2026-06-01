@@ -1,8 +1,8 @@
 <script setup lang="ts">
 // Data Steward. The human custodian console over the agent memory store: SEE
-// (Library), CURATE (delete → Trash → restore / purge), PORT (Backups), and AUDIT.
-// Full-DB restore + logical import land in 2b-ui.2. All data comes from the server
-// data-management API (/api/data/*), gated by ENABLE_DATA_MANAGEMENT.
+// (Library), CURATE (delete → Trash → restore / purge), PORT (Backups + logical
+// import), AUDIT, and a quarantined DANGER ZONE (full-DB restore). All data comes
+// from the server data-management API (/api/data/*), gated by ENABLE_DATA_MANAGEMENT.
 import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useDataStewardStore } from '@/stores/data-steward'
@@ -11,6 +11,7 @@ import LibraryPanel from '@/components/data-steward/LibraryPanel.vue'
 import TrashPanel from '@/components/data-steward/TrashPanel.vue'
 import BackupsPanel from '@/components/data-steward/BackupsPanel.vue'
 import AuditPanel from '@/components/data-steward/AuditPanel.vue'
+import DangerZonePanel from '@/components/data-steward/DangerZonePanel.vue'
 
 const store = useDataStewardStore()
 const router = useRouter()
@@ -57,14 +58,17 @@ function openCommandCenter() {
 
       <div v-else-if="store.available === null && store.loading" class="loading">Loading the store…</div>
 
-      <div v-else class="grid">
-        <LibraryPanel class="col-lib" />
-        <div class="col-side">
-          <TrashPanel />
-          <BackupsPanel />
-          <AuditPanel />
+      <template v-else>
+        <div class="grid">
+          <LibraryPanel class="col-lib" />
+          <div class="col-side">
+            <TrashPanel />
+            <BackupsPanel />
+            <AuditPanel />
+          </div>
         </div>
-      </div>
+        <DangerZonePanel class="danger-full" />
+      </template>
     </main>
   </div>
 </template>
@@ -89,5 +93,6 @@ function openCommandCenter() {
 .loading { text-align: center; color: var(--cc-text-muted); margin: 3rem; }
 .grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 1rem; align-items: start; }
 .col-side { display: flex; flex-direction: column; gap: 1rem; }
+.danger-full { margin-top: 1rem; }
 @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
 </style>
