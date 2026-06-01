@@ -370,6 +370,25 @@ export class MemoryManager {
         ON neural_audit_log(flagged) WHERE flagged = 1
     `);
 
+    // Data Trash — durable server-side trash for retired entities (Phase 2b).
+    // Holds the logical backup so every hard-delete is recoverable by trashId.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS data_trash (
+        trash_id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL DEFAULT 'default',
+        retired_at DATETIME NOT NULL DEFAULT (datetime('now')),
+        reason TEXT,
+        entity_names TEXT NOT NULL,
+        counts TEXT NOT NULL,
+        backup TEXT NOT NULL,
+        restored_at DATETIME
+      )
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_data_trash_tenant
+        ON data_trash(tenant_id, retired_at DESC)
+    `);
+
     // Weaviate tombstone table for failed vector deletes (Phase A)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS failed_weaviate_deletes (
@@ -7306,5 +7325,104 @@ export class MemoryManager {
       relationsDeleted: relationCount,
       totalRowsDeleted: deleteResult.deleted,
     };
+  }
+
+  /**
+   * Retire entities into the durable server-side Trash (Phase 2b). ATOMIC: writes
+   * the logical backup into data_trash AND verifies that write BEFORE hard-deleting
+   * the live rows — if the trash write fails, the whole transaction rolls back, so
+   * there is never a delete without a persisted backup. Returns the trashId so the
+   * caller can restore by id.
+   */
+  async retireEntitiesToTrash(
+    entityNames: string[],
+    tenantId: string,
+    reason?: string
+  ): Promise<{ trashId: string; counts: { entities: number; observations: number; relations: number }; deleted: number }> {
+    const backup = this.exportEntities({ tenantId, entityNames });
+    if (!backup.counts || backup.counts.entities === 0) {
+      throw new Error('No matching entities to retire');
+    }
+
+    const ids: string[] = [
+      ...(backup.entities || []),
+      ...(backup.observations || []),
+      ...(backup.relations || []),
+    ].map((r: any) => r.id).filter(Boolean);
+
+    const trashId = uuidv4();
+    const insertTrash = this.db.prepare(
+      `INSERT INTO data_trash (trash_id, tenant_id, reason, entity_names, counts, backup)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    const delLookup = this.db.prepare(`DELETE FROM graph_lookup_keys WHERE tenant_id = ? AND memory_id = ?`);
+    const delRow = this.db.prepare(`DELETE FROM shared_memory WHERE id = ? AND tenant_id = ?`);
+
+    // Atomic: verified trash write THEN the deletes — both commit, or neither.
+    const txn = this.db.transaction(() => {
+      const info = insertTrash.run(
+        trashId,
+        tenantId,
+        reason || null,
+        JSON.stringify(entityNames),
+        JSON.stringify(backup.counts),
+        JSON.stringify(backup)
+      );
+      if (info.changes !== 1) {
+        throw new Error('Trash write failed — aborting retire (no delete)');
+      }
+      let deleted = 0;
+      for (const id of ids) {
+        delLookup.run(tenantId, id);
+        deleted += delRow.run(id, tenantId).changes;
+      }
+      return deleted;
+    });
+    const deleted = txn();
+
+    // Best-effort vector cleanup (post-commit; safe to fail — the rows are already trashed).
+    if (this.vectorClient) {
+      for (const id of ids) {
+        try { await this.vectorClient.deleteMemory(id); } catch { /* non-fatal */ }
+      }
+    }
+
+    return { trashId, counts: backup.counts, deleted };
+  }
+
+  /** List trash entries (metadata + counts only; never the full backup payload). */
+  listTrash(tenantId: string): Array<{ trashId: string; retiredAt: string; reason: string | null; entityNames: string[]; counts: any; restoredAt: string | null }> {
+    const rows = this.db.prepare(
+      `SELECT trash_id, retired_at, reason, entity_names, counts, restored_at
+         FROM data_trash WHERE tenant_id = ? ORDER BY retired_at DESC`
+    ).all(tenantId) as any[];
+    return rows.map((r) => ({
+      trashId: r.trash_id,
+      retiredAt: r.retired_at,
+      reason: r.reason ?? null,
+      entityNames: JSON.parse(r.entity_names),
+      counts: JSON.parse(r.counts),
+      restoredAt: r.restored_at ?? null,
+    }));
+  }
+
+  /** Restore a trashed set by trashId (re-import the stored backup), then drop the entry. */
+  async restoreFromTrash(trashId: string, tenantId: string): Promise<{ trashId: string; restored: any }> {
+    const row = this.db.prepare(
+      `SELECT backup FROM data_trash WHERE trash_id = ? AND tenant_id = ?`
+    ).get(trashId, tenantId) as any;
+    if (!row) throw new Error(`Trash entry not found: ${trashId}`);
+    const backup = JSON.parse(row.backup);
+    const restored = await this.importEntities(backup, tenantId);
+    this.db.prepare(`DELETE FROM data_trash WHERE trash_id = ? AND tenant_id = ?`).run(trashId, tenantId);
+    return { trashId, restored };
+  }
+
+  /** Permanently purge a trash entry (its backup is gone for good). */
+  purgeTrash(trashId: string, tenantId: string): { trashId: string; purged: number } {
+    const info = this.db.prepare(
+      `DELETE FROM data_trash WHERE trash_id = ? AND tenant_id = ?`
+    ).run(trashId, tenantId);
+    return { trashId, purged: info.changes };
   }
 }

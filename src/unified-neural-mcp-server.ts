@@ -841,32 +841,80 @@ export class NeuralMCPServer {
     this.app.delete('/api/data/retire', async (req, res) => {
       try {
         const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
-        const { entityNames, backupFirst, reason } = req.body;
+        const { entityNames, reason } = req.body;
         if (!entityNames || !Array.isArray(entityNames) || entityNames.length === 0) {
           res.status(400).json({ error: 'entityNames array is required' });
           return;
         }
 
+        // Atomic: writes a verified server-side trash entry BEFORE hard-deleting
+        // (Phase 2b durable Trash). If the trash write fails, the whole op rolls
+        // back — there is no delete without a persisted backup.
+        const result = await this.memoryManager.retireEntitiesToTrash(
+          entityNames,
+          context.tenantId,
+          reason
+        );
+
+        // Audit links the trashId (entity_name) so retire/restore/purge are traceable.
         this.memoryManager.auditLog(
           'data_retire',
           context.userId || context.apiKeyId || 'unknown',
-          JSON.stringify({ entityNames, backupFirst, reason })
+          JSON.stringify({ trashId: result.trashId, entityNames, counts: result.counts, reason }),
+          result.trashId
         );
 
-        // Optionally backup before retirement
-        let backup: any = null;
-        if (backupFirst !== false) {
-          backup = this.memoryManager.exportEntities({
-            tenantId: context.tenantId,
-            entityNames,
-          });
-        }
-
-        const result = await this.memoryManager.retireEntities(entityNames, context.tenantId);
-        res.json({ ...result, backup });
+        res.json(result);
       } catch (error: any) {
         console.error('❌ Data retire error:', error);
-        res.status(500).json({ error: error.message || 'Failed to retire entities' });
+        const code = /no matching entities/i.test(error?.message || '') ? 404 : 500;
+        res.status(code).json({ error: error.message || 'Failed to retire entities' });
+      }
+    });
+
+    this.app.get('/api/data/trash', async (req, res) => {
+      try {
+        const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+        const trash = this.memoryManager.listTrash(context.tenantId);
+        res.json({ trash });
+      } catch (error: any) {
+        console.error('❌ Trash list error:', error);
+        res.status(500).json({ error: error.message || 'Failed to list trash' });
+      }
+    });
+
+    this.app.post('/api/data/trash/:id/restore', async (req, res) => {
+      try {
+        const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+        const result = await this.memoryManager.restoreFromTrash(req.params.id, context.tenantId);
+        this.memoryManager.auditLog(
+          'trash_restore',
+          context.userId || context.apiKeyId || 'unknown',
+          JSON.stringify({ trashId: req.params.id, restored: result.restored }),
+          req.params.id
+        );
+        res.json(result);
+      } catch (error: any) {
+        console.error('❌ Trash restore error:', error);
+        const code = /not found/i.test(error?.message || '') ? 404 : 500;
+        res.status(code).json({ error: error.message || 'Failed to restore from trash' });
+      }
+    });
+
+    this.app.delete('/api/data/trash/:id', async (req, res) => {
+      try {
+        const context = (req as TenantRequest).requestContext || DEFAULT_REQUEST_CONTEXT;
+        const result = this.memoryManager.purgeTrash(req.params.id, context.tenantId);
+        this.memoryManager.auditLog(
+          'trash_purge',
+          context.userId || context.apiKeyId || 'unknown',
+          JSON.stringify({ trashId: req.params.id }),
+          req.params.id
+        );
+        res.json(result);
+      } catch (error: any) {
+        console.error('❌ Trash purge error:', error);
+        res.status(500).json({ error: error.message || 'Failed to purge trash' });
       }
     });
 
