@@ -82,6 +82,16 @@ http {\n\
             proxy_cache_bypass $http_upgrade;\n\
         }\n\
 \n\
+        location /admin/ {\n\
+            proxy_pass http://APIX_UPSTREAM/admin/;\n\
+            proxy_http_version 1.1;\n\
+            proxy_set_header Host $host;\n\
+            proxy_set_header X-Real-IP $remote_addr;\n\
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\
+            proxy_set_header X-Forwarded-Proto $scheme;\n\
+            proxy_set_header x-api-key NGINX_API_KEY_PLACEHOLDER;\n\
+        }\n\
+\n\
         location /ws {\n\
             proxy_pass http://WSX_UPSTREAM;\n\
             proxy_http_version 1.1;\n\

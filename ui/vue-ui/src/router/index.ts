@@ -8,6 +8,12 @@ const routes = [
     component: CommandCenter
   },
   {
+    // Phase 2a: Data Steward (custodian console). Becomes the primary '/' in the 2c re-org.
+    path: '/steward',
+    name: 'DataSteward',
+    component: () => import('@/views/DataStewardView.vue')
+  },
+  {
     path: '/brain',
     name: 'Brain',
     component: () => import('../views/BrainView.vue')
