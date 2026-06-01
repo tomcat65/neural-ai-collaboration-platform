@@ -111,14 +111,19 @@ codex review** (build step 2b-server, §11).
   `{ trashId, retiredAt, reason, counts, backup }`, where `backup` is the logical export
   (entities + observations + relations).
 - **Atomic retire.** `DELETE /api/data/retire` writes the logical backup into `data_trash`
-  **and verifies that write succeeded BEFORE** hard-deleting the live rows. If the trash write
-  fails, the retire **aborts** — there is no delete without a persisted backup. (This is codex's
-  "backup persistence verified before retire.")
-- `GET /api/data/trash` — list entries (metadata + counts; not the full payload).
-- `POST /api/data/trash/:id/restore` — re-import the stored backup (`INSERT OR IGNORE`, server
-  re-embeds), then remove the entry.
+  **and verifies that write succeeded BEFORE** hard-deleting the live rows; if the trash write
+  fails, the retire **aborts** (no delete without a persisted backup). It **returns
+  `{ trashId, counts }`** so the caller references the exact trash entry.
+- `GET /api/data/trash` — the **server-derived** list of entries (metadata + counts; not the payload).
+- `POST /api/data/trash/:id/restore` — re-import the stored backup **by `trashId`** (`INSERT OR
+  IGNORE`, server re-embeds), then remove the entry.
 - `DELETE /api/data/trash/:id` — purge (permanent).
-- Every trash op writes `neural_audit_log`.
+- Every trash op writes `neural_audit_log`, **linking the `trashId`** (retire / restore / purge
+  are traceable to the exact backup).
+
+**Minimum bar (codex `26c96855`) — all encoded above:** backup persisted server-side before
+hard-delete; retire returns `trashId`; restore by `trashId`; Trash list server-derived; audit
+links `trashId`; download is optional, **never the only restore path**.
 
 **Why a logical-backup store, not a `retired_at` soft-delete column:** soft-delete would force a
 `retired_at IS NULL` filter through every hot read path (broad, risky). A separate trash store is
