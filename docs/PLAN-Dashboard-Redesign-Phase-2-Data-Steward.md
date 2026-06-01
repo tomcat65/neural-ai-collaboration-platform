@@ -8,6 +8,10 @@ reframe: the dashboard is the **human custodian console** over an agent-owned me
 Supersedes PR #31 (closed): its activity overview is rebuilt here as the `/activity` tab,
 with the drill-down done right (§8).
 
+**Rev 2** (2026-06-01): revised to clear codex `0f32c9fb` — durable **server-side Trash** (§5),
+explicit-`entityNames`-only deletes (§4), full-DB restore pre-snapshot + post-verify (§4/§8),
+Audit graceful-when-unavailable (§6), and an interim-status note for the already-live flag (§2.1).
+
 ---
 
 ## 1. Purpose
@@ -25,16 +29,27 @@ landing page to a secondary `/activity` tab.
 
 ## 2. Scope
 
-**IN:** a new **Data Steward** surface (primary route `/`) that consumes the **existing**
-server data-management API (`/api/data/*`). Areas: **Library** (see), **Backups** (snapshot /
-port), **Trash** (delete + restore), **Import/Export** (logical), **Audit** (what was done).
-Router re-org (§8). Rebuild the Phase-1 activity overview as `/activity` incl. the drill-down
-fix + regression test.
+**IN:** a new **Data Steward** surface (primary route `/`) over the server data-management API
+(`/api/data/*`), **plus a small server addition: a durable server-side Trash** (§5). Areas:
+**Library** (see), **Backups** (snapshot / port), **Trash** (delete + restore), **Import/Export**
+(logical), **Audit** (what was done). Router re-org (§8). Rebuild the Phase-1 activity overview
+as `/activity` incl. the drill-down fix + regression test.
 
-**OUT (explicitly):** no new server endpoints (the API already exists, §3); no soft-delete
-column (Trash uses the auto-backup model, §5); no LLM. External-drive (D:) snapshots via the
-API are a **documented follow-up** (needs `/host-drives` mounted + `BACKUP_AUTODISCOVER`);
-v1 snapshots land in the internal volume and are copy-out-able (per `BACKUP-AND-RESTORE.md`).
+**OUT (explicitly):** no `retired_at` soft-delete column threaded through the hot read paths
+(the Trash is an isolated logical-backup store, §5); no LLM; no broad/prefix delete (§4).
+External-drive (D:) snapshots via the API remain a **follow-up** (needs `/host-drives` mounted +
+`BACKUP_AUTODISCOVER`); v1 snapshots land in the internal volume and are copy-out-able (per
+`BACKUP-AND-RESTORE.md`).
+
+### 2.1 Interim status (this PR is not pure spec) — B4
+
+`ENABLE_DATA_MANAGEMENT=1` is **already live** (commit `8d70f8c`, running now) so the contract
+could be verified against the real server (§3). **Interim guardrails until the Steward UI +
+server Trash ship and are reviewed:** this is a single-user **local** tool; the only client is
+the dashboard, which has **no destructive Steward UI yet**, so the only way to reach a
+destructive endpoint is a deliberate operator API/curl call; every op is audit-logged; authz is
+the local single-key operator. If preferred, the flag commit can be **reverted now and
+re-applied at build time** — offered as an option for Tomás.
 
 ---
 
@@ -75,37 +90,55 @@ snapshot = full portable backup incl. vectors; `tenants.db` empty → single fil
   and any multi-entity retire (type the entity count or the word DELETE).
 - **Auto-backup before delete is mandatory** — the UI always sends `backupFirst:true`; the
   returned backup becomes a Trash entry (§5).
-- **No broad/bulk deletes** in v1: retire requires an explicit selected `entityNames` list;
-  there is **no "delete by prefix"** without first showing a preview + count and a typed confirm.
-- **Full-DB restore is quarantined** in a visually distinct "Danger Zone" with a
-  "snapshot-now-first" nudge.
+- **Delete operates on an explicit, user-selected `entityNames` list ONLY.** There is **no
+  prefix/bulk delete action** in v1 — name-prefix is used for *export/preview* only, never to
+  delete. (B2)
+- **Full-DB restore is quarantined** in a visually distinct "Danger Zone": it (1) takes a
+  **pre-restore auto-snapshot** of the current DB first (durable undo), (2) restores, (3) runs
+  **post-restore verification** (`PRAGMA integrity_check` + `/health`) and surfaces the result;
+  on failure it points the user at the pre-restore snapshot to roll back. (B5)
 
 ---
 
-## 5. Delete + restore model — Trash (no server change)
+## 5. Delete + restore model — durable server-side Trash (B1)
 
-Delete = `retire(backupFirst:true)`: the server **hard-deletes** the rows and **returns the
-logical backup** (entities+observations+relations). The dashboard turns that into a
-restorable **Trash**:
+Per Tomás + codex: client-side localStorage is **not** durable enough to hold the only copy of a
+hard-deleted entity. v1 adds a **small, durable, server-side Trash** — its **own server PR with
+codex review** (build step 2b-server, §11).
 
-- **Durability:** the returned backup JSON is persisted in **localStorage** for typical sizes,
-  under a hard cap (≈4 MB). **If the backup exceeds the cap**, the UI instead **auto-downloads
-  it as a `.json` file** and records a *file-backed* Trash entry (Restore then asks the user to
-  re-select that file). This is the honest limit of the no-server-change model.
-- **Restore** = `POST /api/data/import` with the stored backup (re-creates the entities; the
-  server re-embeds). `INSERT OR IGNORE` means restore is idempotent.
-- **Purge** = forget the Trash entry (delete the localStorage record / the file is the user's).
-- **A durable, server-side trash** (a `retired_at` flag or a logical-backup store) is a future
-  **server** enhancement, out of scope here.
+**New server surface (in the data-management module):**
+- A `data_trash` store (one table) holding, per trashed set:
+  `{ trashId, retiredAt, reason, counts, backup }`, where `backup` is the logical export
+  (entities + observations + relations).
+- **Atomic retire.** `DELETE /api/data/retire` writes the logical backup into `data_trash`
+  **and verifies that write succeeded BEFORE** hard-deleting the live rows. If the trash write
+  fails, the retire **aborts** — there is no delete without a persisted backup. (This is codex's
+  "backup persistence verified before retire.")
+- `GET /api/data/trash` — list entries (metadata + counts; not the full payload).
+- `POST /api/data/trash/:id/restore` — re-import the stored backup (`INSERT OR IGNORE`, server
+  re-embeds), then remove the entry.
+- `DELETE /api/data/trash/:id` — purge (permanent).
+- Every trash op writes `neural_audit_log`.
+
+**Why a logical-backup store, not a `retired_at` soft-delete column:** soft-delete would force a
+`retired_at IS NULL` filter through every hot read path (broad, risky). A separate trash store is
+**isolated** to the data-mgmt module and leaves the read paths untouched. *(Open for codex to
+counter-propose soft-delete if it prefers that trade-off.)*
+
+**Dashboard:** Delete → preview counts → confirm → atomic retire. A **Trash** tab lists entries
+with **Restore** / **Purge**. No `localStorage` is load-bearing (at most a transient UI cache).
 
 ---
 
 ## 6. Auditability
 
-Every `/api/data` op already writes `neural_audit_log` (`data_export`, `data_import`,
-`data_retire`, `snapshot_create|move|delete|restore`, …). The Steward exposes an **Audit**
-view reading `GET /admin/audit-log` (already gated by `ENABLE_ADMIN_ENDPOINTS=1`, set in the
-dev overlay) so the human can see exactly what was done, when, and by which key.
+Every `/api/data` op writes `neural_audit_log` (`data_export`, `data_import`, `data_retire`,
+`trash_*`, `snapshot_create|move|delete|restore`, …). The Steward exposes an **Audit** view
+reading `GET /admin/audit-log`. That endpoint is gated by `ENABLE_ADMIN_ENDPOINTS`, which is
+**independent** of `ENABLE_DATA_MANAGEMENT`. (B3) If admin endpoints are off (audit endpoint
+returns 403/404) while data-management is on, the Audit view shows a clear "audit log
+unavailable — enable admin endpoints" state and the rest of the Steward works normally; the
+Audit view is never load-bearing for the custody actions.
 
 ---
 
@@ -161,16 +194,20 @@ the local key is authorized. The UI handles both states (tested).
 
 ## 11. Build order (after sign-off)
 
-- **2a (non-destructive):** data-API store module + Library + Snapshots/Export + Audit view +
-  the graceful-disabled state. Tests.
-- **2b (destructive):** Trash (retire→restore), Import, full-DB restore Danger Zone — each
-  behind preview + confirm. Tests.
+- **2a (non-destructive UI):** data-API store module + Library + Snapshots/Export + Audit view
+  + graceful-disabled state. Tests. *(No server change.)*
+- **2b-server (durable Trash):** the server-side `data_trash` store + atomic retire-into-trash +
+  list/restore/purge endpoints (§5), as its **own server PR with codex review**. Tests.
+- **2b-ui (destructive UI):** Trash tab (delete→preview→confirm→restore/purge), Import, full-DB
+  restore Danger Zone (pre-snapshot + post-verify) — each behind preview + confirm. Tests.
 - **2c (re-org):** router re-org + rebuild `/activity` + the drill-down fix + regression test.
 
 ---
 
 ## 12. Sign-off
 
-- [ ] codex — UX safety rules (§4), Trash durability model (§5), feature-flag degradation (§7),
-  auditability (§6), drill-down contract (§8), server-contract reading (§3).
+- [ ] codex — UX safety (§4), the **server-side Trash design** (§5: isolated logical-backup
+  store; atomic retire with persistence verified before delete; list/restore/purge), full-DB
+  restore pre-snapshot + post-verify (§4/§8), Audit graceful-when-unavailable (§6), feature-flag
+  degradation (§7), drill-down contract (§8), interim guardrails (§2.1).
 - [ ] Tomás — go.
