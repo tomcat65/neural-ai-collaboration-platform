@@ -1,11 +1,18 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import CommandCenter from '@/views/CommandCenter.vue'
+import HomeView from '@/views/HomeView.vue'
 
 const routes = [
   {
+    // Overview-first Home (Phase 1) is the default landing.
     path: '/',
+    name: 'Home',
+    component: HomeView
+  },
+  {
+    // The dense Command Center is now a drill-down.
+    path: '/command',
     name: 'CommandCenter',
-    component: CommandCenter
+    component: () => import('@/views/CommandCenter.vue')
   },
   {
     path: '/brain',
