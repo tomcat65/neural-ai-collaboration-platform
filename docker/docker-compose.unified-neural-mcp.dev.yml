@@ -5,6 +5,10 @@ services:
     environment:
       - ENABLE_ADMIN_ENDPOINTS=1
       - ALLOW_LEGACY_GRAPH_MUTATIONS=1
+      # Data-management + snapshot API (/api/data/*) for the dashboard's
+      # custodian console. Gated off by default; the local single-key operator
+      # is authorized once this is set. See BACKUP-AND-RESTORE.md.
+      - ENABLE_DATA_MANAGEMENT=1
 
   vue-dashboard:
     build:
