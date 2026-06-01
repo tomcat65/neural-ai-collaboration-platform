@@ -213,8 +213,9 @@ the local key is authorized. The UI handles both states (tested).
 
 ## 12. Sign-off
 
-- [ ] codex — UX safety (§4), the **server-side Trash design** (§5: isolated logical-backup
-  store; atomic retire with persistence verified before delete; list/restore/purge), full-DB
-  restore pre-snapshot + post-verify (§4/§8), Audit graceful-when-unavailable (§6), feature-flag
-  degradation (§7), drill-down contract (§8), interim guardrails (§2.1).
-- [ ] Tomás — go.
+- [x] codex — **signed** (`21490fce`, rev 2.2): Phase-2 direction + build order approved; NOT
+  implementation pre-approval — each build phase (2a / 2b-server / 2b-ui / 2c) gets its own review.
+- [x] Tomás — **go** (build 2a).
+
+**Build status:** 2a (non-destructive: data-steward store + Library + Backups + Audit + the
+graceful-disabled state + `/admin` nginx proxy) built on this branch — awaiting codex's 2a review.
