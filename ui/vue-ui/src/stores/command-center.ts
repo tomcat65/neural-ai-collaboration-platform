@@ -128,7 +128,11 @@ function isRealProject(name: string): boolean {
 // VITE_HUMAN_ALIASES env var (comma/space-separated), and at runtime by the
 // store's setHumanAliases() action.
 const DEFAULT_HUMAN_ALIASES = ['tomas', 'tommy', 'tomcat65']
-const NEEDS_YOU_TYPES = new Set(['query', 'question', 'urgent'])
+// Message types that warrant your attention REGARDLESS of recipient (high-signal).
+// query/question are intentionally NOT here: they only flag when addressed to you —
+// a query/question between two other agents is their conversation, not your work
+// (codex §5 / docs/PLAN-Dashboard-Redesign-Phase-0.md §5).
+const NEEDS_YOU_ANYWHERE = new Set(['urgent'])
 
 // Parse a comma/space-separated alias list into a lowercased Set; falls back to
 // `fallback` when the input is empty/undefined.
@@ -143,14 +147,15 @@ export function parseHumanAliases(
   return new Set(ids.length ? ids : fallback.map((s) => s.toLowerCase()))
 }
 
-// A message "needs you" if it is unread + unarchived AND either addressed to a
-// human alias or an explicit query/question/urgent. `humanAliases` is injected
-// so the rule stays a pure, testable function. (priority/expected_reply signals
-// need the server to expose priority on /api/recent-events — a later add.)
+// A message "needs you" if it is unread + unarchived AND EITHER addressed to a
+// human alias (anything to you) OR an urgent signal (regardless of recipient).
+// `humanAliases` is injected so the rule stays a pure, testable function.
+// (priority/expected_reply signals need the server to expose priority on
+// /api/recent-events — a later add.)
 export function messageNeedsYou(m: Message, humanAliases: Set<string>): boolean {
   if (m.isRead || m.isArchived) return false
   if (humanAliases.has(m.toAgent.toLowerCase())) return true
-  return NEEDS_YOU_TYPES.has(m.messageType.toLowerCase())
+  return NEEDS_YOU_ANYWHERE.has(m.messageType.toLowerCase())
 }
 
 // ── Entity → Agent Resolver ─────────────────────────────────

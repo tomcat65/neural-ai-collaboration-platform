@@ -256,7 +256,7 @@ describe('command-center store — canonical agent-status + DB size parsing', ()
     expect([...parseHumanAliases(undefined)].sort()).toEqual(['tomas', 'tomcat65', 'tommy'])
   })
 
-  it('Phase 0 (blocker 3): messageNeedsYou FP/FN truth table', () => {
+  it('Phase 0 (blocker 3 + §5): messageNeedsYou FP/FN truth table — you, or any urgent', () => {
     const aliases = new Set(['tomas'])
     const base: Message = {
       id: 'm', fromAgent: 'a', toAgent: 'x', content: '', messageType: 'info',
@@ -264,14 +264,15 @@ describe('command-center store — canonical agent-status + DB size parsing', ()
     }
     const mk = (o: Partial<Message>): Message => ({ ...base, ...o })
     // True-positives
-    expect(messageNeedsYou(mk({ toAgent: 'tomas' }), aliases)).toBe(true)                                  // TP1 human-addressed
-    expect(messageNeedsYou(mk({ toAgent: 'codex-desktop', messageType: 'query' }), aliases)).toBe(true)     // TP2 query
-    expect(messageNeedsYou(mk({ toAgent: 'agent-y', messageType: 'urgent' }), aliases)).toBe(true)          // TP3 urgent
+    expect(messageNeedsYou(mk({ toAgent: 'tomas' }), aliases)).toBe(true)                                  // TP1 addressed to you (any type)
+    expect(messageNeedsYou(mk({ toAgent: 'tomas', messageType: 'query' }), aliases)).toBe(true)            // TP2 query addressed to you
+    expect(messageNeedsYou(mk({ toAgent: 'agent-y', messageType: 'urgent' }), aliases)).toBe(true)          // TP3 urgent (any recipient)
     // True-negatives (guard against false-positives)
     expect(messageNeedsYou(mk({ toAgent: 'tomas', isRead: true }), aliases)).toBe(false)                    // TN1 already read
     expect(messageNeedsYou(mk({ toAgent: 'claude-engram' }), aliases)).toBe(false)                          // TN2 agent↔agent chatter
-    expect(messageNeedsYou(mk({ toAgent: 'tomas', messageType: 'query', isArchived: true }), aliases)).toBe(false) // TN3 archived
-    expect(messageNeedsYou(mk({ fromAgent: 'tomas', toAgent: 'agent' }), aliases)).toBe(false)              // TN4 human's outgoing
+    expect(messageNeedsYou(mk({ toAgent: 'codex-desktop', messageType: 'query' }), aliases)).toBe(false)    // TN3 §5: query to ANOTHER agent is not your work
+    expect(messageNeedsYou(mk({ toAgent: 'tomas', messageType: 'query', isArchived: true }), aliases)).toBe(false) // TN4 archived
+    expect(messageNeedsYou(mk({ fromAgent: 'tomas', toAgent: 'agent' }), aliases)).toBe(false)              // TN5 your outgoing
   })
 
   it('Phase 0 (blocker 3): setHumanAliases re-targets needsYou at runtime', async () => {

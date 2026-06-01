@@ -95,54 +95,70 @@ Encoded as a fixed dataset in `command-center.spec.ts`.
 - `cleanKnowledge` with `showTestData=false` over **D** = `[E1, E2, E4]`
   (hides E3, E5, E6).
 - `cleanKnowledge` with `showTestData=true` = all six (cap 50).
-- `fetchProjects` over **D** → `availableProjects = [engram, spectra]` (+ E4 also
-  passes the project filter until added to `NOISE_NAME_SUBSTRINGS` — documents the boundary).
+- `fetchProjects` collects project-typed nodes into `rawProjects`; `availableProjects`
+  (computed) filters fixtures by name. Over **D**: `rawProjects = [engram, spectra,
+  houston blenders]` (E3 is `project-smoke-test`, not project-typed, so it is never a
+  project node; E5/E6 are not project-typed either). `availableProjects` (showTestData
+  off) = `[engram, spectra, houston blenders]` — E4 "houston blenders" **appears** (the
+  §3 boundary leak: plain type, no stamp; add to `NOISE_NAME_SUBSTRINGS` to hide). A
+  *stamped* project-typed fixture is hidden when off and revealed when on — exercised by
+  the blocker-1 test. (This resolves the earlier §4 contradiction: E4 both passes the
+  project filter **and** is listed; it is no longer omitted.)
 
 ### Message dataset **M** (6 messages)
 
-| id | from → to | type | state |
-|---|---|---|---|
-| m1 | codex-desktop → tomas | info | unread |
-| m2 | tomas → claude-engram | info | unread |
-| m3 | claude-engram → codex-desktop | query | unread |
-| m4 | codex-desktop → claude-engram | response | **read** |
-| m5 | agent-x → agent-y | urgent | unread |
-| m6 | codex-desktop → tomas | info | **archived** |
+| id | from → to | type | content (drives `isMessageAboutProject`) | state |
+|---|---|---|---|---|
+| m1 | codex-desktop → tomas | info | `"engram review ready"` | unread |
+| m2 | tomas → claude-engram | info | `"proceed"` | unread |
+| m3 | claude-engram → codex-desktop | query | `"engram spec ok?"` | unread |
+| m4 | codex-desktop → claude-engram | response | `"lgtm"` | **read** |
+| m5 | agent-x → agent-y | urgent | `"spectra build failing"` | unread |
+| m6 | codex-desktop → tomas | info | `"old note"` | **archived** |
 
 Expected selector outputs over **M** (+ **D**):
 
 | selector | expected |
 |---|---|
-| `needsYou` | `[m1, m3, m5]` (count **3**), newest-first |
-| `messageThreads` | **4** threads: `codex-desktop↔tomas`(1, needsYou), `claude-engram↔tomas`(1), `claude-engram↔codex-desktop`(2, unread 1, needsYou), `agent-x↔agent-y`(1, needsYou). m6 excluded (archived) |
+| `needsYou` | `[m1, m5]` (count **2**), newest-first — m1 is to you, m5 is urgent; m3 (query to another agent) does NOT flag (§5) |
+| `messageThreads` | **4** threads: `codex-desktop↔tomas`(1, needsYou), `claude-engram↔tomas`(1), `claude-engram↔codex-desktop`(2, unread 1, **not** needsYou — m3 is a query to an agent), `agent-x↔agent-y`(1, needsYou). m6 excluded (archived) |
 | `projectDigests` | **2**: `engram`(msgs 2 = m1,m3; unread 2; knowledgeChanges 1=E1) before `spectra`(msgs 1 = m5; unread 1; knowledgeChanges 1=E2) |
-| `pulse.needsYou` | 3 |
+| `pulse.needsYou` | 2 |
 | `pulse.threads` | 4 |
-| `pulse.projects` | 2 |
+| `pulse.projects` | 3 (= `availableProjects.length`; includes the houston-blenders leak) |
 | `pulse.knowledgeChanges` | 3 (= `cleanKnowledge.length` over D) |
 
 ---
 
-## 5. Needs-You classifier (addresses pt3: deterministic + FP/FN)
+## 5. Needs-You classifier (addresses pt3 + codex §5: deterministic + FP/FN)
 
-**Config (explicit, edit-to-match — NOT guessed from content):**
-- `HUMAN_ALIASES = {tomas, tommy, tomcat65}`
-- `NEEDS_YOU_TYPES = {query, question, urgent}`
+**Config — genuinely configurable, never guessed from content:**
+- `HUMAN_ALIASES` — default `{tomas, tommy, tomcat65}`; overridden at load by the
+  `VITE_HUMAN_ALIASES` env var (comma/space-separated, lowercased via
+  `parseHumanAliases`) and at runtime by the store's `setHumanAliases(ids)` action.
+- `NEEDS_YOU_ANYWHERE = {urgent}` — message types that flag you regardless of recipient.
 
-**Rule** `messageNeedsYou(m)`:
-`!isRead && !isArchived && ( toAgent∈HUMAN_ALIASES  OR  messageType∈NEEDS_YOU_TYPES )`
+**Rule** `messageNeedsYou(m, humanAliases)`:
+`!isRead && !isArchived && ( toAgent∈humanAliases  OR  messageType∈NEEDS_YOU_ANYWHERE )`
+
+**Semantics (Tomás's call on codex §5 — "you, or any urgent"):** anything **addressed
+to you** flags (any type); **urgent** flags from anywhere (rare, high-signal); a
+**query/question between two other agents is their conversation, not your work** and
+does NOT flag. `messageNeedsYou` takes `humanAliases` as a parameter, so it stays a
+pure, unit-testable function.
 
 **Truth table (encoded as tests):**
 
-| case | to | type | state | result | guards |
+| case | to | type | state | result | rationale |
 |---|---|---|---|---|---|
-| TP1 | tomas | info | unread | **YES** | human-addressed |
-| TP2 | codex-desktop | query | unread | **YES** | explicit query |
-| TP3 | agent-y | urgent | unread | **YES** | urgent |
-| TN1 | tomas | info | **read** | NO | false-positive on already-handled |
-| TN2 | claude-engram | info | unread | NO | false-positive on agent↔agent chatter |
-| TN3 | tomas | query | **archived** | NO | archived |
-| TN4 | agent (from=tomas) | info | unread | NO | human's *outgoing*, not addressed TO a human |
+| TP1 | tomas | info | unread | **YES** | addressed to you (any type) |
+| TP2 | tomas | query | unread | **YES** | query addressed to you |
+| TP3 | agent-y | urgent | unread | **YES** | urgent — any recipient |
+| TN1 | tomas | info | **read** | NO | already handled |
+| TN2 | claude-engram | info | unread | NO | agent↔agent chatter |
+| TN3 | codex-desktop | query | unread | NO | **§5: query to another agent ≠ your work** |
+| TN4 | tomas | query | **archived** | NO | archived |
+| TN5 | agent (from=tomas) | info | unread | NO | your *outgoing*, not addressed TO you |
 
 **Limitation:** priority / `expected_reply` from the ACP envelope are unavailable
 (server gap, §7) and therefore unused.
@@ -196,9 +212,11 @@ the default overview** — it falls back to the raw stream. Not implemented here
 
 ## 10. Sign-off
 
-- [ ] codex-desktop — re-review the hardened code (blockers 1–3 closed, see below)
-- [x] Tomás — chose: make `HUMAN_ALIASES` genuinely configurable (env `VITE_HUMAN_ALIASES`
-  + `setHumanAliases()`), default `{tomas, tommy, tomcat65}`; GO for the hardening pass.
+- [ ] codex-desktop — re-review the reconciled **spec + hardened code** (code blockers
+  1–3 AND spec blockers S1–S4 closed, see below)
+- [x] Tomás — (1) make `HUMAN_ALIASES` genuinely configurable (env `VITE_HUMAN_ALIASES`
+  + `setHumanAliases()`), default `{tomas, tommy, tomcat65}`; (2) Needs-You = "you, or any
+  urgent" (codex §5); GO for the hardening pass.
 
 **Hardening implemented in this PR** (closes codex reviews `bf4b90a1` + `017cb653`):
 - **blocker 1** — `showTestData` now reaches the project list: `fetchProjects` retains
@@ -210,5 +228,10 @@ the default overview** — it falls back to the raw stream. Not implemented here
 - `projectDigests` labeled best-effort/heuristic in code (§6); ACTION/STATUS/CONTEXT
   named out-of-scope (§8); §7 server follow-ups stand.
 
-Tests: 17/17 green (5 new); vue-tsc + vite build clean.
+**Spec reconciliation** (closes codex spec review `ef49d7c9`): S1 §4 E4 contradiction
+fixed (E4 now appears **and** is listed, no longer omitted); S2 §5 Needs-You semantics
+set to "you, or any urgent" in code + spec; S3 Dataset M now carries exact content
+strings; S4 `HUMAN_ALIASES` contract stated (env + setter + parse).
+
+Tests: 17/17 green; vue-tsc + vite build clean.
 **Phase 1 UI does not start until PR #30 merges.**
