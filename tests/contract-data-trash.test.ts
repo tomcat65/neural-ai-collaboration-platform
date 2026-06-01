@@ -130,4 +130,33 @@ describe('/api/data trash lifecycle (Phase 2b)', () => {
     const audit = server.getMemoryManager().queryAuditLog(undefined, 'trash_purge', 10);
     expect(audit.length).toBe(0); // no audit row written for a no-op purge
   });
+
+  it('restore is all-or-nothing: an import error leaves the trash and live store unchanged', async () => {
+    boot();
+    // Craft a trash entry whose backup has one valid row + one row that forces a HARD
+    // import error: object (non-string) content triggers a better-sqlite3 bind error,
+    // which INSERT OR IGNORE does NOT suppress (unlike a constraint), so the atomic
+    // import must abort and roll the good row back too.
+    const trashId = 'trash-atomic-1';
+    const backup: any = {
+      schemaVersion: 1,
+      counts: { entities: 2, observations: 0, relations: 0 },
+      entities: [
+        { id: 'atomic-good', tenant_id: 'default', memory_type: 'entity', content: JSON.stringify({ name: 'AtomicGood', type: 'project' }), created_by: 'test', tags: '[]' },
+        { id: 'atomic-bad', tenant_id: 'default', memory_type: 'entity', content: { notAString: true }, created_by: 'test', tags: '[]' },
+      ],
+      observations: [],
+      relations: [],
+    };
+    db().prepare(
+      `INSERT INTO data_trash (trash_id, tenant_id, reason, entity_names, counts, backup)
+       VALUES (?, 'default', 'atomic-test', ?, ?, ?)`
+    ).run(trashId, JSON.stringify(['AtomicGood']), JSON.stringify(backup.counts), JSON.stringify(backup));
+
+    await auth(supertest(app).post(`/api/data/trash/${trashId}/restore`)).expect(500);
+    expect(trashCount()).toBe(1);            // trash preserved (not consumed)
+    expect(liveCount('AtomicGood')).toBe(0); // the good row rolled back too — no partial restore
+    const audit = server.getMemoryManager().queryAuditLog(undefined, 'trash_restore', 10);
+    expect(audit.length).toBe(0);            // no success audit on failure
+  });
 });

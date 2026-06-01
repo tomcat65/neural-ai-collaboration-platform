@@ -6796,7 +6796,7 @@ export class MemoryManager {
   /**
    * Import entities from a backup payload. INSERT OR IGNORE for idempotency.
    */
-  async importEntities(backup: any, tenantId: string): Promise<{
+  async importEntities(backup: any, tenantId: string, opts: { atomic?: boolean } = {}): Promise<{
     inserted: { entities: number; observations: number; relations: number };
     skipped: { entities: number; observations: number; relations: number };
     errors: string[];
@@ -6838,6 +6838,9 @@ export class MemoryManager {
           }
         } catch (err: any) {
           result.errors.push(`${memoryType} ${row.id}: ${err.message}`);
+          // Atomic mode (used by trash restore): re-throw so the surrounding
+          // db.transaction rolls back ALL inserts — never a partial restore.
+          if (opts.atomic) throw err;
         }
       }
     };
@@ -7413,15 +7416,11 @@ export class MemoryManager {
     ).get(trashId, tenantId) as any;
     if (!row) throw new Error(`Trash entry not found: ${trashId}`);
     const backup = JSON.parse(row.backup);
-    const restored = await this.importEntities(backup, tenantId);
-    // Never drop the backup on a PARTIAL restore: importEntities collects
-    // row-level errors instead of throwing, so preserve the trash entry (for
-    // retry) and fail loudly unless the restore fully succeeded.
-    if (restored.errors && restored.errors.length > 0) {
-      throw new Error(
-        `Restore incomplete (${restored.errors.length} error(s)); trash preserved for retry: ${restored.errors.slice(0, 3).join('; ')}`
-      );
-    }
+    // ATOMIC restore: importEntities rolls back ALL inserts if ANY row fails, so a
+    // partial restore is impossible — either everything restores (and we consume the
+    // trash entry below) or nothing does (and the live store + trash are unchanged,
+    // the error propagates, and the endpoint writes no success audit).
+    const restored = await this.importEntities(backup, tenantId, { atomic: true });
     this.db.prepare(`DELETE FROM data_trash WHERE trash_id = ? AND tenant_id = ?`).run(trashId, tenantId);
     return { trashId, restored };
   }
