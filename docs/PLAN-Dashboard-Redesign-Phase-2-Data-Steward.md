@@ -64,7 +64,7 @@ Feature flag `ENABLE_DATA_MANAGEMENT=1` (committed `8d70f8c`, running now). Auth
 | `GET /api/data/entity-prefixes` | inventory by name-prefix | ✓ returns the full prefix list (incl. fixtures) |
 | `GET /api/data/export?namePrefix=\|entityNames=[&preview=true]` | logical JSON: entities+observations+relations; `preview` = counts+names | ✓ `engram` → entities 3 / obs 111 / rel 7 |
 | `POST /api/data/import {backup}` | `INSERT OR IGNORE`, server re-embeds vectors | (code-verified; exercised in 2b tests) |
-| `DELETE /api/data/retire {entityNames, backupFirst, reason}` | **HARD-deletes** graph rows; auto-exports first; **returns the backup** | (code-verified) |
+| `DELETE /api/data/retire {entityNames, backupFirst, reason}` | **Current (live):** HARD-deletes graph rows, auto-exports first, returns the backup. **Planned (2b-server, §5):** atomically writes a *verified* `data_trash` entry first, then deletes, and returns `trashId`. | (code-verified) |
 | `POST /api/data/snapshots {label,locationId,folder}` | online `.backup()` → ONE self-contained `.db` (incl. vectors) | ✓ created 296 MB file, listed |
 | `GET /api/data/snapshots` | list (from manifest) | ✓ |
 | `POST /api/data/snapshots/:id/move {locationId}` | relocate (e.g., external drive) | (location config required) |
@@ -88,8 +88,9 @@ snapshot = full portable backup incl. vectors; `tenants.db` empty → single fil
   the live DB" warning.
 - **Typed confirmation** for the heavy/irreversible-ish ones: full-DB restore, purge-trash,
   and any multi-entity retire (type the entity count or the word DELETE).
-- **Auto-backup before delete is mandatory** — the UI always sends `backupFirst:true`; the
-  returned backup becomes a Trash entry (§5).
+- **Delete goes through the atomic server retire** (§5): the server creates a **verified
+  server-side trash entry before** hard-deleting and returns its `trashId`; the UI tracks the
+  `trashId`/metadata — never a client-held backup as the system of record.
 - **Delete operates on an explicit, user-selected `entityNames` list ONLY.** There is **no
   prefix/bulk delete action** in v1 — name-prefix is used for *export/preview* only, never to
   delete. (B2)
@@ -179,9 +180,9 @@ the local key is authorized. The UI handles both states (tested).
   "Export" downloads the JSON.
 - **Backups:** "Snapshot now" creates a full-DB `.db` (listed with size); restore requires a
   typed confirm and shows the "replaces live DB" warning.
-- **Trash:** selecting entities → "Delete" shows the pre-delete preview (counts) → confirm →
-  `retire(backupFirst)` → a Trash entry appears → "Restore" re-imports → the entity reappears
-  in the Library.
+- **Trash:** select entities → "Delete" shows the pre-delete preview (counts) → confirm → atomic
+  retire → the **server-derived trash entry** appears (keyed by `trashId`) → "Restore" re-imports
+  **by `trashId`** → the entity reappears in the Library.
 - **Flag off:** the Steward shows the graceful disabled state.
 - **Drill-down:** clicking a project on `/activity` lands on `/command` scoped to it (regression test).
 
@@ -189,7 +190,8 @@ the local key is authorized. The UI handles both states (tested).
 
 ## 10. Failure modes
 
-- Large retire-backup → file-download Trash fallback (§5).
+- **Trash write fails** → the atomic retire **aborts** (no delete without a persisted
+  server-side backup); the UI surfaces the failure. No client-side / file-download fallback.
 - Restore of a stale/foreign snapshot → integrity warning (server restore + `PRAGMA integrity_check`).
 - Snapshot disk-full / import `schemaVersion` mismatch → surfaced, not swallowed.
 - **Deploy note:** a full `neural-unified-up` from clean `main` drops the flag **until `8d70f8c`
