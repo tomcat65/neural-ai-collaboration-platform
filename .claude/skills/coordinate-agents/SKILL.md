@@ -54,7 +54,7 @@ ledger entity). Each poll, emit **one** heartbeat to each active peer — but **
 on a poll where you already sent that peer a substantive message**, which itself
 counts as a heartbeat:
 
-`[ACP-HB] coord=<entity> from=claude-engram status=<one-word> ball=<me|you|none> next_hb=<Nm> ledger=<entity> [eta=<when>] — <one line of state>`
+`[ACP-HB] coord=<entity> from=claude-engram status=<one-word> ball=<me|you|none> next_hb=<Nm> expected_reply=<when|condition> ledger=<entity> [eta=<when>] — <one line of state>`
 
 **Two clocks — keep them separate:**
 - **Liveness** = heartbeat freshness. A fresh heartbeat means the peer is *reachable*.
@@ -65,11 +65,21 @@ A fresh heartbeat proves the peer is alive but does **not** reset the progress c
 This is what prevents an immortal keepalive loop (two agents heartbeating forever with
 no work).
 
+**Two forecasts — advertise both.** A heartbeat carries two independent clocks:
+- **`next_hb`** (codex writes it `next_check`) — when you'll next **poll / check in** (the
+  *liveness* cadence).
+- **`expected_reply`** — when a **substantive response** is realistically coming (the
+  *progress* forecast). It may be a time (`+5m`) or a condition (`on-your-redteam`,
+  `none-until-review`), and it MAY exceed `next_hb` (you poll more often than you expect
+  to have an answer). Defaults to the `next_hb` value when you have nothing pending.
+
 **Cadence** (`next_hb`) is a *forecast*, not a fixed interval — advertise when you'll
 next check in. Guardrails: min 1m, normal 3-5m, max 15m unless you state a concrete
 ETA / long-running task; beyond max without an ETA, the coordinator caps it or asks
 for one. Liveness timeout derives from cadence: treat a peer as unreachable after
-**3× its advertised `next_hb`, or 15m, whichever is greater**.
+**3× its advertised `next_hb`, or 15m, whichever is greater**. (`expected_reply` feeds
+the *progress* clock, not liveness — a near-term `next_hb` never resets the progress
+clock on its own.)
 
 ## Polling (each iteration)
 - **Read the ledger**, not just the inbox: `search_entities({query:<entity>,
