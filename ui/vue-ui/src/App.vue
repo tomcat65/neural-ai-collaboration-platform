@@ -1,18 +1,8 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue'
-import { useRoute } from 'vue-router'
-import { useCommandCenterStore } from '@/stores/command-center'
-
-const route = useRoute()
-const ccStore = useCommandCenterStore()
-
-onMounted(() => {
-  ccStore.initialize()
-})
-
-onUnmounted(() => {
-  ccStore.destroy()
-})
+// App shell — only renders the active route. Each view owns its own store lifecycle:
+// the Command Center initializes/destroys its store inside its own component (scoped
+// to the /activity route), so the Data Steward home ('/') does not run live-activity
+// fetching or polling in the background. (2c)
 </script>
 
 <template>
