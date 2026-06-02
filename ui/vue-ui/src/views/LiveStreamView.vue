@@ -7,7 +7,7 @@ useTheme()
 <template>
   <div class="stream-view">
     <header class="stream-header">
-      <router-link to="/" class="back-link">Back to Command Center</router-link>
+      <router-link to="/" class="back-link">Back to Dashboard</router-link>
       <h1 class="stream-title">LIVE EVENT STREAM</h1>
       <span class="coming-soon">COMING SOON</span>
     </header>

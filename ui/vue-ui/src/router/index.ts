@@ -1,33 +1,39 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import CommandCenter from '@/views/CommandCenter.vue'
+import DataStewardView from '@/views/DataStewardView.vue'
 
 const routes = [
   {
+    // 2c: the Data Steward (human custodian console) is now the primary surface.
     path: '/',
-    name: 'CommandCenter',
-    component: CommandCenter
+    name: 'DataSteward',
+    component: DataStewardView,
   },
   {
-    // Phase 2a: Data Steward (custodian console). Becomes the primary '/' in the 2c re-org.
+    // 2c: the live Command Center (real-time agent activity) moved here from '/'.
+    path: '/activity',
+    name: 'CommandCenter',
+    component: () => import('@/views/CommandCenter.vue'),
+  },
+  {
+    // Back-compat: the old /steward path now redirects to the home.
     path: '/steward',
-    name: 'DataSteward',
-    component: () => import('@/views/DataStewardView.vue')
+    redirect: '/',
   },
   {
     path: '/brain',
     name: 'Brain',
-    component: () => import('../views/BrainView.vue')
+    component: () => import('../views/BrainView.vue'),
   },
   {
     path: '/stream',
     name: 'LiveStream',
-    component: () => import('../views/LiveStreamView.vue')
-  }
+    component: () => import('../views/LiveStreamView.vue'),
+  },
 ]
 
 const router = createRouter({
   history: createWebHistory(),
-  routes
+  routes,
 })
 
 export default router

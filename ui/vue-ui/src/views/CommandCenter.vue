@@ -288,6 +288,8 @@ onUnmounted(() => {
       <span>{{ store.messages.length }} messages loaded</span>
       <span>{{ store.systemHealth.entityCount }} entities</span>
       <span>
+        <router-link to="/" class="footer-link">Data Steward</router-link>
+        <span class="footer-sep">|</span>
         <router-link to="/brain" class="footer-link">Brain Viz</router-link>
         <span class="footer-sep">|</span>
         <router-link to="/stream" class="footer-link">Live Stream</router-link>
