@@ -127,6 +127,20 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
       }
     }
   },
+  get_entity_neighborhood: {
+    name: 'get_entity_neighborhood',
+    description: 'Bounded local-graph view around ONE entity: the entity plus its directly-related entities and the relations among them, out to a small depth (1-2 hops). The safe, focused alternative to read_graph — hard-capped node/edge counts with truncated flags. Use it to answer "what is connected to X?".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entity: { type: 'string', description: 'Name of the center entity (exact match).' },
+        depth: { type: 'number', description: 'Hop distance to expand: 1 (direct neighbors) or 2. Default 1, max 2.', default: 1 },
+        limit: { type: 'number', description: 'Hard cap on neighbor nodes AND on edges returned. Default 50, max 200.', default: 50 },
+        includeObservations: { type: 'boolean', description: 'Include up to `limit` recent observations for the center entity. Default false.', default: false }
+      },
+      required: ['entity']
+    }
+  },
   send_ai_message: {
     name: 'send_ai_message',
     description: 'Send messages to AI agents (direct, capability-based, or broadcast)',

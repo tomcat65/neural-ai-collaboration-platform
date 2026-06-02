@@ -1543,6 +1543,11 @@ export class NeuralMCPServer {
           inputSchema: UnifiedToolSchemas.read_graph.inputSchema,
         },
         {
+          name: UnifiedToolSchemas.get_entity_neighborhood.name,
+          description: UnifiedToolSchemas.get_entity_neighborhood.description,
+          inputSchema: UnifiedToolSchemas.get_entity_neighborhood.inputSchema,
+        },
+        {
           name: UnifiedToolSchemas.inspect_identity_candidates.name,
           description: UnifiedToolSchemas.inspect_identity_candidates.description,
           inputSchema: UnifiedToolSchemas.inspect_identity_candidates.inputSchema,
@@ -2865,6 +2870,162 @@ export class NeuralMCPServer {
                 text: JSON.stringify(graphData, null, 2),
               },
             ],
+          };
+        }
+
+        case 'get_entity_neighborhood': {
+          // Bounded local-graph around one entity (the safe, focused alternative to read_graph).
+          const db = this.memoryManager.getDb();
+          const entityName = typeof args.entity === 'string' && args.entity
+            ? args.entity
+            : (typeof args.entityName === 'string' ? args.entityName : '');
+          if (!entityName) {
+            throw new Error('Missing required field: `entity` (the center entity name)');
+          }
+          const maxHops = Math.max(1, Math.min(Number(args.depth) || 1, 2));
+          const cap = Math.max(1, Math.min(Number.isFinite(Number(args.limit)) ? Math.floor(Number(args.limit)) : 50, 200));
+          const includeObservations = args.includeObservations === true;
+
+          const getEntityRow = (name: string): any => {
+            try {
+              return db.prepare(
+                `SELECT id, content, created_at FROM shared_memory
+                 WHERE tenant_id = ? AND memory_type = 'entity' AND json_extract(content, '$.name') = ?
+                 LIMIT 1`
+              ).get(tenantId, name);
+            } catch {
+              return undefined;
+            }
+          };
+          const obsCountFor = (name: string): number => {
+            try {
+              return (db.prepare(
+                `SELECT COUNT(*) as cnt FROM shared_memory
+                 WHERE tenant_id = ? AND memory_type = 'observation' AND json_extract(content, '$.entityName') = ?`
+              ).get(tenantId, name) as any)?.cnt || 0;
+            } catch {
+              return 0;
+            }
+          };
+
+          const centerRow = getEntityRow(entityName);
+          if (!centerRow) {
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  entity: entityName, found: false, center: null, nodes: [], edges: [],
+                  statistics: { depth: maxHops, nodeCount: 0, edgeCount: 0 },
+                  truncated: { nodes: false, edges: false },
+                }, null, 2),
+              }],
+            };
+          }
+          let centerContent: any = {};
+          try { centerContent = JSON.parse(centerRow.content || '{}'); } catch { centerContent = {}; }
+          const centerName = centerContent.name || entityName;
+
+          const nodeMap = new Map<string, any>();
+          const edges: any[] = [];
+          const edgeSeen = new Set<string>();
+          let nodesTrunc = false;
+          let edgesTrunc = false;
+          const visited = new Set<string>([centerName]);
+          let frontier: string[] = [centerName];
+
+          for (let hop = 1; hop <= maxHops; hop++) {
+            const next: string[] = [];
+            for (const nm of frontier) {
+              let rels: any[] = [];
+              try {
+                rels = db.prepare(
+                  `SELECT content FROM shared_memory
+                   WHERE tenant_id = ? AND memory_type = 'relation'
+                   AND (json_extract(content, '$.from') = ? OR json_extract(content, '$.to') = ?)
+                   LIMIT ?`
+                ).all(tenantId, nm, nm, cap) as any[];
+              } catch {
+                rels = [];
+              }
+              for (const r of rels) {
+                let c: any;
+                try { c = JSON.parse(r.content); } catch { continue; }
+                const from = c.from, to = c.to, rt = c.relationType;
+                if (!from || !to) continue;
+                const key = `${from}|${to}|${rt}`;
+                if (!edgeSeen.has(key)) {
+                  if (edges.length >= cap) { edgesTrunc = true; }
+                  else { edgeSeen.add(key); edges.push({ source: from, target: to, relationType: rt }); }
+                }
+                const other = from === nm ? to : (to === nm ? from : null);
+                if (other && !visited.has(other)) {
+                  visited.add(other);
+                  if (nodeMap.size >= cap) { nodesTrunc = true; }
+                  else {
+                    const erow = getEntityRow(other);
+                    let ec: any = {};
+                    if (erow) { try { ec = JSON.parse(erow.content || '{}'); } catch { ec = {}; } }
+                    nodeMap.set(other, {
+                      id: erow?.id || null,
+                      name: other,
+                      entityType: ec.entityType || ec.type || null,
+                      observationCount: obsCountFor(other),
+                      hop,
+                      exists: !!erow,
+                    });
+                    next.push(other);
+                  }
+                }
+              }
+              if (edges.length >= cap) { edgesTrunc = true; break; }
+            }
+            frontier = next;
+            if (!frontier.length) break;
+          }
+
+          let observations: any[] | undefined;
+          if (includeObservations) {
+            try {
+              const allObs = db.prepare(
+                `SELECT id, content, created_at FROM shared_memory
+                 WHERE tenant_id = ? AND memory_type = 'observation' AND json_extract(content, '$.entityName') = ?
+                 ORDER BY created_at DESC LIMIT ?`
+              ).all(tenantId, centerName, cap) as any[];
+              observations = allObs.map((row: any) => {
+                let content: any = {};
+                try { content = JSON.parse(row.content || '{}'); } catch { content = { raw: row.content, parseError: true }; }
+                return { id: row.id, content, timestamp: new Date(row.created_at) };
+              });
+            } catch {
+              observations = [];
+            }
+          }
+
+          const neighborhood: any = {
+            entity: centerName,
+            found: true,
+            depth: maxHops,
+            limit: cap,
+            center: {
+              id: centerRow.id,
+              name: centerName,
+              entityType: centerContent.entityType || centerContent.type || null,
+              observationCount: obsCountFor(centerName),
+            },
+            nodes: Array.from(nodeMap.values()),
+            edges,
+            ...(includeObservations ? { observations } : {}),
+            statistics: {
+              depth: maxHops,
+              nodeCount: nodeMap.size,
+              edgeCount: edges.length,
+              ...(includeObservations ? { observationCount: observations?.length || 0 } : {}),
+            },
+            truncated: { nodes: nodesTrunc, edges: edgesTrunc },
+          };
+
+          return {
+            content: [{ type: 'text', text: JSON.stringify(neighborhood, null, 2) }],
           };
         }
 
