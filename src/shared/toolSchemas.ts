@@ -116,10 +116,15 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   },
   read_graph: {
     name: 'read_graph',
-    description: 'Read the entire knowledge graph',
+    description: 'Read the knowledge graph in BOUNDED pages (entities, relations, and optionally observations). Defaults to a capped page and EXCLUDES observations unless requested, so a broad read can never dump the whole graph. Use limit/offset to paginate and since to fetch only recent rows; the response includes accurate totals + nextOffset. For a focused view around one entity, prefer get_entity_neighborhood.',
     inputSchema: {
       type: 'object',
-      properties: {}
+      properties: {
+        limit: { type: 'number', description: 'Max rows returned PER section (entities/relations/observations). Default 100, server hard cap 500.', default: 100 },
+        offset: { type: 'number', description: 'Skip this many rows per section for pagination (use nextOffset from a previous response).', default: 0 },
+        since: { type: 'string', description: 'Optional ISO timestamp; include only rows created at or after this time.' },
+        includeObservations: { type: 'boolean', description: 'Include the observations section (the largest). Default false to keep responses small.', default: false }
+      }
     }
   },
   send_ai_message: {

@@ -2770,17 +2770,13 @@ export class NeuralMCPServer {
           // Read by canonical memory_type from shared_memory. Using content.type here is incorrect:
           // entity payloads use domain types (project, analysis, etc.), not the storage type 'entity'.
           const db = this.memoryManager.getDb();
-          let rows: any[] = [];
-          try {
-            rows = db.prepare(
-              `SELECT id, memory_type, content, created_by, created_at
-               FROM shared_memory
-               WHERE tenant_id = ? AND memory_type IN ('entity', 'relation', 'observation')
-               ORDER BY created_at DESC`
-            ).all(tenantId) as any[];
-          } catch {
-            rows = [];
-          }
+
+          // Bounded read: page per memory_type so a broad read can never dump the whole graph.
+          const rawLimit = Number.isFinite(Number(args.limit)) ? Math.floor(Number(args.limit)) : 100;
+          const limit = Math.max(1, Math.min(rawLimit, 500)); // hard server cap
+          const offset = Number.isFinite(Number(args.offset)) && Number(args.offset) > 0 ? Math.floor(Number(args.offset)) : 0;
+          const since = typeof args.since === 'string' && args.since ? args.since : undefined;
+          const includeObservations = args.includeObservations === true;
 
           const toEntry = (row: any) => {
             let content: any = {};
@@ -2799,16 +2795,61 @@ export class NeuralMCPServer {
             };
           };
 
-          const entitiesOnly = rows.filter((r: any) => r.memory_type === 'entity').map(toEntry);
-          const relationsOnly = rows.filter((r: any) => r.memory_type === 'relation').map(toEntry);
-          const observationsOnly = rows.filter((r: any) => r.memory_type === 'observation').map(toEntry);
+          const countFor = (memType: string): number => {
+            try {
+              let q = `SELECT COUNT(*) as cnt FROM shared_memory WHERE tenant_id = ? AND memory_type = ?`;
+              const p: any[] = [tenantId, memType];
+              if (since) { q += ' AND created_at >= ?'; p.push(since); }
+              return (db.prepare(q).get(...p) as any)?.cnt || 0;
+            } catch {
+              return 0;
+            }
+          };
 
+          const pageFor = (memType: string): any[] => {
+            try {
+              let q = `SELECT id, memory_type, content, created_by, created_at FROM shared_memory WHERE tenant_id = ? AND memory_type = ?`;
+              const p: any[] = [tenantId, memType];
+              if (since) { q += ' AND created_at >= ?'; p.push(since); }
+              q += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+              p.push(limit, offset);
+              return (db.prepare(q).all(...p) as any[]).map(toEntry);
+            } catch {
+              return [];
+            }
+          };
+
+          const entityTotal = countFor('entity');
+          const relationTotal = countFor('relation');
+          const observationTotal = countFor('observation');
+
+          const entitiesOnly = pageFor('entity');
+          const relationsOnly = pageFor('relation');
+          const observationsOnly = includeObservations ? pageFor('observation') : [];
+
+          const pageEnd = offset + limit;
           const graphData: any = {
             timestamp: new Date().toISOString(),
             statistics: {
-              nodeCount: entitiesOnly.length,
-              edgeCount: relationsOnly.length,
-              observationCount: observationsOnly.length,
+              nodeCount: entityTotal,
+              edgeCount: relationTotal,
+              observationCount: observationTotal,
+              returned: {
+                entities: entitiesOnly.length,
+                relations: relationsOnly.length,
+                observations: observationsOnly.length,
+              },
+            },
+            pagination: {
+              limit,
+              offset,
+              since: since || null,
+              includeObservations,
+              nextOffset: {
+                entities: pageEnd < entityTotal ? pageEnd : null,
+                relations: pageEnd < relationTotal ? pageEnd : null,
+                observations: includeObservations && pageEnd < observationTotal ? pageEnd : null,
+              },
             },
             graph: {
               entities: entitiesOnly,
