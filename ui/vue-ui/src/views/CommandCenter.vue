@@ -12,6 +12,16 @@ import AttentionQueue from '@/components/command-center/AttentionQueue.vue'
 const store = useCommandCenterStore()
 const { theme, fontScale, toggleTheme, increaseFontSize, decreaseFontSize } = useTheme()
 
+// 2c: the Command Center owns its store lifecycle, scoped to the /activity route.
+// (This previously ran globally in App.vue, which kept live fetching + 3s/15s/30s
+// polling alive even on the Data Steward home.)
+onMounted(() => {
+  store.initialize()
+})
+onUnmounted(() => {
+  store.destroy()
+})
+
 // ── Project Tabs ──────────────────────────────────────────────
 interface ProjectTab {
   id: string
@@ -288,6 +298,8 @@ onUnmounted(() => {
       <span>{{ store.messages.length }} messages loaded</span>
       <span>{{ store.systemHealth.entityCount }} entities</span>
       <span>
+        <router-link to="/" class="footer-link">Data Steward</router-link>
+        <span class="footer-sep">|</span>
         <router-link to="/brain" class="footer-link">Brain Viz</router-link>
         <span class="footer-sep">|</span>
         <router-link to="/stream" class="footer-link">Live Stream</router-link>
