@@ -75,13 +75,14 @@ so rebuilds never touch your DB. Back up before migrations (consistent online
 
 ## MCP Tools
 
-`tools/list` advertises **29 tools**. The authoritative, always-current reference is
+`tools/list` advertises **31 tools**. The authoritative, always-current reference is
 **[docs/TOOLS_SCHEMA.md](docs/TOOLS_SCHEMA.md)** (regenerate with `npm run docs:tools`
 from `src/shared/toolSchemas.ts`). Summary:
 
 - **Knowledge graph:** `create_entities`, `add_observations`, `create_relations`,
-  `read_graph`, `search_entities`, `get_entity_detail`, `delete_entity`,
-  `remove_observations`, `update_observation`, `delete_observations_by_entity`
+  `read_graph`, `get_entity_neighborhood`, `get_entity_backlinks`,
+  `search_entities`, `get_entity_detail`, `delete_entity`, `remove_observations`,
+  `update_observation`, `delete_observations_by_entity`
 - **AI messaging:** `send_ai_message`, `get_ai_messages`, `get_message_detail`,
   `mark_messages_read`, `archive_messages`
 - **Agent management:** `register_agent`, `set_agent_identity`, `get_agent_status`
