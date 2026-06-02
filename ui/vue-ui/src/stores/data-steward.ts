@@ -59,6 +59,14 @@ export interface AuditEntry {
   [k: string]: unknown
 }
 
+/** Global store stats for the overview hero (from GET /api/analytics -> overview). */
+export interface OverviewStats {
+  entityCount: number
+  observationCount: number
+  relationCount: number
+  actualDbBytes: number | null
+}
+
 /** Thrown when /api/data/* reports the feature flag is off. */
 export class DataMgmtDisabled extends Error {
   constructor() {
@@ -83,6 +91,7 @@ export const useDataStewardStore = defineStore('data-steward', () => {
   const locations = ref<BackupLocation[]>([])
   const auditEntries = ref<AuditEntry[]>([])
   const trash = ref<TrashEntry[]>([]) // durable server-side Trash (2b)
+  const overview = ref<OverviewStats | null>(null) // global store stats for the hero
   // null = unknown; false = /admin/audit-log unreachable (admin endpoints/proxy off).
   const auditAvailable = ref<boolean | null>(null)
   const loading = ref(false)
@@ -356,13 +365,28 @@ export const useDataStewardStore = defineStore('data-steward', () => {
     }
   }
 
+  /** Global store stats for the overview hero — graceful, independent of the data-mgmt gate. */
+  async function fetchOverview(): Promise<void> {
+    try {
+      const res = await fetch('/api/analytics')
+      if (!res.ok) {
+        overview.value = null
+        return
+      }
+      const data = (await res.json()) as { overview?: OverviewStats }
+      overview.value = data?.overview ?? null
+    } catch {
+      overview.value = null
+    }
+  }
+
   /** Initial load — probes the feature flag and loads the non-destructive views. */
   async function initialize(): Promise<void> {
     loading.value = true
     error.value = null
     try {
       await fetchPrefixes() // probes availability (may set available=false)
-      await Promise.all([fetchSnapshots(), fetchLocations(), fetchAudit(), fetchTrash()])
+      await Promise.all([fetchSnapshots(), fetchLocations(), fetchAudit(), fetchTrash(), fetchOverview()])
     } catch (e: any) {
       if (e instanceof DataMgmtDisabled) {
         // available is already false → the view shows the disabled state.
@@ -383,6 +407,7 @@ export const useDataStewardStore = defineStore('data-steward', () => {
     locations,
     auditEntries,
     trash,
+    overview,
     auditAvailable,
     loading,
     busy,
@@ -402,5 +427,6 @@ export const useDataStewardStore = defineStore('data-steward', () => {
     purgeTrash,
     importBackup,
     restoreSnapshot,
+    fetchOverview,
   }
 })
