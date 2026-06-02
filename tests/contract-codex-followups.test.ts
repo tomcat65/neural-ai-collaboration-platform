@@ -254,7 +254,7 @@ describe('Codex Follow-ups', () => {
       expect(body.status).toBe('healthy');
     });
 
-    it('delete_entity response includes weaviateFailures field (proving tombstone path exists)', async () => {
+    it('delete_entity response includes vectorFailures field (proving tombstone path exists)', async () => {
       // Create a throwaway entity and delete it to verify the tombstone response fields
       const throwaway = `tombstone_check_${Date.now()}`;
       await mcpCall('create_entities', {
@@ -264,8 +264,8 @@ describe('Codex Follow-ups', () => {
       const result = await mcpCall('delete_entity', { entityName: throwaway });
       expect(result.status).toBe('deleted');
       // These fields prove the tombstone codepath is wired
-      expect(typeof result.weaviateCleanup).toBe('number');
-      expect(typeof result.weaviateFailures).toBe('number');
+      expect(typeof result.vectorCleanup).toBe('number');
+      expect(typeof result.vectorFailures).toBe('number');
     });
   });
 });
