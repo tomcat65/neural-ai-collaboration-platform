@@ -735,6 +735,9 @@ describe('Neural agent workflow metadata', () => {
     expect(addObservations?.inputSchema?.properties?.agentId).toMatchObject({
       type: 'string',
     });
+    const toolNames = listed.tools.map((tool: any) => tool.name);
+    expect(toolNames).toContain('unregister_agent');
+    expect(toolNames).toContain('gc_agent_registrations');
   });
 
   it('groups registrations by canonical agent identity', async () => {
@@ -794,5 +797,83 @@ describe('Neural agent workflow metadata', () => {
     expect(canonical).toBeTruthy();
     expect(canonical.aliases).toContain(sessionAgentId);
     expect(canonical.capabilities).toContain('analysis');
+  });
+
+  it('soft-unregisters agent registrations and preserves lifecycle metadata', async () => {
+    const ts = Date.now();
+    const agentId = `agent-lifecycle-${ts}`;
+
+    const registered = await mcpCall(server, 'register_agent', {
+      agentId,
+      name: 'Lifecycle Test Agent',
+      capabilities: ['analysis'],
+      ttlSeconds: 60,
+      metadata: { purpose: 'contract-test' },
+    });
+
+    expect(registered.status).toBe('registered');
+    expect(registered.lifecycleStatus).toBe('active');
+    expect(registered.ttlSeconds).toBe(60);
+    expect(registered.expiresAt).toBeTruthy();
+
+    const activeStatus = await mcpCall(server, 'get_agent_status', { agentId });
+    expect(activeStatus.status).toBe('active');
+    expect(activeStatus.storedStatus).toBe('active');
+    expect(activeStatus.ttlSeconds).toBe(60);
+    expect(activeStatus.expiresAt).toBe(registered.expiresAt);
+
+    const unregistered = await mcpCall(server, 'unregister_agent', {
+      agentId,
+      reason: 'contract complete',
+    });
+    expect(unregistered.status).toBe('unregistered');
+    expect(unregistered.previousStatus).toBe('active');
+
+    const inactiveStatus = await mcpCall(server, 'get_agent_status', { agentId });
+    expect(inactiveStatus.status).toBe('inactive');
+    expect(inactiveStatus.storedStatus).toBe('inactive');
+    expect(inactiveStatus.lifecycleStatus).toBe('inactive');
+  });
+
+  it('reports expired registrations and garbage-collects them only when dryRun is false', async () => {
+    const ts = Date.now();
+    const agentId = `agent-expiring-${ts}`;
+    const expiresAt = new Date(Date.now() - 1000).toISOString();
+
+    await mcpCall(server, 'register_agent', {
+      agentId,
+      name: 'Expiring Test Agent',
+      capabilities: ['analysis'],
+      expiresAt,
+    });
+
+    const expiredStatus = await mcpCall(server, 'get_agent_status', { agentId });
+    expect(expiredStatus.status).toBe('expired');
+    expect(expiredStatus.storedStatus).toBe('active');
+    expect(expiredStatus.expiresAt).toBe(expiresAt);
+
+    const dryRun = await mcpCall(server, 'gc_agent_registrations', {
+      dryRun: true,
+      deleteExpired: true,
+      limit: 50,
+    });
+    expect(dryRun.status).toBe('dry_run');
+    expect(dryRun.deleted).toBe(0);
+    expect(dryRun.candidates.some((candidate: any) => candidate.agentId === agentId && candidate.reasons.includes('expired'))).toBe(true);
+
+    const afterDryRun = await mcpCall(server, 'get_agent_status', { agentId });
+    expect(afterDryRun.status).toBe('expired');
+
+    const deleted = await mcpCall(server, 'gc_agent_registrations', {
+      dryRun: false,
+      deleteExpired: true,
+      limit: 50,
+    });
+    expect(deleted.status).toBe('deleted');
+    expect(deleted.deleted).toBeGreaterThanOrEqual(1);
+    expect(deleted.candidates.some((candidate: any) => candidate.agentId === agentId)).toBe(true);
+
+    const afterDelete = await mcpCall(server, 'get_agent_status', { agentId });
+    expect(afterDelete.status).toBe('unknown');
   });
 });
