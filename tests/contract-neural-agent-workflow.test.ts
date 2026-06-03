@@ -280,12 +280,12 @@ describe('Neural agent workflow metadata', () => {
     )).toBe(true);
   });
 
-  it('hides redundant inline entity representation when materialized observation exists', async () => {
+  it('removes redundant inline entity lookup keys when materialized observation exists', async () => {
     const ts = Date.now();
     const entityName = `Inline Representation Dedupe ${ts}`;
     const handle = `ird-handle-${ts}`;
 
-    await mcpCall(server, 'create_entities', {
+    const created = await mcpCall(server, 'create_entities', {
       entities: [
         {
           name: entityName,
@@ -295,6 +295,37 @@ describe('Neural agent workflow metadata', () => {
       ],
     });
 
+    const entityId = created.entities[0].id;
+    const materializedObservationId = created.entities[0].materializedInlineObservations[0].id;
+    const db = server.getMemoryManager().getDb();
+    const entityLookupKinds = (db.prepare(
+      `SELECT key_kind
+       FROM graph_lookup_keys
+       WHERE tenant_id = ? AND memory_id = ?
+       ORDER BY key_kind ASC`
+    ).all('default', entityId) as any[]).map((row) => row.key_kind);
+    expect(entityLookupKinds).toContain('canonical_name');
+    expect(entityLookupKinds).not.toContain('embedded_observation_handle');
+
+    const entityHandleLookup = (db.prepare(
+      `SELECT COUNT(*) as cnt
+       FROM graph_lookup_keys
+       WHERE tenant_id = ?
+         AND memory_id = ?
+         AND lookup_key = ?`
+    ).get('default', entityId, handle) as any)?.cnt || 0;
+    expect(entityHandleLookup).toBe(0);
+
+    const materializedHandleLookup = (db.prepare(
+      `SELECT COUNT(*) as cnt
+       FROM graph_lookup_keys
+       WHERE tenant_id = ?
+         AND memory_id = ?
+         AND lookup_key = ?
+         AND key_kind = 'observation_handle'`
+    ).get('default', materializedObservationId, handle) as any)?.cnt || 0;
+    expect(materializedHandleLookup).toBeGreaterThanOrEqual(1);
+
     const searched = await mcpCall(server, 'search_entities', {
       query: handle,
       limit: 1,
@@ -302,10 +333,10 @@ describe('Neural agent workflow metadata', () => {
     });
 
     expect(searched.exactAnchored).toBe(true);
-    expect(searched.exactEntityMatches).toBeGreaterThanOrEqual(1);
+    expect(searched.exactEntityMatches).toBe(0);
     expect(searched.exactObservationMatches).toBe(1);
-    expect(searched.preRepresentationDeduplicationCount).toBeGreaterThanOrEqual(2);
-    expect(searched.redundantRepresentationCount).toBe(1);
+    expect(searched.preRepresentationDeduplicationCount).toBe(1);
+    expect(searched.redundantRepresentationCount).toBe(0);
     expect(searched.returnedResults).toBe(1);
     expect(searched.totalResults).toBe(1);
     expect(searched.results[0].memoryType).toBe('observation');
@@ -321,9 +352,7 @@ describe('Neural agent workflow metadata', () => {
 
     const entityResult = redundant.results.find((result: any) => result.memoryType === 'entity');
     expect(redundant.redundantRepresentationCount).toBe(0);
-    expect(entityResult).toBeTruthy();
-    expect(entityResult.matchedLookupKinds).toContain('embedded_observation_handle');
-    expect(entityResult.matchOrigins).toContain('observation_prose');
+    expect(entityResult).toBeFalsy();
   });
 
   it('keeps entity name matches even when materialized inline observations also match', async () => {

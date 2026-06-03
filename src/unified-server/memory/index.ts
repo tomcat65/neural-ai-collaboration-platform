@@ -3267,8 +3267,13 @@ export class MemoryManager {
 
   private graphLookupEntriesForContent(content: any, memoryType: GraphMemoryType): GraphLookupEntry[] {
     const entries = new Map<string, GraphLookupEntry>();
+    const inlineObservationsMaterialized = memoryType === 'entity' &&
+      content?.metadata?.inlineObservationsMaterialized === true;
+    const derivedContent = inlineObservationsMaterialized
+      ? { ...content, observations: [] }
+      : content;
 
-    for (const value of this.entityLookupValues(content || {})) {
+    for (const value of this.entityLookupValues(derivedContent || {})) {
       this.addGraphLookupEntry(entries, value, 'derived', 50);
     }
 
@@ -3279,7 +3284,7 @@ export class MemoryManager {
           this.addGraphLookupVariants(entries, alias, 'alias', 95);
         }
       }
-      if (Array.isArray(content?.observations)) {
+      if (!inlineObservationsMaterialized && Array.isArray(content?.observations)) {
         for (const observation of content.observations) {
           this.addGraphLookupHandles(entries, observation, 'embedded_observation_handle', 70);
         }
@@ -3437,9 +3442,11 @@ export class MemoryManager {
     if (!Array.isArray(observations) || observations.length === 0) return [];
 
     const materialized: any[] = [];
+    let validInlineObservationCount = 0;
     for (let inlineIndex = 0; inlineIndex < observations.length; inlineIndex++) {
       const raw = observations[inlineIndex];
       if (typeof raw !== 'string' || !raw.trim()) continue;
+      validInlineObservationCount++;
 
       const contentHash = MemoryManager.contentHash(raw);
       const inlineKey = `${entityId}:${inlineIndex}:${contentHash}`;
@@ -3487,7 +3494,58 @@ export class MemoryManager {
       materialized.push({ id: observationId, ...observationData });
     }
 
+    if (validInlineObservationCount > 0 && materialized.length === validInlineObservationCount) {
+      this.markEntityInlineObservationsMaterialized(entityId, tenantId, materialized);
+    }
+
     return materialized;
+  }
+
+  private markEntityInlineObservationsMaterialized(
+    entityId: string,
+    tenantId: string,
+    materialized: any[]
+  ): void {
+    try {
+      const row = this.db.prepare(
+        `SELECT content
+         FROM shared_memory
+         WHERE id = ? AND tenant_id = ? AND memory_type = 'entity'
+         LIMIT 1`
+      ).get(entityId, tenantId) as any;
+      if (!row) return;
+
+      let content: any;
+      try {
+        content = JSON.parse(row.content || '{}');
+      } catch {
+        return;
+      }
+      if (!content || typeof content !== 'object') return;
+
+      const hashes = Array.from(new Set(
+        materialized
+          .map((obs) => obs?.metadata?.contentHash)
+          .filter((hash): hash is string => typeof hash === 'string' && hash.length > 0)
+      ));
+
+      content.metadata = {
+        ...(content.metadata && typeof content.metadata === 'object' ? content.metadata : {}),
+        inlineObservationsMaterialized: true,
+        materializedInlineObservationCount: materialized.length,
+        materializedInlineObservationHashes: hashes,
+      };
+
+      this.db.prepare(
+        `UPDATE shared_memory
+         SET content = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND tenant_id = ? AND memory_type = 'entity'`
+      ).run(JSON.stringify(content), entityId, tenantId);
+
+      this.refreshGraphLookupIndexForMemory(entityId, tenantId, 'entity', content);
+    } catch (error: any) {
+      console.warn(`⚠️ Failed to mark inline observations materialized for entity ${entityId}:`, error?.message || error);
+    }
   }
 
   private backfillGraphLookupIndexIfEmpty(): void {
