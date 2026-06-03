@@ -286,7 +286,7 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   },
   search_entities: {
     name: 'search_entities',
-    description: 'Advanced federated search across graph, vectors, and cache. Returns compact summaries by default (use get_entity_detail for full content). Supports pagination via offset/nextOffset and filtering by memoryType/agentFilter.',
+    description: 'Advanced federated search across graph, vectors, and cache. AGENT TIP: for a KNOWN entity/project name, pass searchType=exact — it is fast, precise, and name-anchored; hybrid/semantic is a bounded, lower-precision supplement best for fuzzy/exploratory queries (entity & observation hits are ranked above ai_message chatter). Returns compact summaries by default (use get_entity_detail for full content). Supports pagination via offset/nextOffset and filtering by memoryType/agentFilter.',
     inputSchema: {
       type: 'object',
       properties: {

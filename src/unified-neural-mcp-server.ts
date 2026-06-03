@@ -1817,7 +1817,7 @@ export class NeuralMCPServer {
               case 'observation': return parseFloat(process.env.RECALL_W_OBSERVATION || '0.95');
               case 'relation': return parseFloat(process.env.RECALL_W_RELATION || '0.9');
               case 'learning': return parseFloat(process.env.RECALL_W_LEARNING || '0.85');
-              case 'ai_message': return parseFloat(process.env.RECALL_W_MESSAGE || '0.8');
+              case 'ai_message': return parseFloat(process.env.RECALL_W_MESSAGE || '0.6');
               case 'agent_registration':
               case 'agent_identity':
               case 'preferences': return parseFloat(process.env.RECALL_W_PLUMBING || '0.3');
