@@ -200,6 +200,48 @@ describe('Neural Contract Baseline', () => {
     });
   });
 
+  describe('get_entity_neighborhood', () => {
+    it('returns a bounded local graph around an entity', async () => {
+      const centerName = `${TEST_PREFIX}nbhd_center_${Date.now()}`;
+      const neighborName = `${TEST_PREFIX}nbhd_neighbor_${Date.now()}`;
+      await mcpCall('create_entities', {
+        entities: [
+          { name: centerName, entityType: 'test', observations: ['neighborhood center'] },
+          { name: neighborName, entityType: 'test', observations: ['neighborhood neighbor'] },
+        ],
+      });
+      await mcpCall('create_relations', {
+        relations: [{ from: centerName, to: neighborName, relationType: 'nbhd_rel' }],
+      });
+
+      const result = await mcpCall('get_entity_neighborhood', {
+        entity: centerName,
+        depth: 1,
+        limit: 50,
+      });
+
+      expect(result.found).toBe(true);
+      expect(result.center?.name).toBe(centerName);
+      expect(Array.isArray(result.nodes)).toBe(true);
+      expect(Array.isArray(result.edges)).toBe(true);
+      expect(result.nodes.some((n: any) => n.name === neighborName)).toBe(true);
+      expect(result.edges.some((e: any) =>
+        e.source === centerName && e.target === neighborName && e.relationType === 'nbhd_rel'
+      )).toBe(true);
+      expect(result.statistics.edgeCount).toBeGreaterThanOrEqual(1);
+      expect(result.truncated).toBeDefined();
+    });
+
+    it('returns found:false for a missing entity', async () => {
+      const result = await mcpCall('get_entity_neighborhood', {
+        entity: `${TEST_PREFIX}missing_${Date.now()}`,
+      });
+      expect(result.found).toBe(false);
+      expect(result.nodes).toHaveLength(0);
+      expect(result.edges).toHaveLength(0);
+    });
+  });
+
   // === AI MESSAGING TOOLS ===
 
   describe('send_ai_message + get_ai_messages', () => {
@@ -412,6 +454,7 @@ describe('Neural Contract Baseline', () => {
         'add_observations',
         'create_relations',
         'read_graph',
+        'get_entity_neighborhood',
         'send_ai_message',
         'get_ai_messages',
         'register_agent',

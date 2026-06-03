@@ -116,10 +116,29 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   },
   read_graph: {
     name: 'read_graph',
-    description: 'Read the entire knowledge graph',
+    description: 'Read the knowledge graph in BOUNDED pages (entities, relations, and optionally observations). Defaults to a capped page and EXCLUDES observations unless requested, so a broad read can never dump the whole graph. Use limit/offset to paginate and since to fetch only recent rows; the response includes accurate totals + nextOffset. For a focused view around one entity, prefer get_entity_neighborhood.',
     inputSchema: {
       type: 'object',
-      properties: {}
+      properties: {
+        limit: { type: 'number', description: 'Max rows returned PER section (entities/relations/observations). Default 100, server hard cap 500.', default: 100 },
+        offset: { type: 'number', description: 'Skip this many rows per section for pagination (use nextOffset from a previous response).', default: 0 },
+        since: { type: 'string', description: 'Optional ISO timestamp; include only rows created at or after this time.' },
+        includeObservations: { type: 'boolean', description: 'Include the observations section (the largest). Default false to keep responses small.', default: false }
+      }
+    }
+  },
+  get_entity_neighborhood: {
+    name: 'get_entity_neighborhood',
+    description: 'Bounded local-graph view around ONE entity: the entity plus its directly-related entities and the relations among them, out to a small depth (1-2 hops). The safe, focused alternative to read_graph — hard-capped node/edge counts with truncated flags. Use it to answer "what is connected to X?".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entity: { type: 'string', description: 'Name of the center entity (exact match).' },
+        depth: { type: 'number', description: 'Hop distance to expand: 1 (direct neighbors) or 2. Default 1, max 2.', default: 1 },
+        limit: { type: 'number', description: 'Hard cap on neighbor nodes AND on edges returned. Default 50, max 200.', default: 50 },
+        includeObservations: { type: 'boolean', description: 'Include up to `limit` recent observations for the center entity. Default false.', default: false }
+      },
+      required: ['entity']
     }
   },
   send_ai_message: {

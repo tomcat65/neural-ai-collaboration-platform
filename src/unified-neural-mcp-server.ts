@@ -1543,6 +1543,11 @@ export class NeuralMCPServer {
           inputSchema: UnifiedToolSchemas.read_graph.inputSchema,
         },
         {
+          name: UnifiedToolSchemas.get_entity_neighborhood.name,
+          description: UnifiedToolSchemas.get_entity_neighborhood.description,
+          inputSchema: UnifiedToolSchemas.get_entity_neighborhood.inputSchema,
+        },
+        {
           name: UnifiedToolSchemas.inspect_identity_candidates.name,
           description: UnifiedToolSchemas.inspect_identity_candidates.description,
           inputSchema: UnifiedToolSchemas.inspect_identity_candidates.inputSchema,
@@ -2770,17 +2775,13 @@ export class NeuralMCPServer {
           // Read by canonical memory_type from shared_memory. Using content.type here is incorrect:
           // entity payloads use domain types (project, analysis, etc.), not the storage type 'entity'.
           const db = this.memoryManager.getDb();
-          let rows: any[] = [];
-          try {
-            rows = db.prepare(
-              `SELECT id, memory_type, content, created_by, created_at
-               FROM shared_memory
-               WHERE tenant_id = ? AND memory_type IN ('entity', 'relation', 'observation')
-               ORDER BY created_at DESC`
-            ).all(tenantId) as any[];
-          } catch {
-            rows = [];
-          }
+
+          // Bounded read: page per memory_type so a broad read can never dump the whole graph.
+          const rawLimit = Number.isFinite(Number(args.limit)) ? Math.floor(Number(args.limit)) : 100;
+          const limit = Math.max(1, Math.min(rawLimit, 500)); // hard server cap
+          const offset = Number.isFinite(Number(args.offset)) && Number(args.offset) > 0 ? Math.floor(Number(args.offset)) : 0;
+          const since = typeof args.since === 'string' && args.since ? args.since : undefined;
+          const includeObservations = args.includeObservations === true;
 
           const toEntry = (row: any) => {
             let content: any = {};
@@ -2799,16 +2800,61 @@ export class NeuralMCPServer {
             };
           };
 
-          const entitiesOnly = rows.filter((r: any) => r.memory_type === 'entity').map(toEntry);
-          const relationsOnly = rows.filter((r: any) => r.memory_type === 'relation').map(toEntry);
-          const observationsOnly = rows.filter((r: any) => r.memory_type === 'observation').map(toEntry);
+          const countFor = (memType: string): number => {
+            try {
+              let q = `SELECT COUNT(*) as cnt FROM shared_memory WHERE tenant_id = ? AND memory_type = ?`;
+              const p: any[] = [tenantId, memType];
+              if (since) { q += ' AND created_at >= ?'; p.push(since); }
+              return (db.prepare(q).get(...p) as any)?.cnt || 0;
+            } catch {
+              return 0;
+            }
+          };
 
+          const pageFor = (memType: string): any[] => {
+            try {
+              let q = `SELECT id, memory_type, content, created_by, created_at FROM shared_memory WHERE tenant_id = ? AND memory_type = ?`;
+              const p: any[] = [tenantId, memType];
+              if (since) { q += ' AND created_at >= ?'; p.push(since); }
+              q += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+              p.push(limit, offset);
+              return (db.prepare(q).all(...p) as any[]).map(toEntry);
+            } catch {
+              return [];
+            }
+          };
+
+          const entityTotal = countFor('entity');
+          const relationTotal = countFor('relation');
+          const observationTotal = countFor('observation');
+
+          const entitiesOnly = pageFor('entity');
+          const relationsOnly = pageFor('relation');
+          const observationsOnly = includeObservations ? pageFor('observation') : [];
+
+          const pageEnd = offset + limit;
           const graphData: any = {
             timestamp: new Date().toISOString(),
             statistics: {
-              nodeCount: entitiesOnly.length,
-              edgeCount: relationsOnly.length,
-              observationCount: observationsOnly.length,
+              nodeCount: entityTotal,
+              edgeCount: relationTotal,
+              observationCount: observationTotal,
+              returned: {
+                entities: entitiesOnly.length,
+                relations: relationsOnly.length,
+                observations: observationsOnly.length,
+              },
+            },
+            pagination: {
+              limit,
+              offset,
+              since: since || null,
+              includeObservations,
+              nextOffset: {
+                entities: pageEnd < entityTotal ? pageEnd : null,
+                relations: pageEnd < relationTotal ? pageEnd : null,
+                observations: includeObservations && pageEnd < observationTotal ? pageEnd : null,
+              },
             },
             graph: {
               entities: entitiesOnly,
@@ -2824,6 +2870,162 @@ export class NeuralMCPServer {
                 text: JSON.stringify(graphData, null, 2),
               },
             ],
+          };
+        }
+
+        case 'get_entity_neighborhood': {
+          // Bounded local-graph around one entity (the safe, focused alternative to read_graph).
+          const db = this.memoryManager.getDb();
+          const entityName = typeof args.entity === 'string' && args.entity
+            ? args.entity
+            : (typeof args.entityName === 'string' ? args.entityName : '');
+          if (!entityName) {
+            throw new Error('Missing required field: `entity` (the center entity name)');
+          }
+          const maxHops = Math.max(1, Math.min(Number(args.depth) || 1, 2));
+          const cap = Math.max(1, Math.min(Number.isFinite(Number(args.limit)) ? Math.floor(Number(args.limit)) : 50, 200));
+          const includeObservations = args.includeObservations === true;
+
+          const getEntityRow = (name: string): any => {
+            try {
+              return db.prepare(
+                `SELECT id, content, created_at FROM shared_memory
+                 WHERE tenant_id = ? AND memory_type = 'entity' AND json_extract(content, '$.name') = ?
+                 LIMIT 1`
+              ).get(tenantId, name);
+            } catch {
+              return undefined;
+            }
+          };
+          const obsCountFor = (name: string): number => {
+            try {
+              return (db.prepare(
+                `SELECT COUNT(*) as cnt FROM shared_memory
+                 WHERE tenant_id = ? AND memory_type = 'observation' AND json_extract(content, '$.entityName') = ?`
+              ).get(tenantId, name) as any)?.cnt || 0;
+            } catch {
+              return 0;
+            }
+          };
+
+          const centerRow = getEntityRow(entityName);
+          if (!centerRow) {
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  entity: entityName, found: false, center: null, nodes: [], edges: [],
+                  statistics: { depth: maxHops, nodeCount: 0, edgeCount: 0 },
+                  truncated: { nodes: false, edges: false },
+                }, null, 2),
+              }],
+            };
+          }
+          let centerContent: any = {};
+          try { centerContent = JSON.parse(centerRow.content || '{}'); } catch { centerContent = {}; }
+          const centerName = centerContent.name || entityName;
+
+          const nodeMap = new Map<string, any>();
+          const edges: any[] = [];
+          const edgeSeen = new Set<string>();
+          let nodesTrunc = false;
+          let edgesTrunc = false;
+          const visited = new Set<string>([centerName]);
+          let frontier: string[] = [centerName];
+
+          for (let hop = 1; hop <= maxHops; hop++) {
+            const next: string[] = [];
+            for (const nm of frontier) {
+              let rels: any[] = [];
+              try {
+                rels = db.prepare(
+                  `SELECT content FROM shared_memory
+                   WHERE tenant_id = ? AND memory_type = 'relation'
+                   AND (json_extract(content, '$.from') = ? OR json_extract(content, '$.to') = ?)
+                   LIMIT ?`
+                ).all(tenantId, nm, nm, cap) as any[];
+              } catch {
+                rels = [];
+              }
+              for (const r of rels) {
+                let c: any;
+                try { c = JSON.parse(r.content); } catch { continue; }
+                const from = c.from, to = c.to, rt = c.relationType;
+                if (!from || !to) continue;
+                const key = `${from}|${to}|${rt}`;
+                if (!edgeSeen.has(key)) {
+                  if (edges.length >= cap) { edgesTrunc = true; }
+                  else { edgeSeen.add(key); edges.push({ source: from, target: to, relationType: rt }); }
+                }
+                const other = from === nm ? to : (to === nm ? from : null);
+                if (other && !visited.has(other)) {
+                  visited.add(other);
+                  if (nodeMap.size >= cap) { nodesTrunc = true; }
+                  else {
+                    const erow = getEntityRow(other);
+                    let ec: any = {};
+                    if (erow) { try { ec = JSON.parse(erow.content || '{}'); } catch { ec = {}; } }
+                    nodeMap.set(other, {
+                      id: erow?.id || null,
+                      name: other,
+                      entityType: ec.entityType || ec.type || null,
+                      observationCount: obsCountFor(other),
+                      hop,
+                      exists: !!erow,
+                    });
+                    next.push(other);
+                  }
+                }
+              }
+              if (edges.length >= cap) { edgesTrunc = true; break; }
+            }
+            frontier = next;
+            if (!frontier.length) break;
+          }
+
+          let observations: any[] | undefined;
+          if (includeObservations) {
+            try {
+              const allObs = db.prepare(
+                `SELECT id, content, created_at FROM shared_memory
+                 WHERE tenant_id = ? AND memory_type = 'observation' AND json_extract(content, '$.entityName') = ?
+                 ORDER BY created_at DESC LIMIT ?`
+              ).all(tenantId, centerName, cap) as any[];
+              observations = allObs.map((row: any) => {
+                let content: any = {};
+                try { content = JSON.parse(row.content || '{}'); } catch { content = { raw: row.content, parseError: true }; }
+                return { id: row.id, content, timestamp: new Date(row.created_at) };
+              });
+            } catch {
+              observations = [];
+            }
+          }
+
+          const neighborhood: any = {
+            entity: centerName,
+            found: true,
+            depth: maxHops,
+            limit: cap,
+            center: {
+              id: centerRow.id,
+              name: centerName,
+              entityType: centerContent.entityType || centerContent.type || null,
+              observationCount: obsCountFor(centerName),
+            },
+            nodes: Array.from(nodeMap.values()),
+            edges,
+            ...(includeObservations ? { observations } : {}),
+            statistics: {
+              depth: maxHops,
+              nodeCount: nodeMap.size,
+              edgeCount: edges.length,
+              ...(includeObservations ? { observationCount: observations?.length || 0 } : {}),
+            },
+            truncated: { nodes: nodesTrunc, edges: edgesTrunc },
+          };
+
+          return {
+            content: [{ type: 'text', text: JSON.stringify(neighborhood, null, 2) }],
           };
         }
 
