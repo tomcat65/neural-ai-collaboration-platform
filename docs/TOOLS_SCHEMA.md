@@ -249,6 +249,36 @@ Parameters
 }
 ```
 
+### get_entity_backlinks
+Bounded backlink view for ONE entity. Returns relation rows that point TO the entity, plus optional outgoing links for comparison. Inspired by Obsidian backlinks, but read from the SQLite knowledge graph.
+
+Parameters
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "entity": {
+      "type": "string",
+      "description": "Name of the target entity (case-insensitive exact match)."
+    },
+    "limit": {
+      "type": "number",
+      "description": "Hard cap on incoming and outgoing links returned. Default 50, max 200.",
+      "default": 50
+    },
+    "includeOutgoing": {
+      "type": "boolean",
+      "description": "Also include outgoing links from this entity. Default false.",
+      "default": false
+    }
+  },
+  "required": [
+    "entity"
+  ]
+}
+```
+
 ### send_ai_message
 Send messages to AI agents (direct, capability-based, or broadcast)
 

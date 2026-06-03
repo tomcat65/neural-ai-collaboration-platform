@@ -1548,6 +1548,11 @@ export class NeuralMCPServer {
           inputSchema: UnifiedToolSchemas.get_entity_neighborhood.inputSchema,
         },
         {
+          name: UnifiedToolSchemas.get_entity_backlinks.name,
+          description: UnifiedToolSchemas.get_entity_backlinks.description,
+          inputSchema: UnifiedToolSchemas.get_entity_backlinks.inputSchema,
+        },
+        {
           name: UnifiedToolSchemas.inspect_identity_candidates.name,
           description: UnifiedToolSchemas.inspect_identity_candidates.description,
           inputSchema: UnifiedToolSchemas.inspect_identity_candidates.inputSchema,
@@ -3026,6 +3031,79 @@ export class NeuralMCPServer {
 
           return {
             content: [{ type: 'text', text: JSON.stringify(neighborhood, null, 2) }],
+          };
+        }
+
+        case 'get_entity_backlinks': {
+          const db = this.memoryManager.getDb();
+          const entityName = typeof args.entity === 'string' && args.entity
+            ? args.entity
+            : (typeof args.entityName === 'string' ? args.entityName : '');
+          if (!entityName) {
+            throw new Error('Missing required field: `entity` (the target entity name)');
+          }
+          const cap = Math.max(1, Math.min(Number.isFinite(Number(args.limit)) ? Math.floor(Number(args.limit)) : 50, 200));
+          const includeOutgoing = args.includeOutgoing === true;
+
+          const entityRow = db.prepare(
+            `SELECT id, content, created_at FROM shared_memory
+             WHERE tenant_id = ? AND memory_type = 'entity' AND LOWER(json_extract(content, '$.name')) = LOWER(?)
+             LIMIT 1`
+          ).get(tenantId, entityName) as any | undefined;
+
+          let entityContent: any = {};
+          if (entityRow) {
+            try { entityContent = JSON.parse(entityRow.content || '{}'); } catch { entityContent = {}; }
+          }
+          const canonicalName = entityContent.name || entityName;
+
+          const incomingRows = db.prepare(
+            `SELECT id, content, created_by, created_at FROM shared_memory
+             WHERE tenant_id = ? AND memory_type = 'relation' AND LOWER(json_extract(content, '$.to')) = LOWER(?)
+             ORDER BY created_at DESC LIMIT ?`
+          ).all(tenantId, canonicalName, cap) as any[];
+          const outgoingRows = includeOutgoing ? db.prepare(
+            `SELECT id, content, created_by, created_at FROM shared_memory
+             WHERE tenant_id = ? AND memory_type = 'relation' AND LOWER(json_extract(content, '$.from')) = LOWER(?)
+             ORDER BY created_at DESC LIMIT ?`
+          ).all(tenantId, canonicalName, cap) as any[] : [];
+
+          const parseRelation = (row: any) => {
+            let content: any = {};
+            try { content = JSON.parse(row.content || '{}'); } catch { content = { raw: row.content, parseError: true }; }
+            return {
+              id: row.id,
+              from: content.from,
+              to: content.to,
+              relationType: content.relationType,
+              properties: content.properties || {},
+              source: row.created_by,
+              timestamp: new Date(row.created_at),
+            };
+          };
+
+          const incoming = incomingRows.map(parseRelation);
+          const outgoing = outgoingRows.map(parseRelation);
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                entity: canonicalName,
+                found: !!entityRow,
+                limit: cap,
+                backlinks: incoming,
+                ...(includeOutgoing ? { outgoing } : {}),
+                statistics: {
+                  backlinks: incoming.length,
+                  ...(includeOutgoing ? { outgoing: outgoing.length } : {}),
+                },
+                truncated: {
+                  backlinks: incoming.length >= cap,
+                  ...(includeOutgoing ? { outgoing: outgoing.length >= cap } : {}),
+                },
+              }, null, 2),
+            }],
           };
         }
 

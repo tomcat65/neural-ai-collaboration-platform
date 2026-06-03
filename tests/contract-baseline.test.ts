@@ -242,6 +242,37 @@ describe('Neural Contract Baseline', () => {
     });
   });
 
+  describe('get_entity_backlinks', () => {
+    it('returns bounded incoming links for an entity', async () => {
+      const sourceName = `${TEST_PREFIX}backlink_source_${Date.now()}`;
+      const targetName = `${TEST_PREFIX}backlink_target_${Date.now()}`;
+      await mcpCall('create_entities', {
+        entities: [
+          { name: sourceName, entityType: 'test', observations: ['backlink source'] },
+          { name: targetName, entityType: 'test', observations: ['backlink target'] },
+        ],
+      });
+      await mcpCall('create_relations', {
+        relations: [{ from: sourceName, to: targetName, relationType: 'links_to' }],
+      });
+
+      const result = await mcpCall('get_entity_backlinks', {
+        entity: targetName,
+        limit: 10,
+        includeOutgoing: true,
+      });
+
+      expect(result.found).toBe(true);
+      expect(result.entity).toBe(targetName);
+      expect(Array.isArray(result.backlinks)).toBe(true);
+      expect(result.backlinks.some((link: any) =>
+        link.from === sourceName && link.to === targetName && link.relationType === 'links_to'
+      )).toBe(true);
+      expect(result.backlinks.length).toBeLessThanOrEqual(10);
+      expect(result.truncated).toBeDefined();
+    });
+  });
+
   // === AI MESSAGING TOOLS ===
 
   describe('send_ai_message + get_ai_messages', () => {
@@ -455,6 +486,7 @@ describe('Neural Contract Baseline', () => {
         'create_relations',
         'read_graph',
         'get_entity_neighborhood',
+        'get_entity_backlinks',
         'send_ai_message',
         'get_ai_messages',
         'register_agent',

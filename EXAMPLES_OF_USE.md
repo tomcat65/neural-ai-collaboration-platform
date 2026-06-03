@@ -4,7 +4,7 @@
 > examples assume the server is running on `localhost:6174` with `API_KEY` set
 > (see [README.md](README.md)). `${API_KEY}` is your key from `.env`.
 
-Practical examples using the MCP tools exposed by the live server at `http://localhost:6174`. Run `tools/list` for the current roster (29 tools at time of writing); see [docs/TOOLS_SCHEMA.md](docs/TOOLS_SCHEMA.md) for full schemas.
+Practical examples using the MCP tools exposed by the live server at `http://localhost:6174`. Run `tools/list` for the current roster (31 tools at time of writing); see [docs/TOOLS_SCHEMA.md](docs/TOOLS_SCHEMA.md) for full schemas.
 
 All examples require `API_KEY` set in your environment.
 
@@ -66,10 +66,20 @@ curl -s -X POST http://localhost:6174/mcp \
     }}
   }' | jq
 
-# Read the full graph
+# Read a bounded graph page. Observations are excluded by default because they are the largest section.
 curl -s -X POST http://localhost:6174/mcp \
   -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
-  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"read_graph","arguments":{}}}' | jq
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"read_graph","arguments":{"limit":50}}}' | jq
+
+# Focus on one entity's local graph instead of dumping everything.
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"get_entity_neighborhood","arguments":{"entity":"Authentication System","depth":1,"limit":25}}}' | jq
+
+# Show incoming links to an entity, Obsidian-backlinks style.
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"get_entity_backlinks","arguments":{"entity":"User Database","limit":25}}}' | jq
 ```
 
 ## AI-to-AI Messaging
