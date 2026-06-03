@@ -207,8 +207,8 @@ describe('Knowledge Graph Mutations (Phase A)', () => {
 
       expect(result.status).toBe('removed');
       expect(result.removedObservations).toBeGreaterThanOrEqual(2);
-      expect(typeof result.weaviateCleanup).toBe('number');
-      expect(typeof result.weaviateFailures).toBe('number');
+      expect(typeof result.vectorCleanup).toBe('number');
+      expect(typeof result.vectorFailures).toBe('number');
     });
 
     it('returns no_match when no observations match', async () => {
@@ -248,8 +248,8 @@ describe('Knowledge Graph Mutations (Phase A)', () => {
       expect(result.status).toBe('deleted');
       expect(result.entityName).toBe(bulkEntity);
       expect(result.deletedObservations).toBeGreaterThanOrEqual(2);
-      expect(typeof result.weaviateCleanup).toBe('number');
-      expect(typeof result.weaviateFailures).toBe('number');
+      expect(typeof result.vectorCleanup).toBe('number');
+      expect(typeof result.vectorFailures).toBe('number');
     });
   });
 
@@ -298,7 +298,7 @@ describe('Knowledge Graph Mutations (Phase A)', () => {
   });
 
   describe('Response fields', () => {
-    it('delete responses include weaviateCleanup and weaviateFailures fields', async () => {
+    it('delete responses include vectorCleanup and vectorFailures fields', async () => {
       const fieldsEntity = `fields_test_${Date.now()}`;
       await mcpCall('create_entities', {
         entities: [{ name: fieldsEntity, entityType: 'test', observations: ['field test'] }],
@@ -306,10 +306,10 @@ describe('Knowledge Graph Mutations (Phase A)', () => {
 
       const result = await mcpCall('delete_entity', { entityName: fieldsEntity });
 
-      expect(result).toHaveProperty('weaviateCleanup');
-      expect(result).toHaveProperty('weaviateFailures');
-      expect(typeof result.weaviateCleanup).toBe('number');
-      expect(typeof result.weaviateFailures).toBe('number');
+      expect(result).toHaveProperty('vectorCleanup');
+      expect(result).toHaveProperty('vectorFailures');
+      expect(typeof result.vectorCleanup).toBe('number');
+      expect(typeof result.vectorFailures).toBe('number');
     });
   });
 });
