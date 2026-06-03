@@ -1102,6 +1102,13 @@ export class NeuralMCPServer {
           if (ageMs < 30 * 60 * 1000) return 'idle';
           return 'offline';
         };
+        const effectiveStatus = (row: any, metadata: any, lastSeen: string) => {
+          if (row.status && row.status !== 'active') return row.status;
+          const expiresAt = metadata?.expiresAt || metadata?.expires_at;
+          const expiresMs = expiresAt ? Date.parse(String(expiresAt)) : NaN;
+          if (Number.isFinite(expiresMs) && expiresMs <= Date.now()) return 'expired';
+          return computeStatus(lastSeen);
+        };
         const messageCountFor = (agentId: string) => {
           try {
             const r = db.prepare(
@@ -1120,9 +1127,10 @@ export class NeuralMCPServer {
               canonicalAgentId: this.memoryManager.inferCanonicalAgentId(row.agent_id, row.name, metadata),
               agentId: row.agent_id,
               displayName: row.name || row.agent_id,
-              status: computeStatus(lastSeen),
+              status: effectiveStatus(row, metadata, lastSeen),
               isEphemeral: isEphemeralId(row.agent_id),
               lastSeen,
+              expiresAt: metadata.expiresAt,
               eventsCount: messageCountFor(row.agent_id),
               capabilities: parseJson(row.capabilities_json, []),
             };
@@ -1142,9 +1150,10 @@ export class NeuralMCPServer {
             canonicalMap.set(canonicalAgentId, {
               canonicalAgentId,
               displayName: row.name || canonicalAgentId,
-              status: computeStatus(lastSeen),
+              status: effectiveStatus(row, metadata, lastSeen),
               isEphemeral: isEphemeralId(canonicalAgentId),
               lastSeen,
+              expiresAt: metadata.expiresAt,
               capabilities: parseJson(row.capabilities_json, []),
               _sessions: 1,
             });
@@ -1153,7 +1162,8 @@ export class NeuralMCPServer {
             if (String(lastSeen) > String(existing.lastSeen)) {
               existing.lastSeen = lastSeen;
               existing.displayName = row.name || existing.displayName;
-              existing.status = computeStatus(lastSeen);
+              existing.status = effectiveStatus(row, metadata, lastSeen);
+              existing.expiresAt = metadata.expiresAt || existing.expiresAt;
             }
             existing.capabilities = Array.from(new Set([...existing.capabilities, ...parseJson(row.capabilities_json, [])]));
           }
@@ -1597,6 +1607,16 @@ export class NeuralMCPServer {
           inputSchema: UnifiedToolSchemas.register_agent.inputSchema
         },
         {
+          name: UnifiedToolSchemas.unregister_agent.name,
+          description: UnifiedToolSchemas.unregister_agent.description,
+          inputSchema: UnifiedToolSchemas.unregister_agent.inputSchema
+        },
+        {
+          name: UnifiedToolSchemas.gc_agent_registrations.name,
+          description: UnifiedToolSchemas.gc_agent_registrations.description,
+          inputSchema: UnifiedToolSchemas.gc_agent_registrations.inputSchema
+        },
+        {
           name: UnifiedToolSchemas.get_agent_status.name,
           description: UnifiedToolSchemas.get_agent_status.description,
           inputSchema: UnifiedToolSchemas.get_agent_status.inputSchema
@@ -1678,6 +1698,30 @@ export class NeuralMCPServer {
     try {
       const agent = args.agentId || this.agentId;
       const tenantId = context.tenantId;
+      const registrationActor = context.userId || context.apiKeyId || this.agentId;
+      const parseRegistrationJson = (raw: string | null | undefined, fallback: any) => {
+        if (!raw) return fallback;
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return fallback;
+        }
+      };
+      const registrationExpiresAt = (metadata: any): string | undefined => {
+        const value = metadata?.expiresAt || metadata?.expires_at;
+        if (typeof value !== 'string' || !value.trim()) return undefined;
+        const parsed = Date.parse(value);
+        return Number.isFinite(parsed) ? new Date(parsed).toISOString() : undefined;
+      };
+      const isRegistrationExpired = (metadata: any, nowMs: number = Date.now()) => {
+        const expiresAt = registrationExpiresAt(metadata);
+        return !!expiresAt && Date.parse(expiresAt) <= nowMs;
+      };
+      const effectiveRegistrationStatus = (status: string | undefined, metadata: any, nowMs: number = Date.now()) => {
+        const storedStatus = status || 'unknown';
+        if (storedStatus === 'active' && isRegistrationExpired(metadata, nowMs)) return 'expired';
+        return storedStatus;
+      };
 
       // Task 1100: Update last_seen_tz when user has a timezone hint
       if (context.userId && context.timezoneHint) {
@@ -3354,10 +3398,28 @@ export class NeuralMCPServer {
         }
 
         case 'register_agent': {
-          const { agentId: newAgentId, name, capabilities, endpoint, metadata = {} } = args;
+          const { agentId: newAgentId, name, capabilities, endpoint } = args;
+          const metadata = args.metadata && typeof args.metadata === 'object' ? args.metadata : {};
           const capabilityList = Array.isArray(capabilities) ? capabilities : [];
+          const ttlSeconds = typeof args.ttlSeconds === 'undefined' || args.ttlSeconds === null
+            ? undefined
+            : Number(args.ttlSeconds);
+          if (typeof ttlSeconds !== 'undefined' && (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0)) {
+            throw new Error('ttlSeconds must be a positive number when provided');
+          }
 
           const now = new Date().toISOString();
+          let expiresAt: string | undefined;
+          if (typeof args.expiresAt === 'string' && args.expiresAt.trim()) {
+            const expiresMs = Date.parse(args.expiresAt);
+            if (!Number.isFinite(expiresMs)) {
+              throw new Error('expiresAt must be a valid ISO timestamp when provided');
+            }
+            expiresAt = new Date(expiresMs).toISOString();
+          } else if (ttlSeconds) {
+            expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+          }
+
           const canonicalAgentId = this.memoryManager.inferCanonicalAgentId(newAgentId, name, metadata);
           const aliases = Array.from(new Set([
             canonicalAgentId,
@@ -3370,7 +3432,11 @@ export class NeuralMCPServer {
             aliases,
             registeredBy: agent,
             registrationTime: now,
+            lastSeen: now,
+            ...(ttlSeconds ? { ttlSeconds } : {}),
+            ...(expiresAt ? { expiresAt } : {}),
             status: 'active',
+            lifecycleStatus: 'active',
             version: '1.0.0'
           };
 
@@ -3423,6 +3489,9 @@ export class NeuralMCPServer {
                   canonicalAgentId,
                   aliases,
                   status: 'registered',
+                  lifecycleStatus: 'active',
+                  expiresAt,
+                  ttlSeconds,
                   features: {
                     crossPlatformAccess: true,
                     realTimeMessaging: true,
@@ -3432,6 +3501,142 @@ export class NeuralMCPServer {
                 }, null, 2),
               },
             ],
+          };
+        }
+
+        case 'unregister_agent': {
+          const targetAgentId = String(args.agentId || '').trim();
+          if (!targetAgentId) {
+            throw new Error('Missing required field: agentId');
+          }
+
+          const now = new Date().toISOString();
+          const db = this.memoryManager.getDb();
+          const row = db.prepare(
+            `SELECT agent_id, name, metadata_json, status, updated_at
+             FROM agent_registrations
+             WHERE tenant_id = ? AND agent_id = ?
+             LIMIT 1`
+          ).get(tenantId, targetAgentId) as any;
+
+          if (!row) {
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  status: 'not_found',
+                  agentId: targetAgentId,
+                }, null, 2),
+              }],
+            };
+          }
+
+          const metadata = parseRegistrationJson(row.metadata_json, {});
+          const updatedMetadata = {
+            ...metadata,
+            status: 'inactive',
+            lifecycleStatus: 'inactive',
+            unregisteredAt: now,
+            unregisteredBy: registrationActor,
+            ...(args.reason ? { unregisterReason: String(args.reason) } : {}),
+          };
+
+          db.prepare(
+            `UPDATE agent_registrations
+             SET status = 'inactive',
+                 metadata_json = ?,
+                 updated_at = ?
+             WHERE tenant_id = ? AND agent_id = ?`
+          ).run(JSON.stringify(updatedMetadata), now, tenantId, targetAgentId);
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                status: 'unregistered',
+                agentId: targetAgentId,
+                previousStatus: row.status,
+                lifecycleStatus: 'inactive',
+                unregisteredAt: now,
+              }, null, 2),
+            }],
+          };
+        }
+
+        case 'gc_agent_registrations': {
+          const dryRun = args.dryRun !== false;
+          const deleteExpired = args.deleteExpired !== false;
+          const inactiveOlderThanSeconds = typeof args.inactiveOlderThanSeconds === 'undefined' || args.inactiveOlderThanSeconds === null
+            ? undefined
+            : Number(args.inactiveOlderThanSeconds);
+          if (typeof inactiveOlderThanSeconds !== 'undefined' && (!Number.isFinite(inactiveOlderThanSeconds) || inactiveOlderThanSeconds < 0)) {
+            throw new Error('inactiveOlderThanSeconds must be a non-negative number when provided');
+          }
+          const gcLimit = Math.max(1, Math.min(Number(args.limit) || 100, 500));
+          const nowMs = Date.now();
+          const db = this.memoryManager.getDb();
+          const rows = db.prepare(
+            `SELECT agent_id, name, metadata_json, status, updated_at, created_at
+             FROM agent_registrations
+             WHERE tenant_id = ?
+             ORDER BY updated_at ASC`
+          ).all(tenantId) as any[];
+
+          const candidates = rows.flatMap((row) => {
+            const metadata = parseRegistrationJson(row.metadata_json, {});
+            const reasons: string[] = [];
+            const expiresAt = registrationExpiresAt(metadata);
+            if (deleteExpired && expiresAt && Date.parse(expiresAt) <= nowMs) {
+              reasons.push('expired');
+            }
+            if (typeof inactiveOlderThanSeconds !== 'undefined' && row.status !== 'active') {
+              const lastUpdatedMs = Date.parse(row.updated_at || row.created_at || '');
+              if (Number.isFinite(lastUpdatedMs) && nowMs - lastUpdatedMs >= inactiveOlderThanSeconds * 1000) {
+                reasons.push('inactive_stale');
+              }
+            }
+            if (reasons.length === 0) return [];
+            return [{
+              agentId: row.agent_id,
+              name: row.name,
+              status: effectiveRegistrationStatus(row.status, metadata, nowMs),
+              storedStatus: row.status,
+              updatedAt: row.updated_at,
+              expiresAt,
+              reasons,
+            }];
+          }).slice(0, gcLimit);
+
+          let deleted = 0;
+          if (!dryRun && candidates.length > 0) {
+            const remove = db.prepare(
+              `DELETE FROM agent_registrations
+               WHERE tenant_id = ? AND agent_id = ?`
+            );
+            const deleteBatch = db.transaction(() => {
+              for (const candidate of candidates) {
+                deleted += remove.run(tenantId, candidate.agentId).changes;
+              }
+            });
+            deleteBatch();
+          }
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                status: dryRun ? 'dry_run' : 'deleted',
+                dryRun,
+                matched: candidates.length,
+                deleted,
+                limit: gcLimit,
+                criteria: {
+                  deleteExpired,
+                  inactiveOlderThanSeconds,
+                },
+                candidates,
+              }, null, 2),
+            }],
           };
         }
 
@@ -3518,34 +3723,31 @@ export class NeuralMCPServer {
           let statusData;
           const db = this.memoryManager.getDb();
 
-          const parseJson = (raw: string | null | undefined, fallback: any) => {
-            if (!raw) return fallback;
-            try {
-              return JSON.parse(raw);
-            } catch {
-              return fallback;
-            }
-          };
-
           if (targetAgentId) {
             const row = db.prepare(
-              `SELECT agent_id, name, capabilities_json, metadata_json, status, updated_at
+              `SELECT agent_id, name, capabilities_json, metadata_json, status, created_at, updated_at
                FROM agent_registrations
                WHERE tenant_id = ? AND agent_id = ?
                LIMIT 1`
-            ).get(tenantId, targetAgentId) as { agent_id: string; name: string; capabilities_json: string; metadata_json: string; status: string; updated_at: string } | undefined;
+            ).get(tenantId, targetAgentId) as any;
 
-            const metadata = row ? parseJson(row.metadata_json, {}) : {};
+            const metadata = row ? parseRegistrationJson(row.metadata_json, {}) : {};
             const canonicalAgentId = row
               ? this.memoryManager.inferCanonicalAgentId(row.agent_id, row.name, metadata)
               : this.memoryManager.resolvePreferredAgentId(targetAgentId);
+            const expiresAt = registrationExpiresAt(metadata);
 
             statusData = {
               agentId: targetAgentId,
               canonicalAgentId,
-              status: row?.status || 'unknown',
+              status: row ? effectiveRegistrationStatus(row.status, metadata) : 'unknown',
+              storedStatus: row?.status,
               lastSeen: row?.updated_at || 'never',
-              capabilities: row ? parseJson(row.capabilities_json, []) : [],
+              registeredAt: row?.created_at,
+              expiresAt,
+              ttlSeconds: metadata.ttlSeconds,
+              lifecycleStatus: metadata.lifecycleStatus || metadata.status,
+              capabilities: row ? parseRegistrationJson(row.capabilities_json, []) : [],
               aliases: this.memoryManager.getAgentAliases(targetAgentId)
             };
           } else {
@@ -3560,21 +3762,26 @@ export class NeuralMCPServer {
             const totalRegistrations = totalRow?.c ?? 0;
 
             const rows = db.prepare(
-              `SELECT agent_id, name, capabilities_json, metadata_json, status, updated_at
+              `SELECT agent_id, name, capabilities_json, metadata_json, status, created_at, updated_at
                FROM agent_registrations
                WHERE tenant_id = ?
                ORDER BY updated_at DESC`
-            ).all(tenantId) as Array<{ agent_id: string; name: string; capabilities_json: string; metadata_json: string; status: string; updated_at: string }>;
+            ).all(tenantId) as any[];
 
             const pagedRows = rows.slice(statusOffset, statusOffset + statusLimit);
             const agents = pagedRows.map(row => {
-              const metadata = parseJson(row.metadata_json, {});
+              const metadata = parseRegistrationJson(row.metadata_json, {});
+              const expiresAt = registrationExpiresAt(metadata);
               return {
                 agentId: row.agent_id,
                 canonicalAgentId: this.memoryManager.inferCanonicalAgentId(row.agent_id, row.name, metadata),
                 name: row.name,
-                status: row.status,
-                lastSeen: row.updated_at
+                status: effectiveRegistrationStatus(row.status, metadata),
+                storedStatus: row.status,
+                lastSeen: row.updated_at,
+                registeredAt: row.created_at,
+                expiresAt,
+                ttlSeconds: metadata.ttlSeconds,
               };
             });
             const nextOffset = statusOffset + statusLimit < rows.length ? statusOffset + statusLimit : null;
@@ -3582,22 +3789,29 @@ export class NeuralMCPServer {
             const canonicalMap = new Map<string, any>();
             if (groupByCanonical) {
               for (const row of rows) {
-                const metadata = parseJson(row.metadata_json, {});
+                const metadata = parseRegistrationJson(row.metadata_json, {});
                 const canonicalAgentId = this.memoryManager.inferCanonicalAgentId(row.agent_id, row.name, metadata);
+                const rowStatus = effectiveRegistrationStatus(row.status, metadata);
                 const existing = canonicalMap.get(canonicalAgentId) || {
                   agentId: canonicalAgentId,
                   name: row.name,
                   status: 'inactive',
                   lastSeen: row.updated_at,
+                  expiresAt: registrationExpiresAt(metadata),
                   aliases: [],
                   sessionCount: 0,
                   capabilities: [],
                 };
                 existing.sessionCount += 1;
-                existing.status = existing.status === 'active' || row.status === 'active' ? 'active' : row.status;
+                if (rowStatus === 'active') {
+                  existing.status = 'active';
+                } else if (existing.status !== 'active') {
+                  existing.status = rowStatus;
+                }
                 if (String(row.updated_at || '') > String(existing.lastSeen || '')) {
                   existing.lastSeen = row.updated_at;
                   existing.name = row.name;
+                  existing.expiresAt = registrationExpiresAt(metadata) || existing.expiresAt;
                 }
                 existing.aliases = Array.from(new Set([
                   ...existing.aliases,
@@ -3606,7 +3820,7 @@ export class NeuralMCPServer {
                 ].filter(Boolean)));
                 existing.capabilities = Array.from(new Set([
                   ...existing.capabilities,
-                  ...parseJson(row.capabilities_json, []),
+                  ...parseRegistrationJson(row.capabilities_json, []),
                 ]));
                 canonicalMap.set(canonicalAgentId, existing);
               }

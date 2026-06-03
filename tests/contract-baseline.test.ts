@@ -508,6 +508,8 @@ describe('Neural Contract Baseline', () => {
         'send_ai_message',
         'get_ai_messages',
         'register_agent',
+        'unregister_agent',
+        'gc_agent_registrations',
         'set_agent_identity',
         'get_agent_status',
         'record_learning',

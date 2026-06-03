@@ -218,7 +218,7 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   },
   register_agent: {
     name: 'register_agent',
-    description: 'Register a new AI agent in the collaboration system',
+    description: 'Register or refresh an AI agent in the collaboration system. Optional TTL/expiresAt metadata lets ephemeral agents expire without schema migration.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -230,10 +230,37 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
           description: 'List of agent capabilities'
         },
         endpoint: { type: 'string', description: 'Agent communication endpoint' },
+        ttlSeconds: { type: 'number', description: 'Optional time-to-live in seconds. Stored in metadata and reflected as expiresAt.' },
+        expiresAt: { type: 'string', description: 'Optional ISO timestamp when this registration should be treated as expired.' },
         metadata: { type: 'object', description: 'Additional agent metadata' }
       },
       required: ['agentId', 'name', 'capabilities']
     }
+  },
+  unregister_agent: {
+    name: 'unregister_agent',
+    description: 'Soft-unregister an agent registration by marking it inactive and recording lifecycle audit metadata. Does not delete rows.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agentId: { type: 'string', description: 'Agent identifier to unregister' },
+        reason: { type: 'string', description: 'Optional reason recorded in registration metadata' },
+      },
+      required: ['agentId'],
+    },
+  },
+  gc_agent_registrations: {
+    name: 'gc_agent_registrations',
+    description: 'Dry-run-first garbage collection for expired or stale inactive agent registrations. Deletes only when dryRun is false.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        dryRun: { type: 'boolean', description: 'If true, report matching rows without deleting them', default: true },
+        deleteExpired: { type: 'boolean', description: 'Include registrations whose metadata.expiresAt is in the past', default: true },
+        inactiveOlderThanSeconds: { type: 'number', description: 'Also include inactive rows whose updated_at is older than this many seconds' },
+        limit: { type: 'number', description: 'Maximum rows to delete or report (server hard cap 500)', default: 100 },
+      },
+    },
   },
   set_agent_identity: {
     name: 'set_agent_identity',
