@@ -1552,21 +1552,6 @@ export class NeuralMCPServer {
           description: UnifiedToolSchemas.get_entity_backlinks.description,
           inputSchema: UnifiedToolSchemas.get_entity_backlinks.inputSchema,
         },
-        {
-          name: UnifiedToolSchemas.inspect_identity_candidates.name,
-          description: UnifiedToolSchemas.inspect_identity_candidates.description,
-          inputSchema: UnifiedToolSchemas.inspect_identity_candidates.inputSchema,
-        },
-        {
-          name: UnifiedToolSchemas.get_entity_context.name,
-          description: UnifiedToolSchemas.get_entity_context.description,
-          inputSchema: UnifiedToolSchemas.get_entity_context.inputSchema,
-        },
-        {
-          name: UnifiedToolSchemas.execute_pass2_phase_c.name,
-          description: UnifiedToolSchemas.execute_pass2_phase_c.description,
-          inputSchema: UnifiedToolSchemas.execute_pass2_phase_c.inputSchema,
-        },
 
         // === KNOWLEDGE GRAPH MUTATIONS (Phase A) ===
         {
@@ -2282,92 +2267,6 @@ export class NeuralMCPServer {
                   maxTotalSize,
                   entities: retrieved,
                 }, null, 2),
-              },
-            ],
-          };
-        }
-
-        case 'inspect_identity_candidates': {
-          const {
-            canonicalKey,
-            limit = 50,
-            minGroupSize = 2,
-            includeSingletons = false,
-            recordAudit = false,
-            saveArtifact = false,
-            artifactDir,
-          } = args;
-
-          const report = this.memoryManager.inspectIdentityCandidates({
-            tenantId,
-            canonicalKey,
-            limit,
-            minGroupSize,
-            includeSingletons,
-          });
-
-          let audit: any = { recorded: false, rowsWritten: 0 };
-          if (recordAudit) {
-            const auditRow = this.memoryManager.recordPass2DryRunAudit(
-              agent,
-              tenantId,
-              report.canonicalHash,
-              report.summary.rowsInReturnedGroups,
-              `Pass 2.0 Phase A dry-run (${report.summary.returnedGroupCount} groups)`,
-              context
-            );
-            audit = { recorded: true, rowsWritten: 1, ...auditRow };
-          }
-
-          let artifactPath: string | null = null;
-          const finalReport = {
-            ...report,
-            audit,
-          };
-          if (saveArtifact) {
-            artifactPath = this.memoryManager.savePass2DryRunArtifact(finalReport, artifactDir);
-            finalReport.artifactPath = artifactPath;
-          }
-
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(finalReport, null, 2),
-              },
-            ],
-          };
-        }
-
-        case 'get_entity_context': {
-          const requestTenantId = args.tenantId || tenantId;
-          const contextPayload = this.memoryManager.getEntityContext({
-            ...args,
-            tenantId: requestTenantId,
-          });
-
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(contextPayload, null, 2),
-              },
-            ],
-          };
-        }
-
-        case 'execute_pass2_phase_c': {
-          const requestTenantId = args.tenantId || tenantId;
-          const result = this.memoryManager.executePass2PhaseC({
-            ...args,
-            tenantId: requestTenantId,
-          });
-
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(result, null, 2),
               },
             ],
           };
