@@ -185,7 +185,7 @@ describe('Neural Contract Baseline', () => {
   });
 
   describe('read_graph', () => {
-    it('returns graph structure with entities, relations, and observations', async () => {
+    it('returns a bounded graph page and excludes observations by default', async () => {
       const result = await mcpCall('read_graph', {
         analysisLevel: 'basic',
       });
@@ -197,6 +197,24 @@ describe('Neural Contract Baseline', () => {
       expect(result.statistics).toBeDefined();
       expect(result.statistics.nodeCount).toBeGreaterThanOrEqual(0);
       expect(result.statistics.edgeCount).toBeGreaterThanOrEqual(0);
+      expect(result.graph.entities.length).toBeLessThanOrEqual(100);
+      expect(result.graph.relations.length).toBeLessThanOrEqual(100);
+      expect(result.graph.observations).toHaveLength(0);
+      expect(result.pagination.limit).toBe(100);
+      expect(result.pagination.includeObservations).toBe(false);
+    });
+
+    it('can include a bounded observations page when requested', async () => {
+      const result = await mcpCall('read_graph', {
+        limit: 5,
+        includeObservations: true,
+      });
+
+      expect(result.graph.entities.length).toBeLessThanOrEqual(5);
+      expect(result.graph.relations.length).toBeLessThanOrEqual(5);
+      expect(result.graph.observations.length).toBeLessThanOrEqual(5);
+      expect(result.pagination.limit).toBe(5);
+      expect(result.pagination.includeObservations).toBe(true);
     });
   });
 
