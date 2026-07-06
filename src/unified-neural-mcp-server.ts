@@ -1543,6 +1543,11 @@ export class NeuralMCPServer {
           inputSchema: UnifiedToolSchemas.add_observations.inputSchema,
         },
         {
+          name: UnifiedToolSchemas.get_current_observation.name,
+          description: UnifiedToolSchemas.get_current_observation.description,
+          inputSchema: UnifiedToolSchemas.get_current_observation.inputSchema,
+        },
+        {
           name: UnifiedToolSchemas.create_relations.name,
           description: UnifiedToolSchemas.create_relations.description,
           inputSchema: UnifiedToolSchemas.create_relations.inputSchema,
@@ -2611,16 +2616,44 @@ export class NeuralMCPServer {
             }
           }
 
-          const results = await Promise.all(observations.map(async (obs: any) => {
+          // ENG-1: mode:"replace-current" (alias supersedesLatest:true) — call-level
+          // default, overridable per observation. The server resolves the entity's
+          // current observation and supersedes it, so writers never fetch prior ids.
+          const callLevelReplaceCurrent = args.mode === 'replace-current' || args.supersedesLatest === true;
+          const wantsReplaceCurrent = (obs: any): boolean => {
+            if (obs.mode === 'append' || obs.supersedesLatest === false) return false;
+            return obs.mode === 'replace-current' || obs.supersedesLatest === true || callLevelReplaceCurrent;
+          };
+
+          const processObservation = async (obs: any) => {
             const contents = Array.isArray(obs.contents) ? obs.contents : [];
             const contentHashInput = contents.length === 1 && typeof contents[0] === 'string'
               ? contents[0]
               : JSON.stringify(contents);
+
+            const replaceCurrentApplied = wantsReplaceCurrent(obs);
+            let supersedesMetadata: { supersedes?: string[]; supersedeMode?: string } =
+              Array.isArray(obs.supersedes) ? { supersedes: obs.supersedes } : {};
+            if (replaceCurrentApplied) {
+              const resolved = this.memoryManager.getCurrentObservation(obs.entityName, tenantId);
+              const clientSupersedes = Array.isArray(obs.supersedes)
+                ? obs.supersedes
+                : (Array.isArray(obs.metadata?.supersedes) ? obs.metadata.supersedes : []);
+              const merged = Array.from(new Set(
+                [...clientSupersedes, ...(resolved.current?.id ? [resolved.current.id] : [])]
+                  .filter((s: any) => typeof s === 'string' && s.trim())
+              ));
+              supersedesMetadata = {
+                ...(merged.length ? { supersedes: merged } : {}),
+                supersedeMode: 'replace-current',
+              };
+            }
+
             const structuredMetadata = {
               ...(obs.metadata && typeof obs.metadata === 'object' ? obs.metadata : {}),
               ...(obs.kind ? { kind: obs.kind } : {}),
               ...(obs.canonicalFact ? { canonicalFact: obs.canonicalFact } : {}),
-              ...(Array.isArray(obs.supersedes) ? { supersedes: obs.supersedes } : {}),
+              ...supersedesMetadata,
               ...(Array.isArray(obs.appliesTo) ? { appliesTo: obs.appliesTo } : {}),
               ...(obs.severity ? { severity: obs.severity } : {}),
             };
@@ -2645,7 +2678,20 @@ export class NeuralMCPServer {
             this.memoryManager.auditLog('add_observation', agent, JSON.stringify(observationData), obs.entityName);
 
             return { id: observationId, ...observationData };
-          }));
+          };
+
+          // replace-current resolves against prior writes, so those calls run
+          // serially to keep same-entity supersede chains intact; plain appends
+          // keep the concurrent path.
+          let results: any[];
+          if (observations.some(wantsReplaceCurrent)) {
+            results = [];
+            for (const obs of observations) {
+              results.push(await processObservation(obs));
+            }
+          } else {
+            results = await Promise.all(observations.map(processObservation));
+          }
 
           await this.publishEventToUnified('knowledge.observations.added', {
             observations: results,
@@ -2672,6 +2718,38 @@ export class NeuralMCPServer {
                 }, null, 2),
               },
             ],
+          };
+        }
+
+        case 'get_current_observation': {
+          const entityArg = args.entity ?? args.entityName ?? args.name;
+          if (typeof entityArg !== 'string' || !entityArg.trim()) {
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'entity is required: the entity name to resolve the current observation for (aliases accepted: entityName, name)',
+                  example: { entity: 'pm-loop-state' },
+                }),
+              }],
+            };
+          }
+
+          const result = this.memoryManager.getCurrentObservation(
+            entityArg.trim(),
+            tenantId,
+            typeof args.windowSize === 'number' ? args.windowSize : undefined
+          );
+
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(
+                result.current ? result : { ...result, reason: 'no_observations' },
+                null,
+                2
+              ),
+            }],
           };
         }
 

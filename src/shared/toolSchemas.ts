@@ -47,7 +47,7 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   },
   add_observations: {
     name: 'add_observations',
-    description: 'Add new observations to existing entities with automatic vector embedding and graph updates',
+    description: 'Add new observations to existing entities with automatic vector embedding and graph updates. Supports mode:"replace-current" (alias supersedesLatest:true) to atomically supersede the entity\'s current observation server-side — the recommended way to maintain a one-current-observation entity without fetching the prior observation id.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -55,16 +55,25 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
           type: 'string',
           description: 'Optional source agent ID for observation attribution. This is accepted inside the operator/API-key trust boundary and becomes shared_memory.created_by; Phase C gate evidence also requires operator-pinned observation IDs and exact hash/scope bindings.',
         },
+        mode: {
+          type: 'string',
+          enum: ['append', 'replace-current'],
+          description: 'Default write mode for every observation in this call. "append" (default) adds without superseding; "replace-current" makes the server resolve the entity\'s current observation and supersede it. Per-observation mode overrides this.',
+        },
+        supersedesLatest: {
+          type: 'boolean',
+          description: 'Alias for mode:"replace-current" applied to every observation in this call.',
+        },
         observations: {
           type: 'array',
           items: {
             type: 'object',
             properties: {
               entityName: { type: 'string', description: 'The name of the entity to add the observations to' },
-              contents: { 
-                type: 'array', 
+              contents: {
+                type: 'array',
                 items: { type: 'string' },
-                description: 'An array of observation contents to add' 
+                description: 'An array of observation contents to add'
               },
               metadata: {
                 type: 'object',
@@ -72,10 +81,19 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
               },
               kind: { type: 'string', description: 'Optional shorthand for metadata.kind, e.g. correction, handoff, decision' },
               canonicalFact: { type: 'string', description: 'Optional shorthand for metadata.canonicalFact when kind=correction' },
+              mode: {
+                type: 'string',
+                enum: ['append', 'replace-current'],
+                description: 'Write mode for this observation. "replace-current": the server resolves the entity\'s current (newest non-superseded) observation and records it in this observation\'s supersedes — no client round-trip for the prior id. Overrides the call-level mode.',
+              },
+              supersedesLatest: {
+                type: 'boolean',
+                description: 'Alias for mode:"replace-current" on this observation.',
+              },
               supersedes: {
                 type: 'array',
                 items: { type: 'string' },
-                description: 'Optional observation IDs or handles superseded by this observation',
+                description: 'Optional observation IDs or handles superseded by this observation (merged with the server-resolved id when mode is "replace-current")',
               },
               appliesTo: {
                 type: 'array',
@@ -89,6 +107,26 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
         }
       },
       required: ['observations']
+    }
+  },
+  get_current_observation: {
+    name: 'get_current_observation',
+    description: 'Return the single authoritative (current) observation for an entity: the newest observation not superseded by any other. Resolves the supersedes chain server-side via the entity lookup index — no history scan, works for entities with thousands of observations. Returns id, timestamp, kind, canonicalFact, full contents, and metadata; current:null when the entity has no observations.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entity: {
+          type: 'string',
+          description: 'Entity name to resolve the current observation for (aliases accepted: entityName, name)',
+        },
+        entityName: { type: 'string', description: 'Alias for entity' },
+        name: { type: 'string', description: 'Alias for entity' },
+        windowSize: {
+          type: 'number',
+          description: 'Advanced: how many newest observations to consider when resolving supersession (default 25, max 100). Only raise this if an entity accumulates many un-superseded concurrent writers.',
+        },
+      },
+      required: [],
     }
   },
   create_relations: {
