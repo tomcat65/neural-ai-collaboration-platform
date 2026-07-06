@@ -1548,6 +1548,11 @@ export class NeuralMCPServer {
           inputSchema: UnifiedToolSchemas.get_current_observation.inputSchema,
         },
         {
+          name: UnifiedToolSchemas.compact_memory.name,
+          description: UnifiedToolSchemas.compact_memory.description,
+          inputSchema: UnifiedToolSchemas.compact_memory.inputSchema,
+        },
+        {
           name: UnifiedToolSchemas.create_relations.name,
           description: UnifiedToolSchemas.create_relations.description,
           inputSchema: UnifiedToolSchemas.create_relations.inputSchema,
@@ -2750,6 +2755,105 @@ export class NeuralMCPServer {
                 2
               ),
             }],
+          };
+        }
+
+        case 'compact_memory': {
+          const ALL_CLASSES = ['index-diet', 'superseded', 'vec-orphans', 'message-archive'];
+          const mode = args.mode === 'execute' ? 'execute' : 'dry-run';
+          const classes: string[] = Array.isArray(args.classes) && args.classes.length > 0
+            ? args.classes.filter((c: any) => ALL_CLASSES.includes(c))
+            : ALL_CLASSES;
+          if (classes.length === 0) {
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ error: `classes must be a non-empty subset of ${JSON.stringify(ALL_CLASSES)}` }) }],
+              isError: true,
+            };
+          }
+          const olderThanDays = typeof args.olderThanDays === 'number' ? args.olderThanDays : 14;
+          const spotCheckKeys: string[] = Array.isArray(args.spotCheckKeys)
+            ? args.spotCheckKeys.filter((k: any) => typeof k === 'string')
+            : [];
+
+          // Execute is destructive: admin-equivalent authorization + the
+          // explicit confirm key. Dry-run stays open to any authenticated key.
+          if (mode === 'execute') {
+            const authResult = this.memoryManager.authorizeGraphMutation('compact_memory', context);
+            if (!authResult.authorized) {
+              return {
+                content: [{ type: 'text', text: JSON.stringify({ error: 'Unauthorized', message: authResult.reason }) }],
+                isError: true,
+              };
+            }
+            if (args.confirm !== true) {
+              return {
+                content: [{ type: 'text', text: JSON.stringify({ error: 'Confirmation required', message: 'mode:"execute" is destructive — pass confirm:true to proceed. Run mode:"dry-run" first to review what would be reclaimed.' }) }],
+                isError: true,
+              };
+            }
+          }
+
+          const report: any = {
+            mode,
+            classes,
+            dbBefore: this.memoryManager.compactDbStats(),
+          };
+
+          if (classes.includes('index-diet')) {
+            const analysis = this.memoryManager.compactAnalyzeIndexDiet(spotCheckKeys);
+            if (mode === 'execute') {
+              const rebuilt = this.memoryManager.rebuildGraphLookupIndex();
+              report.indexDiet = {
+                ...analysis,
+                executed: true,
+                rebuild: rebuilt,
+                spotCheckAfter: spotCheckKeys.map((key) => ({
+                  key,
+                  rows: this.memoryManager.countLookupKeyRows(key),
+                })),
+              };
+            } else {
+              report.indexDiet = { ...analysis, executed: false };
+            }
+          }
+
+          if (classes.includes('superseded')) {
+            report.superseded = mode === 'execute'
+              ? { ...(await this.memoryManager.compactExecuteSuperseded(tenantId, args.reason)), executed: true }
+              : { ...this.memoryManager.compactAnalyzeSuperseded(tenantId), executed: false };
+            if (report.superseded.candidates) {
+              // Keep the report bounded: counts + a sample, not 640 full rows.
+              const all = report.superseded.candidates;
+              report.superseded = {
+                ...report.superseded,
+                candidateRows: all.length,
+                candidateSample: all.slice(0, 10),
+              };
+              delete report.superseded.candidates;
+            }
+          }
+
+          if (classes.includes('vec-orphans')) {
+            report.vecOrphans = mode === 'execute'
+              ? { ...(await this.memoryManager.compactExecuteVecOrphans()), executed: true }
+              : { ...this.memoryManager.compactAnalyzeVecOrphans(), executed: false };
+          }
+
+          if (classes.includes('message-archive')) {
+            report.messageArchive = mode === 'execute'
+              ? { ...this.memoryManager.compactExecuteMessageArchive(tenantId, olderThanDays), executed: true }
+              : { ...this.memoryManager.compactAnalyzeMessageArchive(tenantId, olderThanDays), executed: false };
+          }
+
+          if (mode === 'execute') {
+            report.dbAfter = this.memoryManager.compactDbStats();
+          }
+          report.note = 'Deleted pages go to the freelist, not back to the OS — an offline VACUUM (container stopped) is required to shrink the file.';
+
+          this.memoryManager.auditLog('compact_memory', agent, JSON.stringify({ mode, classes }), tenantId);
+
+          return {
+            content: [{ type: 'text', text: JSON.stringify(report, null, 2) }],
           };
         }
 
