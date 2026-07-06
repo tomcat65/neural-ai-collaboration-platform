@@ -57,6 +57,9 @@ interface GraphLookupEntry {
 }
 
 export class MemoryManager {
+  /** ENG-2 index diet: hard cap on graph_lookup_keys rows per memory. */
+  static readonly MAX_LOOKUP_KEYS_PER_MEMORY = 64;
+
   private db: Database.Database;
   private dbPath: string;
   private memorySystem: MemorySystem;
@@ -3387,8 +3390,14 @@ export class MemoryManager {
     weight: number
   ): void {
     if (typeof value !== 'string' || !value.trim()) return;
+    // ENG-2 index diet: content-derived handles are indexed under their plain
+    // normalized key only. Variant fabrication (company suffixes, acronyms)
+    // stays reserved for entity names/aliases — running it over every
+    // token-ish handle in free text multiplied the lookup index ~6-10x with
+    // junk keys (measured 2026-07-06: 838k of 1.0M rows were handle kinds).
+    // Query-side expansion (entityQueryVariants) still bridges real lookups.
     for (const handle of this.extractLookupHandles(value)) {
-      this.addGraphLookupVariants(entries, handle, keyKind, weight);
+      this.addGraphLookupEntry(entries, handle, keyKind, weight);
     }
   }
 
@@ -3448,7 +3457,16 @@ export class MemoryManager {
       this.addGraphLookupVariants(entries, content?.to, 'relation_to', 90);
     }
 
-    return Array.from(entries.values());
+    // ENG-2 index diet: cap keys per memory. Highest-weight entries survive
+    // (entity names/aliases/entity_name at 90-100 always fit; only long-tail
+    // content handles get trimmed). Ties break on lookupKey so rebuilds are
+    // deterministic. Measured worst case before the cap: 1,927 keys for one
+    // memory.
+    const all = Array.from(entries.values());
+    if (all.length <= MemoryManager.MAX_LOOKUP_KEYS_PER_MEMORY) return all;
+    return all
+      .sort((a, b) => (b.weight - a.weight) || (a.lookupKey < b.lookupKey ? -1 : 1))
+      .slice(0, MemoryManager.MAX_LOOKUP_KEYS_PER_MEMORY);
   }
 
   private replaceGraphLookupIndexForMemory(
@@ -3879,8 +3897,12 @@ export class MemoryManager {
         if (normalized) values.add(normalized);
         for (const variant of this.entityLookupVariants(trimmed)) values.add(variant);
       }
+      // ENG-2 index diet: extracted content handles stay plain — variant
+      // fabrication is reserved for named fields ('full' mode above). See
+      // addGraphLookupHandles for the measured rationale.
       for (const handle of this.extractLookupHandles(trimmed)) {
-        for (const variant of this.entityLookupVariants(handle)) values.add(variant);
+        const normalized = this.normalizeEntityLookup(handle);
+        if (normalized) values.add(normalized);
       }
     };
     const addMany = (value: any, mode: 'full' | 'handles' = 'full') => {
@@ -5085,5 +5107,293 @@ export class MemoryManager {
       `DELETE FROM data_trash WHERE trash_id = ? AND tenant_id = ?`
     ).run(trashId, tenantId);
     return { trashId, purged: info.changes };
+  }
+
+  // ===== ENG-2 compaction ==================================================
+  // Four reclaim classes, each with an analyze (read-only, powers dry-run)
+  // and where applicable an execute. Deletes never shrink the file (freelist
+  // pages only) — a final offline VACUUM is required and is intentionally NOT
+  // implemented here (Tomas-gated, run with the container stopped per the
+  // migration-003 precedent).
+
+  compactDbStats(): { dbBytes: number; pageCount: number; freelistCount: number; quickCheck: string } {
+    const pageSize = (this.db.prepare('SELECT * FROM pragma_page_size()').get() as any)['page_size']
+      ?? Object.values(this.db.prepare('SELECT * FROM pragma_page_size()').get() as any)[0];
+    const pageCount = Object.values(this.db.prepare('SELECT * FROM pragma_page_count()').get() as any)[0] as number;
+    const freelistCount = Object.values(this.db.prepare('SELECT * FROM pragma_freelist_count()').get() as any)[0] as number;
+    const quickCheck = Object.values(this.db.prepare('PRAGMA quick_check(1)').get() as any)[0] as string;
+    return { dbBytes: pageCount * (pageSize as number), pageCount, freelistCount, quickCheck };
+  }
+
+  /**
+   * Class A — index diet. Compares the lookup index as stored against what
+   * the current extraction policy would produce, plus a spot-check that
+   * known-good keys survive. Read-only; the execute step is
+   * rebuildGraphLookupIndex() (transactional).
+   */
+  compactAnalyzeIndexDiet(spotCheckKeys: string[] = []): {
+    currentRows: number;
+    prospectiveRows: number;
+    reductionRows: number;
+    memoriesScanned: number;
+    spotCheck: Array<{ key: string; currentRows: number; prospectiveRows: number }>;
+  } {
+    const currentRows = Object.values(
+      this.db.prepare('SELECT COUNT(*) AS c FROM graph_lookup_keys').get() as any
+    )[0] as number;
+
+    const spotKeys = spotCheckKeys.map((k) => this.normalizeEntityLookup(k)).filter(Boolean);
+    const currentSpot = new Map<string, number>();
+    for (const key of spotKeys) {
+      currentSpot.set(key, Object.values(this.db.prepare(
+        'SELECT COUNT(*) AS c FROM graph_lookup_keys WHERE lookup_key = ?'
+      ).get(key) as any)[0] as number);
+    }
+
+    const rows = this.db.prepare(`
+      SELECT id, memory_type, content FROM shared_memory
+      WHERE memory_type IN ('entity', 'observation', 'relation')
+    `).iterate() as IterableIterator<{ id: string; memory_type: string; content: string }>;
+
+    let prospectiveRows = 0;
+    let memoriesScanned = 0;
+    const prospectiveSpot = new Map<string, number>(spotKeys.map((k) => [k, 0]));
+    for (const row of rows) {
+      if (!this.isGraphMemoryType(row.memory_type)) continue;
+      memoriesScanned++;
+      let content: any;
+      try { content = JSON.parse(row.content || '{}'); } catch { content = {}; }
+      const entries = this.graphLookupEntriesForContent(content, row.memory_type);
+      prospectiveRows += entries.length;
+      for (const entry of entries) {
+        if (prospectiveSpot.has(entry.lookupKey)) {
+          prospectiveSpot.set(entry.lookupKey, (prospectiveSpot.get(entry.lookupKey) || 0) + 1);
+        }
+      }
+    }
+
+    return {
+      currentRows,
+      prospectiveRows,
+      reductionRows: currentRows - prospectiveRows,
+      memoriesScanned,
+      spotCheck: spotKeys.map((key) => ({
+        key,
+        currentRows: currentSpot.get(key) || 0,
+        prospectiveRows: prospectiveSpot.get(key) || 0,
+      })),
+    };
+  }
+
+  /** Rows currently indexed under a lookup key (post-rebuild spot-check). */
+  countLookupKeyRows(key: string): number {
+    return Object.values(this.db.prepare(
+      'SELECT COUNT(*) AS c FROM graph_lookup_keys WHERE lookup_key = ?'
+    ).get(this.normalizeEntityLookup(key)) as any)[0] as number;
+  }
+
+  /**
+   * Class B — superseded-observation reclaim. Marked-only: a row qualifies
+   * ONLY when another observation's supersedes array names its id AND the
+   * superseder is not older (anti-anomaly guard) AND the row is not what
+   * get_current_observation resolves for its entity (never reclaim current).
+   * Rows with a malformed (non-array) supersedes are reported, never touched.
+   */
+  compactAnalyzeSuperseded(tenantId: string = 'default'): {
+    candidates: Array<{ id: string; entityName: string; createdAt: string; bytes: number }>;
+    candidateBytes: number;
+    guardSkippedCurrent: string[];
+    malformedSupersedes: Array<{ id: string; entityName: string }>;
+  } {
+    const rawCandidates = this.db.prepare(`
+      SELECT t.id, t.created_at,
+             LENGTH(t.content) AS bytes,
+             COALESCE(json_extract(t.content, '$.entityName'), '') AS entity_name
+      FROM shared_memory t
+      WHERE t.memory_type = 'observation' AND t.tenant_id = ?
+        AND EXISTS (
+          SELECT 1 FROM shared_memory m, json_each(m.content, '$.metadata.supersedes') je
+          WHERE m.memory_type = 'observation' AND m.tenant_id = t.tenant_id
+            AND json_type(m.content, '$.metadata.supersedes') = 'array'
+            AND je.value = t.id
+            AND m.created_at >= t.created_at
+        )
+    `).all(tenantId) as Array<{ id: string; created_at: string; bytes: number; entity_name: string }>;
+
+    // Never-reclaim-current guard: resolve each affected entity's current
+    // observation and exclude it from the candidate set.
+    const guardSkippedCurrent: string[] = [];
+    const currentIds = new Set<string>();
+    const entityNames = Array.from(new Set(rawCandidates.map((c) => c.entity_name).filter(Boolean)));
+    for (const entityName of entityNames) {
+      const current = this.getCurrentObservation(entityName, tenantId).current;
+      if (current?.id) currentIds.add(current.id);
+    }
+    const candidates = rawCandidates.filter((c) => {
+      if (currentIds.has(c.id)) {
+        guardSkippedCurrent.push(c.id);
+        return false;
+      }
+      return true;
+    });
+
+    const malformedSupersedes = (this.db.prepare(`
+      SELECT id, COALESCE(json_extract(content, '$.entityName'), '') AS entity_name
+      FROM shared_memory
+      WHERE memory_type = 'observation' AND tenant_id = ?
+        AND json_extract(content, '$.metadata.supersedes') IS NOT NULL
+        AND json_type(content, '$.metadata.supersedes') <> 'array'
+    `).all(tenantId) as Array<{ id: string; entity_name: string }>)
+      .map((r) => ({ id: r.id, entityName: r.entity_name }));
+
+    return {
+      candidates: candidates.map((c) => ({
+        id: c.id, entityName: c.entity_name, createdAt: c.created_at, bytes: c.bytes,
+      })),
+      candidateBytes: candidates.reduce((sum, c) => sum + c.bytes, 0),
+      guardSkippedCurrent,
+      malformedSupersedes,
+    };
+  }
+
+  /**
+   * Class B execute — retire the analyzed candidates to data_trash
+   * (restorable), mirroring retireEntitiesToTrash's verified-backup-then-
+   * delete transaction, then best-effort vector cleanup.
+   */
+  async compactExecuteSuperseded(tenantId: string = 'default', reason?: string): Promise<{
+    trashId: string | null;
+    reclaimedRows: number;
+    reclaimedBytes: number;
+    guardSkippedCurrent: string[];
+    malformedSupersedes: Array<{ id: string; entityName: string }>;
+  }> {
+    const analysis = this.compactAnalyzeSuperseded(tenantId);
+    if (analysis.candidates.length === 0) {
+      return {
+        trashId: null, reclaimedRows: 0, reclaimedBytes: 0,
+        guardSkippedCurrent: analysis.guardSkippedCurrent,
+        malformedSupersedes: analysis.malformedSupersedes,
+      };
+    }
+
+    const ids = analysis.candidates.map((c) => c.id);
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = this.db.prepare(
+      `SELECT * FROM shared_memory WHERE tenant_id = ? AND id IN (${placeholders})`
+    ).all(tenantId, ...ids) as any[];
+
+    const backup = {
+      schemaVersion: 1,
+      exportedAt: new Date().toISOString(),
+      source: 'neural-ai-collaboration/compact_memory',
+      filter: { tenantId, reclaimClass: 'superseded' },
+      entities: [] as any[],
+      observations: rows,
+      relations: [] as any[],
+      counts: { entities: 0, observations: rows.length, relations: 0 },
+    };
+
+    const trashId = uuidv4();
+    const insertTrash = this.db.prepare(
+      `INSERT INTO data_trash (trash_id, tenant_id, reason, entity_names, counts, backup)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    const delLookup = this.db.prepare('DELETE FROM graph_lookup_keys WHERE tenant_id = ? AND memory_id = ?');
+    const delRow = this.db.prepare('DELETE FROM shared_memory WHERE id = ? AND tenant_id = ?');
+
+    const entityNames = Array.from(new Set(analysis.candidates.map((c) => c.entityName).filter(Boolean)));
+    const txn = this.db.transaction(() => {
+      const info = insertTrash.run(
+        trashId, tenantId,
+        reason || 'compact_memory: superseded-observation reclaim',
+        JSON.stringify(entityNames),
+        JSON.stringify(backup.counts),
+        JSON.stringify(backup)
+      );
+      if (info.changes !== 1) {
+        throw new Error('Trash write failed — aborting compaction (no delete)');
+      }
+      let deleted = 0;
+      for (const id of ids) {
+        delLookup.run(tenantId, id);
+        deleted += delRow.run(id, tenantId).changes;
+      }
+      return deleted;
+    });
+    const reclaimedRows = txn();
+
+    if (this.vectorClient) {
+      for (const id of ids) {
+        try { await this.vectorClient.deleteMemory(id); } catch { /* non-fatal */ }
+      }
+    }
+    this.auditLog('compact_superseded', 'compact_memory', JSON.stringify({ trashId, reclaimedRows }), tenantId);
+
+    return {
+      trashId, reclaimedRows,
+      reclaimedBytes: analysis.candidateBytes,
+      guardSkippedCurrent: analysis.guardSkippedCurrent,
+      malformedSupersedes: analysis.malformedSupersedes,
+    };
+  }
+
+  /** Class C — vector rows whose source memory no longer exists. */
+  compactAnalyzeVecOrphans(): { orphanRows: number } {
+    if (!this.tableExists('neural_vec_index')) return { orphanRows: 0 };
+    const orphanRows = Object.values(this.db.prepare(`
+      SELECT COUNT(*) AS c FROM neural_vec_index v
+      WHERE NOT EXISTS (SELECT 1 FROM shared_memory sm WHERE sm.id = v.memory_id)
+    `).get() as any)[0] as number;
+    return { orphanRows };
+  }
+
+  async compactExecuteVecOrphans(): Promise<{ reclaimedRows: number; errors: number }> {
+    if (!this.tableExists('neural_vec_index')) return { reclaimedRows: 0, errors: 0 };
+    const orphans = this.db.prepare(`
+      SELECT memory_id FROM neural_vec_index v
+      WHERE NOT EXISTS (SELECT 1 FROM shared_memory sm WHERE sm.id = v.memory_id)
+    `).all() as Array<{ memory_id: string }>;
+
+    let reclaimedRows = 0;
+    let errors = 0;
+    for (const { memory_id } of orphans) {
+      try {
+        if (this.vectorClient) {
+          await this.vectorClient.deleteMemory(memory_id);
+        } else {
+          const row = this.db.prepare('SELECT vector_rowid FROM neural_vec_index WHERE memory_id = ?').get(memory_id) as any;
+          if (row?.vector_rowid != null && this.tableExists('shared_memory_vec')) {
+            this.db.prepare('DELETE FROM shared_memory_vec WHERE rowid = ?').run(row.vector_rowid);
+          }
+          this.db.prepare('DELETE FROM neural_vec_index WHERE memory_id = ?').run(memory_id);
+        }
+        reclaimedRows++;
+      } catch {
+        errors++;
+      }
+    }
+    this.auditLog('compact_vec_orphans', 'compact_memory', JSON.stringify({ reclaimedRows, errors }), 'default');
+    return { reclaimedRows, errors };
+  }
+
+  /** Class D — read messages older than the cutoff get the archived flag. */
+  compactAnalyzeMessageArchive(tenantId: string = 'default', olderThanDays: number = 14): { candidates: number; cutoffDays: number } {
+    const candidates = Object.values(this.db.prepare(`
+      SELECT COUNT(*) AS c FROM ai_messages
+      WHERE tenant_id = ? AND read_at IS NOT NULL AND archived_at IS NULL
+        AND created_at < datetime('now', ?)
+    `).get(tenantId, `-${Math.max(1, olderThanDays)} days`) as any)[0] as number;
+    return { candidates, cutoffDays: olderThanDays };
+  }
+
+  compactExecuteMessageArchive(tenantId: string = 'default', olderThanDays: number = 14): { archivedRows: number; cutoffDays: number } {
+    const info = this.db.prepare(`
+      UPDATE ai_messages SET archived_at = datetime('now')
+      WHERE tenant_id = ? AND read_at IS NOT NULL AND archived_at IS NULL
+        AND created_at < datetime('now', ?)
+    `).run(tenantId, `-${Math.max(1, olderThanDays)} days`);
+    this.auditLog('compact_message_archive', 'compact_memory', JSON.stringify({ archivedRows: info.changes }), tenantId);
+    return { archivedRows: info.changes, cutoffDays: olderThanDays };
   }
 }

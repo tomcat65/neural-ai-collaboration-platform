@@ -129,6 +129,40 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
       required: [],
     }
   },
+  compact_memory: {
+    name: 'compact_memory',
+    description: 'Analyze and reclaim storage bloat (ENG-2). Classes: "index-diet" (rebuild the derived graph_lookup_keys index under the current extraction policy), "superseded" (retire explicitly-superseded observations to restorable trash — marked-only, never guesses staleness, never touches an entity\'s current observation), "vec-orphans" (drop vector rows whose source memory is gone), "message-archive" (flag read messages older than the cutoff as archived). mode:"dry-run" (default) only reports what WOULD be reclaimed; mode:"execute" additionally requires confirm:true and admin-equivalent authorization. Deleted pages are not returned to the OS — a separate offline VACUUM is required to shrink the file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        mode: {
+          type: 'string',
+          enum: ['dry-run', 'execute'],
+          description: 'dry-run (default): report-only, no writes. execute: perform reclaim for the selected classes (requires confirm:true).',
+        },
+        classes: {
+          type: 'array',
+          items: { type: 'string', enum: ['index-diet', 'superseded', 'vec-orphans', 'message-archive'] },
+          description: 'Which reclaim classes to analyze/execute. Default: all four.',
+        },
+        confirm: {
+          type: 'boolean',
+          description: 'Required true for mode:"execute" — an explicit second key for destructive operation.',
+        },
+        olderThanDays: {
+          type: 'number',
+          description: 'message-archive cutoff: archive read messages older than this many days (default 14, min 1).',
+        },
+        spotCheckKeys: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'index-diet verification: lookup keys that must survive the diet; the report shows before/after row counts for each.',
+        },
+        reason: { type: 'string', description: 'Recorded in trash entries and the audit log.' },
+      },
+      required: [],
+    }
+  },
   create_relations: {
     name: 'create_relations',
     description: 'Create multiple new relations between entities in the knowledge graph',
