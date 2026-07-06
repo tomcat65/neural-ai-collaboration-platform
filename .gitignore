@@ -198,3 +198,4 @@ backups/
 *container-logs.md
 firebase-debug.log
 *.orig
+node_modules
