@@ -5205,20 +5205,39 @@ export class MemoryManager {
     guardSkippedCurrent: string[];
     malformedSupersedes: Array<{ id: string; entityName: string }>;
   } {
-    const rawCandidates = this.db.prepare(`
-      SELECT t.id, t.created_at,
-             LENGTH(t.content) AS bytes,
-             COALESCE(json_extract(t.content, '$.entityName'), '') AS entity_name
-      FROM shared_memory t
-      WHERE t.memory_type = 'observation' AND t.tenant_id = ?
-        AND EXISTS (
-          SELECT 1 FROM shared_memory m, json_each(m.content, '$.metadata.supersedes') je
-          WHERE m.memory_type = 'observation' AND m.tenant_id = t.tenant_id
-            AND json_type(m.content, '$.metadata.supersedes') = 'array'
-            AND je.value = t.id
-            AND m.created_at >= t.created_at
-        )
-    `).all(tenantId) as Array<{ id: string; created_at: string; bytes: number; entity_name: string }>;
+    // Two steps, both O(N): one json_each scan builds the
+    // (superseded_id → newest marker created_at) map, then the marked rows
+    // are fetched by indexed PK lookups. Single-statement formulations of
+    // this (correlated EXISTS, and a CTE join that SQLite flattens back into
+    // a nested loop) are O(N²) at live scale and — better-sqlite3 being
+    // synchronous — blocked the whole server for minutes (2026-07-06 20:16Z
+    // incident; the CTE variant still measured 300s+ on a live snapshot).
+    const markerRows = this.db.prepare(`
+      SELECT je.value AS superseded_id, MAX(m.created_at) AS by_created
+      FROM shared_memory m, json_each(m.content, '$.metadata.supersedes') je
+      WHERE m.memory_type = 'observation' AND m.tenant_id = ?
+        AND json_type(m.content, '$.metadata.supersedes') = 'array'
+      GROUP BY je.value
+    `).all(tenantId) as Array<{ superseded_id: string; by_created: string }>;
+    const markedBy = new Map<string, string>();
+    for (const row of markerRows) {
+      if (typeof row.superseded_id === 'string' && row.superseded_id.trim()) {
+        markedBy.set(row.superseded_id.trim(), row.by_created);
+      }
+    }
+
+    const fetchRow = this.db.prepare(`
+      SELECT id, created_at, LENGTH(content) AS bytes,
+             COALESCE(json_extract(content, '$.entityName'), '') AS entity_name
+      FROM shared_memory
+      WHERE id = ? AND tenant_id = ? AND memory_type = 'observation'
+    `);
+    const rawCandidates: Array<{ id: string; created_at: string; bytes: number; entity_name: string }> = [];
+    for (const [supersededId, byCreated] of markedBy) {
+      const row = fetchRow.get(supersededId, tenantId) as any;
+      // Anti-anomaly guard: the marker must not be older than the marked row.
+      if (row && byCreated >= row.created_at) rawCandidates.push(row);
+    }
 
     // Never-reclaim-current guard: resolve each affected entity's current
     // observation and exclude it from the candidate set.
