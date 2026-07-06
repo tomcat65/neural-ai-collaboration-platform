@@ -2695,6 +2695,105 @@ export class MemoryManager {
   }
 
   /**
+   * Resolve the single authoritative ("current") observation for an entity:
+   * the newest observation row whose id is not superseded by any newer one.
+   *
+   * Supersession is append-only metadata (each observation may carry
+   * metadata.supersedes: [ids]), so "current" is resolved by fetching the
+   * newest `windowSize` observation rows for the entity via the
+   * graph_lookup_keys index (key_kind='entity_name') and skipping any row
+   * whose id appears in a fetched row's supersedes list. No history scan:
+   * cost is one index lookup + windowSize row parses regardless of how many
+   * observations the entity has.
+   */
+  getCurrentObservation(
+    entityName: string,
+    tenantId: string = 'default',
+    windowSize: number = 25
+  ): {
+    entity: string;
+    canonicalKey: string;
+    current: any | null;
+    resolution: { windowSize: number; candidatesInWindow: number; supersededSkipped: number };
+  } {
+    const canonicalKey = this.normalizeEntityLookup(entityName);
+    const boundedWindow = Math.max(1, Math.min(Number(windowSize) || 25, 100));
+
+    const rows = this.db.prepare(`
+      SELECT sm.id, sm.content, sm.created_by, sm.created_at
+      FROM graph_lookup_keys glk
+      JOIN shared_memory sm
+        ON sm.id = glk.memory_id AND sm.tenant_id = glk.tenant_id
+      WHERE glk.tenant_id = ?
+        AND glk.lookup_key = ?
+        AND glk.memory_type = 'observation'
+        AND glk.key_kind = 'entity_name'
+        AND sm.memory_type = 'observation'
+      ORDER BY sm.created_at DESC, sm.rowid DESC
+      LIMIT ?
+    `).all(tenantId, canonicalKey, boundedWindow) as Array<{
+      id: string; content: string; created_by: string; created_at: string;
+    }>;
+
+    const parsed = rows.map((row) => {
+      let content: any;
+      try { content = JSON.parse(row.content); } catch { content = { raw: row.content }; }
+      return { row, content };
+    });
+
+    const supersededIds = new Set<string>();
+    for (const { content } of parsed) {
+      const supersedes = Array.isArray(content?.metadata?.supersedes)
+        ? content.metadata.supersedes
+        : Array.isArray(content?.supersedes) ? content.supersedes : [];
+      for (const supersededId of supersedes) {
+        if (typeof supersededId === 'string' && supersededId.trim()) {
+          supersededIds.add(supersededId.trim());
+        }
+      }
+    }
+
+    let supersededSkipped = 0;
+    for (const { row, content } of parsed) {
+      if (supersededIds.has(row.id)) {
+        supersededSkipped++;
+        continue;
+      }
+      return {
+        entity: entityName,
+        canonicalKey,
+        current: {
+          id: row.id,
+          entityName: content?.entityName ?? entityName,
+          timestamp: content?.timestamp || row.created_at,
+          createdAt: row.created_at,
+          addedBy: content?.addedBy || row.created_by,
+          kind: content?.metadata?.kind ?? null,
+          canonicalFact: content?.metadata?.canonicalFact ?? null,
+          contents: content?.contents ?? [],
+          metadata: content?.metadata ?? {},
+        },
+        resolution: {
+          windowSize: boundedWindow,
+          candidatesInWindow: rows.length,
+          supersededSkipped,
+        },
+      };
+    }
+
+    return {
+      entity: entityName,
+      canonicalKey,
+      current: null,
+      resolution: {
+        windowSize: boundedWindow,
+        candidatesInWindow: rows.length,
+        supersededSkipped,
+      },
+    };
+  }
+
+  /**
    * Get a single entity by ID with full content.
    * Searches shared_memory, individual_memory, shared_knowledge, and tasks tables.
    * Used by get_entity_detail tool for the scan-then-detail workflow.
