@@ -2714,81 +2714,109 @@ export class MemoryManager {
     entity: string;
     canonicalKey: string;
     current: any | null;
-    resolution: { windowSize: number; candidatesInWindow: number; supersededSkipped: number };
+    resolution: {
+      windowSize: number;
+      candidatesInWindow: number;
+      supersededSkipped: number;
+      widened?: boolean;
+      fallback?: string;
+    };
   } {
     const canonicalKey = this.normalizeEntityLookup(entityName);
-    const boundedWindow = Math.max(1, Math.min(Number(windowSize) || 25, 100));
+    const maxWindow = 100;
+    const boundedWindow = Math.max(1, Math.min(Number(windowSize) || 25, maxWindow));
 
-    const rows = this.db.prepare(`
-      SELECT sm.id, sm.content, sm.created_by, sm.created_at
-      FROM graph_lookup_keys glk
-      JOIN shared_memory sm
-        ON sm.id = glk.memory_id AND sm.tenant_id = glk.tenant_id
-      WHERE glk.tenant_id = ?
-        AND glk.lookup_key = ?
-        AND glk.memory_type = 'observation'
-        AND glk.key_kind = 'entity_name'
-        AND sm.memory_type = 'observation'
-      ORDER BY sm.created_at DESC, sm.rowid DESC
-      LIMIT ?
-    `).all(tenantId, canonicalKey, boundedWindow) as Array<{
-      id: string; content: string; created_by: string; created_at: string;
-    }>;
+    const fetchWindow = (limit: number) => {
+      const rows = this.db.prepare(`
+        SELECT sm.id, sm.content, sm.created_by, sm.created_at
+        FROM graph_lookup_keys glk
+        JOIN shared_memory sm
+          ON sm.id = glk.memory_id AND sm.tenant_id = glk.tenant_id
+        WHERE glk.tenant_id = ?
+          AND glk.lookup_key = ?
+          AND glk.memory_type = 'observation'
+          AND glk.key_kind = 'entity_name'
+          AND sm.memory_type = 'observation'
+        ORDER BY sm.created_at DESC, sm.rowid DESC
+        LIMIT ?
+      `).all(tenantId, canonicalKey, limit) as Array<{
+        id: string; content: string; created_by: string; created_at: string;
+      }>;
 
-    const parsed = rows.map((row) => {
-      let content: any;
-      try { content = JSON.parse(row.content); } catch { content = { raw: row.content }; }
-      return { row, content };
-    });
+      const parsed = rows.map((row) => {
+        let content: any;
+        try { content = JSON.parse(row.content); } catch { content = { raw: row.content }; }
+        return { row, content };
+      });
 
-    const supersededIds = new Set<string>();
-    for (const { content } of parsed) {
-      const supersedes = Array.isArray(content?.metadata?.supersedes)
-        ? content.metadata.supersedes
-        : Array.isArray(content?.supersedes) ? content.supersedes : [];
-      for (const supersededId of supersedes) {
-        if (typeof supersededId === 'string' && supersededId.trim()) {
-          supersededIds.add(supersededId.trim());
+      const supersededIds = new Set<string>();
+      for (const { content } of parsed) {
+        const supersedes = Array.isArray(content?.metadata?.supersedes)
+          ? content.metadata.supersedes
+          : Array.isArray(content?.supersedes) ? content.supersedes : [];
+        for (const supersededId of supersedes) {
+          if (typeof supersededId === 'string' && supersededId.trim()) {
+            supersededIds.add(supersededId.trim());
+          }
         }
       }
+
+      let supersededSkipped = 0;
+      let currentEntry: { row: any; content: any } | null = null;
+      for (const entry of parsed) {
+        if (supersededIds.has(entry.row.id)) {
+          supersededSkipped++;
+          continue;
+        }
+        currentEntry = entry;
+        break;
+      }
+      return { parsed, currentEntry, supersededSkipped };
+    };
+
+    const shapeCurrent = (entry: { row: any; content: any }) => ({
+      id: entry.row.id,
+      entityName: entry.content?.entityName ?? entityName,
+      timestamp: entry.content?.timestamp || entry.row.created_at,
+      createdAt: entry.row.created_at,
+      addedBy: entry.content?.addedBy || entry.row.created_by,
+      kind: entry.content?.metadata?.kind ?? null,
+      canonicalFact: entry.content?.metadata?.canonicalFact ?? null,
+      contents: entry.content?.contents ?? [],
+      metadata: entry.content?.metadata ?? {},
+    });
+
+    let effectiveWindow = boundedWindow;
+    let { parsed, currentEntry, supersededSkipped } = fetchWindow(effectiveWindow);
+    let widened = false;
+
+    // Degenerate guard: with well-ordered data the newest row can never be
+    // superseded (supersedes point backward in time), but anomalous data
+    // (mutual/forward-pointing supersedes, clock skew) can mark every row in
+    // the window. Widen once, then fall back to the newest row — never report
+    // "no current observation" while observations exist.
+    if (!currentEntry && parsed.length === effectiveWindow && effectiveWindow < maxWindow) {
+      effectiveWindow = maxWindow;
+      widened = true;
+      ({ parsed, currentEntry, supersededSkipped } = fetchWindow(effectiveWindow));
     }
 
-    let supersededSkipped = 0;
-    for (const { row, content } of parsed) {
-      if (supersededIds.has(row.id)) {
-        supersededSkipped++;
-        continue;
-      }
-      return {
-        entity: entityName,
-        canonicalKey,
-        current: {
-          id: row.id,
-          entityName: content?.entityName ?? entityName,
-          timestamp: content?.timestamp || row.created_at,
-          createdAt: row.created_at,
-          addedBy: content?.addedBy || row.created_by,
-          kind: content?.metadata?.kind ?? null,
-          canonicalFact: content?.metadata?.canonicalFact ?? null,
-          contents: content?.contents ?? [],
-          metadata: content?.metadata ?? {},
-        },
-        resolution: {
-          windowSize: boundedWindow,
-          candidatesInWindow: rows.length,
-          supersededSkipped,
-        },
-      };
+    let fallback: string | undefined;
+    if (!currentEntry && parsed.length > 0) {
+      currentEntry = parsed[0];
+      fallback = 'all_candidates_superseded_returned_newest';
     }
 
     return {
       entity: entityName,
       canonicalKey,
-      current: null,
+      current: currentEntry ? shapeCurrent(currentEntry) : null,
       resolution: {
-        windowSize: boundedWindow,
-        candidatesInWindow: rows.length,
+        windowSize: effectiveWindow,
+        candidatesInWindow: parsed.length,
         supersededSkipped,
+        ...(widened ? { widened: true } : {}),
+        ...(fallback ? { fallback } : {}),
       },
     };
   }
