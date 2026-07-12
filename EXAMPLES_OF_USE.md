@@ -138,6 +138,56 @@ curl -s -X POST http://localhost:6174/mcp \
   }' | jq
 ```
 
+### Supersession, Pagination & Delivery Lifecycle (ENG-3)
+```bash
+# Consolidated final report that RETIRES earlier checkpoint messages atomically.
+# Only messages in the same sender→recipient lane (same tenant) are superseded;
+# retired messages disappear from default inbox reads (includeSuperseded:false).
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{
+    "jsonrpc":"2.0","id":14,"method":"tools/call",
+    "params":{"name":"send_ai_message","arguments":{
+      "from":"claude-code",
+      "to":"codex",
+      "content":"DONE — task complete. Net state: X shipped, Y verified.",
+      "messageType":"response",
+      "supersedes":["<checkpoint-msg-id-1>","<checkpoint-msg-id-2>"]
+    }}
+  }' | jq '.result'
+# The response reports delivery HONESTLY: {persisted, delivered, queued, clientsNotified}.
+# "delivered" requires a proven fact (authenticated recipient WebSocket, or a fetch);
+# otherwise the message is "queued" and flips to delivered/read on recipient access.
+
+# Page through a large inbox with true totals (hasMore/nextOffset in the response)
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{
+    "jsonrpc":"2.0","id":15,"method":"tools/call",
+    "params":{"name":"get_ai_messages","arguments":{
+      "agentId":"claude-code",
+      "unreadOnly":false,
+      "limit":20,
+      "offset":20
+    }}
+  }' | jq '{total:.result.totalMessages, hasMore:.result.hasMore, nextOffset:.result.nextOffset}'
+# NOTE: when unreadOnly AND markAsRead are both true, each returned page LEAVES the
+# unread set — keep offset at 0 (the response's nextOffset already does this).
+
+# Atomic ack+archive: mark a processed batch read and archive it in one transaction
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{
+    "jsonrpc":"2.0","id":16,"method":"tools/call",
+    "params":{"name":"archive_messages","arguments":{
+      "agentId":"claude-code",
+      "messageIds":["<id-1>","<id-2>"],
+      "markAsRead":true
+    }}
+  }' | jq '.result'
+# Response includes remainingUnarchived/remainingUnread for the inbox.
+```
+
 ### HTTP Messaging Endpoints
 ```bash
 # Send via HTTP (simpler for scripts)
@@ -363,6 +413,61 @@ curl -s -X POST http://localhost:6174/mcp \
       "query":"authentication"
     }}
   }' | jq
+
+# Entity-scoped search (ENG-3): one entity's timeline, newest first — a bounded
+# direct read that skips the global semantic path entirely (semanticSkipped:"entity_scope")
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{
+    "jsonrpc":"2.0","id":52,"method":"tools/call",
+    "params":{"name":"search_entities","arguments":{
+      "query":"deploy",
+      "canonicalEntityKey":"dashboard-refactor",
+      "memoryTypes":["observation"],
+      "sortBy":"recency",
+      "limit":10
+    }}
+  }' | jq
+
+# Fetch full entity content directly BY NAME or alias — no search-then-refetch
+# round trip. Response includes resolution metadata (matchedBy, ambiguity candidates).
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{
+    "jsonrpc":"2.0","id":53,"method":"tools/call",
+    "params":{"name":"get_entity_detail","arguments":{
+      "entity":"dashboard-refactor"
+    }}
+  }' | jq '.result'
+```
+
+## Storage Reclaim (compact_memory, ENG-2)
+
+Dry-run by default; `execute` needs `confirm:true`. Classes: `index-diet`
+(rebuild the derived lookup index), `superseded` (retire explicitly-superseded
+observations to **restorable trash** — never guesses staleness, never touches an
+entity's current observation), `vec-orphans`, `message-archive`. Deleted pages go
+to the freelist — an **offline VACUUM** (stack stopped) returns them to the OS;
+see BACKUP-AND-RESTORE.md. Reference run 2026-07-12: all four classes + VACUUM
+took the live DB 685 MB → 184 MB.
+```bash
+# 1. Analyze first — what WOULD be reclaimed (no writes)
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{"jsonrpc":"2.0","id":70,"method":"tools/call","params":{"name":"compact_memory","arguments":{}}}' | jq '.result'
+
+# 2. Execute ONE class, with spot-check keys that must survive (take a backup first!)
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{
+    "jsonrpc":"2.0","id":71,"method":"tools/call",
+    "params":{"name":"compact_memory","arguments":{
+      "mode":"execute","confirm":true,
+      "classes":["index-diet"],
+      "spotCheckKeys":["dashboard-refactor","engram"],
+      "reason":"scheduled reclaim"
+    }}
+  }' | jq '.result.indexDiet'
 ```
 
 ## Cross-Agent Collaboration (the ledger pattern)
@@ -404,6 +509,24 @@ curl -s -X POST http://localhost:6174/mcp \
   -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
   -d '{"jsonrpc":"2.0","id":63,"method":"tools/call","params":{"name":"search_entities","arguments":{
     "query":"dashboard-refactor","searchType":"exact","agentFilter":"codex-desktop"}}}' | jq
+
+# 6. ONE-CURRENT-TRUTH: for state entities (loop-states, status docs), write with
+#    mode:"replace-current" (the server supersedes the prior observation atomically —
+#    no client round-trip for the old id) ...
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{"jsonrpc":"2.0","id":64,"method":"tools/call","params":{"name":"add_observations","arguments":{
+    "agentId":"claude-code",
+    "observations":[{"entityName":"dashboard-refactor","mode":"replace-current","kind":"decision",
+      "canonicalFact":"Identity logic moves server-side; UI trusts the contract.",
+      "contents":["DECISION: server-side identity. Supersedes the open proposal thread."]}]}}}' | jq
+
+#    ... and read with get_current_observation — resolves the supersedes chain
+#    server-side and returns the single authoritative observation.
+curl -s -X POST http://localhost:6174/mcp \
+  -H "Content-Type: application/json" -H "X-API-Key: ${API_KEY}" \
+  -d '{"jsonrpc":"2.0","id":65,"method":"tools/call","params":{"name":"get_current_observation","arguments":{
+    "entity":"dashboard-refactor"}}}' | jq '.result'
 ```
 
 **Why it's durable:** observations are append-only with provenance, so both agents

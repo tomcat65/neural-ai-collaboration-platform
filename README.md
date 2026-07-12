@@ -78,17 +78,24 @@ so rebuilds never touch your DB. Back up before migrations (consistent online
 
 ## MCP Tools
 
-`tools/list` advertises **31 tools**. The authoritative, always-current reference is
+`tools/list` advertises **33 tools**. The authoritative, always-current reference is
 **[docs/TOOLS_SCHEMA.md](docs/TOOLS_SCHEMA.md)** (regenerate with `npm run docs:tools`
 from `src/shared/toolSchemas.ts`). Summary:
 
-- **Knowledge graph:** `create_entities`, `add_observations`, `create_relations`,
-  `read_graph`, `get_entity_neighborhood`, `get_entity_backlinks`,
+- **Knowledge graph:** `create_entities`, `add_observations`, `get_current_observation`,
+  `create_relations`, `read_graph`, `get_entity_neighborhood`, `get_entity_backlinks`,
   `search_entities`, `get_entity_detail`, `delete_entity`, `remove_observations`,
   `update_observation`, `delete_observations_by_entity`
-- **AI messaging:** `send_ai_message`, `get_ai_messages`, `get_message_detail`,
-  `mark_messages_read`, `archive_messages`
-- **Agent management:** `register_agent`, `set_agent_identity`, `get_agent_status`
+- **AI messaging:** `send_ai_message` (supports `supersedes` — a newer message atomically
+  retires older ones in the same sender→recipient lane), `get_ai_messages` (true offset
+  pagination with `hasMore`/`nextOffset`, `includeSuperseded` filter), `get_message_detail`,
+  `mark_messages_read`, `archive_messages` (`markAsRead:true` = atomic ack+archive)
+- **Storage reclaim (ENG-2):** `compact_memory` — dry-run-by-default analysis/reclaim of
+  four bloat classes (index-diet, superseded→restorable trash, vec-orphans,
+  message-archive); execute requires `confirm:true`; a separate **offline VACUUM**
+  returns pages to the OS (see [BACKUP-AND-RESTORE.md](BACKUP-AND-RESTORE.md))
+- **Agent management:** `register_agent`, `unregister_agent`, `gc_agent_registrations`,
+  `set_agent_identity`, `get_agent_status`
 - **Session / context:** `get_agent_context`, `begin_session`, `end_session`
 - **Identity (Pass-2, optional):** `inspect_identity_candidates`, `get_entity_context`,
   `execute_pass2_phase_c`
@@ -113,6 +120,24 @@ curl -s -X POST http://localhost:6174/mcp \
   `semanticSimilarity` and set `semanticDegraded` on timeout.
 - **Type-weighted ranking:** curated entities/observations outrank chat-message
   chatter (env-tunable `RECALL_W_*`).
+- **Entity scoping & ordering:** `canonicalEntityKey` restricts results to one
+  entity's rows/observations/relations (a bounded direct-read that skips the global
+  semantic path), `memoryTypes` filters by storage type, and `sortBy: "recency"`
+  orders newest-first before pagination.
+- **Skip the refetch round trip:** `get_entity_detail` also resolves canonical
+  **names/aliases** (`names: [...]` or singular `entity`), returning resolution
+  metadata (`matchedBy`, ambiguity candidates) alongside full content.
+
+## Truthful delivery lifecycle (messages)
+
+Message state is **provable, never asserted**: `queued` → `delivered` → `read`.
+A message is `delivered` only on a proven fact — an authenticated recipient
+WebSocket connection at send time, or the recipient actually fetching it. Send
+responses report `delivery: {persisted, delivered, queued, clientsNotified}`
+honestly (no more fake `delivered <100ms`). Structured responses also carry
+`meta.tokenEstimate`, and context bundles (`get_agent_context`) enforce a hard
+serialized-size token ceiling with priority-based trimming down to a minimal
+identity envelope.
 
 ## Cross-agent collaboration
 
@@ -201,7 +226,21 @@ so native modules resolve). Examples shipped this cycle:
 - `004-gc-ephemeral-registrations.mjs` — GCs throwaway bridge registrations
   (`agent-<host>-<pid>-<ts>`), preserving stable/named agents.
 
-Always take a verified backup before applying a migration to the live DB.
+Always take a verified backup before applying a migration to the live DB —
+runbook: **[BACKUP-AND-RESTORE.md](BACKUP-AND-RESTORE.md)** (WAL-safe online
+`.backup` → integrity check → copy out; offline VACUUM with the stack stopped).
+Reference full-cycle run (2026-07-12): `compact_memory` executes across all four
+classes + offline VACUUM took the live DB from 685 MB on disk (548 DB + 137 WAL)
+to **184 MB**, `integrity_check` ok, with every index spot-check surviving at its
+predicted count.
+
+## Roadmap
+
+Engram is being **productized** — target: a second real user outside this fleet.
+The moat being packaged is the *one-current-truth* layer (supersession semantics,
+`get_current_observation`, truthful delivery) plus the agent-coordination protocol
+(ACP) that co-evolved with it. Plan of record: neural entity `engram-productize`;
+candid self-assessment: `engram-tool-audit` (2026-07-12 evaluation observation).
 
 ## Port Reference
 
