@@ -134,8 +134,15 @@ describe('Class B — superseded reclaim', () => {
     const entity = 'guard_entity';
     const a = await storeObservation(entity, 'a');
     const b = await storeObservation(entity, 'b', { supersedes: [a] });
-    // Corrupt a (older) to claim it supersedes b (newer) — the anomaly. b is
-    // still resolved as current and must not be reclaimable.
+    // Pin both rows to one timestamp so SQLite's rowid tie-break makes b the
+    // current row deterministically. Without this, crossing a CURRENT_TIMESTAMP
+    // boundary makes the anti-anomaly guard reject a's forward marker before
+    // this test can exercise the independent never-reclaim-current guard.
+    db().prepare('UPDATE shared_memory SET created_at = ? WHERE id IN (?, ?)')
+      .run('2026-07-06 18:00:00', a, b);
+
+    // Corrupt a to claim it supersedes b — the anomaly. b is still resolved as
+    // current and must not be reclaimable.
     const row = db().prepare('SELECT content FROM shared_memory WHERE id = ?').get(a);
     const content = JSON.parse(row.content);
     content.metadata = { ...(content.metadata || {}), supersedes: [b] };
