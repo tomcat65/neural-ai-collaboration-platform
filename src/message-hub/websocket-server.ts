@@ -213,7 +213,7 @@ export class MessageHubWebSocketServer extends EventEmitter {
    * Broadcast event to all subscribed clients
    * This is the core notification mechanism for <1 second message discovery
    */
-  public broadcastEvent(event: MessageHubEvent) {
+  public broadcastEvent(event: MessageHubEvent): number {
     const eventStr = JSON.stringify(event);
     let notifiedClients = 0;
 
@@ -236,6 +236,7 @@ export class MessageHubWebSocketServer extends EventEmitter {
     
     // Emit to internal event system for logging/metrics
     this.emit('event.broadcast', event, notifiedClients);
+    return notifiedClients;
   }
 
   private shouldNotifyClient(client: ConnectedClient, event: MessageHubEvent): boolean {
@@ -267,8 +268,8 @@ export class MessageHubWebSocketServer extends EventEmitter {
    * Public method for Message Hub API to notify new messages
    * This enables <1 second message discovery
    */
-  public notifyNewMessage(messageId: string, from: string, to: string, content?: string) {
-    this.broadcastEvent({
+  public notifyNewMessage(messageId: string, from: string, to: string, content?: string): number {
+    return this.broadcastEvent({
       type: 'message.new',
       messageId,
       agentId: from,

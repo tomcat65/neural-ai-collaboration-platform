@@ -521,8 +521,9 @@ export class NeuralMCPServer {
         });
 
         res.json({
-          status: 'delivered',
+          status: 'queued',
           messageId: messageId,
+          deliveryStatus: 'queued',
           timestamp: new Date().toISOString()
         });
 
@@ -564,7 +565,7 @@ export class NeuralMCPServer {
             messageType: msg.message_type,
             priority: msg.priority,
             timestamp: msg.created_at,
-            deliveryStatus: meta.deliveryStatus || 'delivered',
+            deliveryStatus: this.messageDeliveryStatus(msg, meta),
           },
           timestamp: msg.created_at,
           from: msg.from_agent,
@@ -3381,7 +3382,7 @@ export class NeuralMCPServer {
           // De-duplicate recipients
           recipients = Array.from(new Set(recipients));
 
-          const results: { to: string; messageId: string }[] = [];
+          const results: { to: string; messageId: string; deliveryStatus: 'queued' | 'delivered'; clientsNotified: number }[] = [];
 
           for (const targetAgentId of recipients) {
             const messageData = {
@@ -3391,11 +3392,8 @@ export class NeuralMCPServer {
               messageType,
               priority,
               timestamp: new Date().toISOString(),
-              deliveryStatus: 'pending',
+              deliveryStatus: 'queued',
               metadata: {
-                realTimeDelivery: "true",
-                persistentStorage: "true", 
-                crossPlatform: "true",
                 original: {
                   requestedFrom: requestedSenderAgentId,
                   requestedTo: explicitTarget || null,
@@ -3414,13 +3412,11 @@ export class NeuralMCPServer {
               context,
               Array.isArray(args.supersedes) ? args.supersedes : []
             );
-            results.push({ to: targetAgentId, messageId });
-
             // NE-S6b: Audit log
             this.memoryManager.auditLog('send_ai_message', senderAgentId, content, targetAgentId);
 
-            // Simulate real-time delivery per recipient
-            await this.simulateRealTimeDelivery(messageData, messageId);
+            const delivery = await this.simulateRealTimeDelivery(messageData, messageId);
+            results.push({ to: targetAgentId, messageId, ...delivery });
 
             await this.publishEventToUnified('ai.message.sent', {
               messageId,
@@ -3428,7 +3424,8 @@ export class NeuralMCPServer {
               to: targetAgentId,
               messageType,
               priority,
-              realTimeDelivered: true
+              realTimeDelivered: delivery.deliveryStatus === 'delivered',
+              clientsNotified: delivery.clientsNotified,
             });
           }
 
@@ -3441,17 +3438,16 @@ export class NeuralMCPServer {
                   recipients: recipients,
                   sentCount: results.length,
                   messageIds: results,
-                  deliveryTime: '<100ms',
                   selection: {
                     mode: broadcast ? 'broadcast' : (capSelector?.length ? 'capabilities' : 'direct'),
                     capabilities: capSelector || [],
                     excludeSelf
                   },
-                  features: {
-                    realTimeDelivery: 'websocket',
-                    persistentStorage: 'enabled',
-                    crossPlatformSync: 'active',
-                    priorityQueue: priority
+                  delivery: {
+                    persisted: results.length,
+                    delivered: results.filter((result) => result.deliveryStatus === 'delivered').length,
+                    queued: results.filter((result) => result.deliveryStatus === 'queued').length,
+                    clientsNotified: results.reduce((sum, result) => sum + result.clientsNotified, 0),
                   }
                 }, null, 2),
               },
@@ -3492,7 +3488,7 @@ export class NeuralMCPServer {
                 messageType: msg.message_type,
                 priority: msg.priority,
                 timestamp: msg.created_at,
-                deliveryStatus: msgMeta.deliveryStatus || 'delivered',
+                deliveryStatus: this.messageDeliveryStatus(msg, msgMeta),
                 ...(msg.superseded_by ? { supersededBy: msg.superseded_by, supersededAt: msg.superseded_at } : {}),
               },
               relevance: 0.6,
@@ -3529,9 +3525,7 @@ export class NeuralMCPServer {
                   },
                   messages: formattedMessages,
                   metadata: {
-                    realTimeSync: true,
-                    crossPlatformAccess: true,
-                    searchPerformance: 'optimized'
+                    returnedAt: new Date().toISOString(),
                   }
                 }, null, 2),
               },
@@ -3571,6 +3565,7 @@ export class NeuralMCPServer {
                 messageType: msg.message_type,
                 priority: msg.priority,
                 timestamp: msg.created_at,
+                deliveryStatus: this.messageDeliveryStatus(msg, msg.metadata ? JSON.parse(msg.metadata) : {}),
                 readAt: msg.read_at,
                 summary: msg.summary,
                 metadata: msg.metadata ? JSON.parse(msg.metadata) : {},
@@ -4474,61 +4469,40 @@ export class NeuralMCPServer {
   }
 
   // === HELPER METHODS ===
-  private async simulateRealTimeDelivery(messageData: any, messageId?: string) {
-    // Simulate WebSocket message delivery
+  private messageDeliveryStatus(msg: any, metadata: any = {}): 'queued' | 'delivered' | 'read' | 'failed' {
+    if (msg?.read_at) return 'read';
+    if (msg?.delivered_at) return 'delivered';
+    if (metadata?.deliveryStatus === 'failed') return 'failed';
+    return 'queued';
+  }
+
+  private async simulateRealTimeDelivery(
+    messageData: any,
+    messageId?: string
+  ): Promise<{ deliveryStatus: 'queued' | 'delivered'; clientsNotified: number }> {
     console.log(`⚡ Real-time delivery: ${messageData.from} → ${messageData.to}`);
-    
-    // TODO: Implement actual WebSocket delivery
-    // This should:
-    // 1. Connect to MessageHub WebSocket server on port 3003
-    // 2. Send notification to target agent
-    // 3. Update deliveryStatus from 'pending' to 'delivered'
-    // 4. Handle offline agents with queue mechanism
-    
-    // For now, we'll update the message status in memory and persist it
+
     try {
-      // Update the message delivery status
       if (this.messageHub) {
-        await this.messageHub.notifyAgentOfMessage(messageData.to, {
+        const clientsNotified = await this.messageHub.notifyAgentOfMessage(messageData.to, {
           messageId: messageId || messageData.id,
           from: messageData.from,
           content: messageData.content,
           priority: messageData.priority,
           timestamp: messageData.timestamp
         });
-        
-        // Update status to delivered
-        messageData.deliveryStatus = 'delivered';
-        console.log(`✅ Message delivered to ${messageData.to}`);
-      } else {
-        console.log(`⚠️ MessageHub not initialized - simulating delivery for ${messageData.to}`);
-        // Even without MessageHub, we'll mark as delivered for testing
-        messageData.deliveryStatus = 'delivered';
-      }
-
-      // Persist the updated delivery status to ai_messages
-      if (messageId) {
-        try {
-          await this.memoryManager.updateMessageStatus(messageId, messageData.deliveryStatus);
-          console.log(`💾 Updated delivery status to '${messageData.deliveryStatus}' for message ${messageId}`);
-        } catch (updateError) {
-          console.error(`❌ Failed to update delivery status in database:`, updateError);
+        if (clientsNotified > 0) {
+          messageData.deliveryStatus = 'delivered';
+          if (messageId) {
+            await this.memoryManager.updateMessageStatus(messageId, messageData.deliveryStatus);
+          }
+          return { deliveryStatus: 'delivered', clientsNotified };
         }
       }
     } catch (error) {
-      console.error(`❌ Failed to deliver message to ${messageData.to}:`, error);
-      messageData.deliveryStatus = 'failed';
-
-      // Persist the failed status to ai_messages
-      if (messageId) {
-        try {
-          await this.memoryManager.updateMessageStatus(messageId, 'failed');
-          console.log(`💾 Updated delivery status to 'failed' for message ${messageId}`);
-        } catch (updateError) {
-          console.error(`❌ Failed to update failed delivery status in database:`, updateError);
-        }
-      }
+      console.error(`❌ Push notification failed for ${messageData.to}; message remains queued:`, error);
     }
+    return { deliveryStatus: 'queued', clientsNotified: 0 };
   }
 
   private async simulateAgentRegistration(agentData: any) {

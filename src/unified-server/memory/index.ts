@@ -38,6 +38,7 @@ import {
   ensureSummaryColumn as ensureSummaryColumnImpl,
   ensureArchivedAtColumn as ensureArchivedAtColumnImpl,
   ensureMessageSupersessionColumns as ensureMessageSupersessionColumnsImpl,
+  ensureMessageDeliveryColumn as ensureMessageDeliveryColumnImpl,
 } from './schema.js';
 import {
   setSystemConnected,
@@ -596,6 +597,7 @@ export class MemoryManager {
         message_type TEXT DEFAULT 'info',
         priority TEXT DEFAULT 'normal',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        delivered_at DATETIME,
         read_at DATETIME,
         superseded_by TEXT,
         superseded_at DATETIME,
@@ -640,6 +642,7 @@ export class MemoryManager {
     ensureArchivedAtColumnImpl(this.db);
     ensureReadAtColumnImpl(this.db);
     ensureMessageSupersessionColumnsImpl(this.db);
+    ensureMessageDeliveryColumnImpl(this.db);
 
     // Create indexes after migrations to avoid referencing missing columns on older databases
     createIndexes(this.db);
@@ -1297,6 +1300,7 @@ export class MemoryManager {
    */
   async updateMessageStatus(messageId: string, deliveryStatus: string): Promise<void> {
     try {
+      this.ensureMessageDeliveryColumn();
       const row = this.db.prepare('SELECT metadata FROM ai_messages WHERE id = ?').get(messageId) as any;
       if (!row) {
         console.warn(`⚠️ updateMessageStatus: message ${messageId} not found in ai_messages`);
@@ -1304,8 +1308,15 @@ export class MemoryManager {
       }
       const metadata = row.metadata ? JSON.parse(row.metadata) : {};
       metadata.deliveryStatus = deliveryStatus;
-      metadata.deliveredAt = new Date().toISOString();
-      this.db.prepare('UPDATE ai_messages SET metadata = ? WHERE id = ?').run(JSON.stringify(metadata), messageId);
+      const now = new Date().toISOString();
+      if (deliveryStatus === 'delivered' || deliveryStatus === 'read') {
+        metadata.deliveredAt = metadata.deliveredAt || now;
+        this.db.prepare(
+          'UPDATE ai_messages SET metadata = ?, delivered_at = COALESCE(delivered_at, ?) WHERE id = ?'
+        ).run(JSON.stringify(metadata), now, messageId);
+      } else {
+        this.db.prepare('UPDATE ai_messages SET metadata = ? WHERE id = ?').run(JSON.stringify(metadata), messageId);
+      }
     } catch (err: any) {
       if (err.message?.includes('no such table')) {
         console.warn('⚠️ updateMessageStatus: ai_messages table not found, skipping');
@@ -2026,6 +2037,7 @@ export class MemoryManager {
       this.ensureArchivedAtColumn();
       this.ensureSummaryColumn();
       this.ensureMessageSupersessionColumns();
+      this.ensureMessageDeliveryColumn();
       const previewLimit = 5;
       const countRow = this.db.prepare(
         'SELECT COUNT(*) as cnt FROM ai_messages WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL AND superseded_at IS NULL'
@@ -2037,6 +2049,13 @@ export class MemoryManager {
          WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL AND superseded_at IS NULL
          ORDER BY created_at DESC LIMIT ?`
       ).all(agentId, tenantId, previewLimit) as any[] : [];
+      if (previewRows.length > 0) {
+        const ids = previewRows.map((row: any) => row.id);
+        const placeholders = ids.map(() => '?').join(',');
+        this.db.prepare(
+          `UPDATE ai_messages SET delivered_at = ? WHERE id IN (${placeholders}) AND delivered_at IS NULL`
+        ).run(new Date().toISOString(), ...ids);
+      }
       const messages = previewRows.map((m: any) => {
         const raw = (typeof m.summary === 'string' && m.summary.length > 0) ? m.summary : (m.content || '');
         const preview = raw.length > 200 ? raw.slice(0, 200) + '…' : raw;
@@ -2412,6 +2431,11 @@ export class MemoryManager {
     try {
       this.ensureSummaryColumn();
       this.ensureMessageSupersessionColumns();
+      this.ensureMessageDeliveryColumn();
+      const storedMetadata = {
+        ...(metadata || {}),
+        deliveryStatus: metadata?.deliveryStatus || 'queued',
+      };
       const stmt = this.db.prepare(`
         INSERT INTO ai_messages (id, from_agent, from_source, to_agent, content, message_type, priority, metadata, tenant_id, from_actor_type, from_actor_id, summary)
         VALUES (?, ?, 'direct', ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2422,7 +2446,7 @@ export class MemoryManager {
       const senderAliases = this.getAgentAliases(from);
       const recipientAliases = this.getAgentAliases(to);
       const write = this.db.transaction(() => {
-        stmt.run(id, from, to, storedContent, messageType, priority, JSON.stringify(metadata || {}), tenantId, fromActorType, fromActorId, summary);
+        stmt.run(id, from, to, storedContent, messageType, priority, JSON.stringify(storedMetadata), tenantId, fromActorType, fromActorId, summary);
         if (requestedSupersedes.length === 0) return;
 
         const idPlaceholders = requestedSupersedes.map(() => '?').join(',');
@@ -2463,7 +2487,7 @@ export class MemoryManager {
           messageType,
           priority,
           timestamp: new Date().toISOString(),
-          deliveryStatus: 'delivered',
+          deliveryStatus: 'queued',
           metadata: metadata || {},
         }, 'shared', 'ai_message', tenantId, context);
       }
@@ -2525,11 +2549,11 @@ export class MemoryManager {
       this.ensureArchivedAtColumn();
       this.ensureMessageSupersessionColumns();
       this.ensureSummaryColumn();
-      this.ensureMessageSupersessionColumns();
+      this.ensureMessageDeliveryColumn();
 
       // Compact mode: exclude full content column to reduce token consumption
       const columns = compact
-        ? 'id, from_agent, to_agent, message_type, priority, created_at, read_at, archived_at, superseded_by, superseded_at, summary, metadata'
+        ? 'id, from_agent, to_agent, message_type, priority, created_at, delivered_at, read_at, archived_at, superseded_by, superseded_at, summary, metadata'
         : '*';
       const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
       let query = `SELECT ${columns} FROM ai_messages WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ?`;
@@ -2565,13 +2589,31 @@ export class MemoryManager {
 
       const messages = this.db.prepare(query).all(...params) as any[];
 
+      // A recipient fetching a message is the first delivery fact we can
+      // always prove, even when no WebSocket client was connected at send time.
+      if (messages.length > 0) {
+        const now = new Date().toISOString();
+        const ids = messages.map((m: any) => m.id);
+        const placeholders = ids.map(() => '?').join(',');
+        this.db.prepare(
+          `UPDATE ai_messages SET delivered_at = ? WHERE id IN (${placeholders}) AND delivered_at IS NULL`
+        ).run(now, ...ids);
+        for (const message of messages) {
+          if (!message.delivered_at) message.delivered_at = now;
+        }
+      }
+
       // Mark retrieved messages as read if requested
       if (options.markAsRead && messages.length > 0) {
+        const now = new Date().toISOString();
         const ids = messages.map((m: any) => m.id);
         const placeholders = ids.map(() => '?').join(',');
         this.db.prepare(
           `UPDATE ai_messages SET read_at = ? WHERE id IN (${placeholders}) AND read_at IS NULL`
-        ).run(new Date().toISOString(), ...ids);
+        ).run(now, ...ids);
+        for (const message of messages) {
+          if (!message.read_at) message.read_at = now;
+        }
       }
 
       return messages;
@@ -2645,6 +2687,7 @@ export class MemoryManager {
           message_type: messageType,
           priority,
           created_at: createdAt,
+          delivered_at: null,
           read_at: null,
           archived_at: null,
           superseded_by: null,
@@ -2677,6 +2720,7 @@ export class MemoryManager {
     try {
       this.ensureReadAtColumn();
       this.ensureSummaryColumn();
+      this.ensureMessageDeliveryColumn();
       // Scope by tenant + recipient to prevent cross-tenant/cross-agent reads
       let query = 'SELECT * FROM ai_messages WHERE id = ? AND tenant_id = ?';
       const params: any[] = [messageId, tenantId];
@@ -2687,9 +2731,16 @@ export class MemoryManager {
       }
       const msg = this.db.prepare(query).get(...params) as any;
       if (!msg) return null;
+      const now = new Date().toISOString();
+      if (!msg.delivered_at) {
+        this.db.prepare('UPDATE ai_messages SET delivered_at = ? WHERE id = ? AND delivered_at IS NULL')
+          .run(now, messageId);
+        msg.delivered_at = now;
+      }
       if (markAsRead && !msg.read_at) {
         this.db.prepare('UPDATE ai_messages SET read_at = ? WHERE id = ? AND read_at IS NULL')
-          .run(new Date().toISOString(), messageId);
+          .run(now, messageId);
+        msg.read_at = now;
       }
       // Resolve auto-split pointer: if content references an entity, fetch the full content
       const pointerMatch = msg.content?.match(/^Full content stored as entity "([^"]+)"/);
@@ -3010,6 +3061,12 @@ export class MemoryManager {
     if (ensureMessageSupersessionColumnsImpl(this.db)) this._messageSupersessionColumnsChecked = true;
   }
 
+  private _messageDeliveryColumnChecked = false;
+  private ensureMessageDeliveryColumn(): void {
+    if (this._messageDeliveryColumnChecked) return;
+    if (ensureMessageDeliveryColumnImpl(this.db)) this._messageDeliveryColumnChecked = true;
+  }
+
   /**
    * Task 1200: Mark specific messages as read, or all unread messages for an agent.
    * Returns count of messages marked.
@@ -3020,6 +3077,7 @@ export class MemoryManager {
     tenantId: string = 'default'
   ): number {
     this.ensureReadAtColumn();
+    this.ensureMessageDeliveryColumn();
     const now = new Date().toISOString();
     const recipientAliases = this.getAgentAliases(agentId);
     const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
@@ -3029,17 +3087,17 @@ export class MemoryManager {
       const placeholders = messageIds.map(() => '?').join(',');
       const result = this.db.prepare(
         `UPDATE ai_messages
-         SET read_at = ?
+         SET read_at = ?, delivered_at = COALESCE(delivered_at, ?)
          WHERE id IN (${placeholders}) AND to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND read_at IS NULL`
-      ).run(now, ...messageIds, ...recipientAliases, tenantId);
+      ).run(now, now, ...messageIds, ...recipientAliases, tenantId);
       return result.changes;
     } else {
       // Mark all unread for this agent
       const result = this.db.prepare(
         `UPDATE ai_messages
-         SET read_at = ?
+         SET read_at = ?, delivered_at = COALESCE(delivered_at, ?)
          WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND read_at IS NULL`
-      ).run(now, ...recipientAliases, tenantId);
+      ).run(now, now, ...recipientAliases, tenantId);
       return result.changes;
     }
   }

@@ -75,6 +75,18 @@ export function ensureMessageSupersessionColumns(db: Database.Database): boolean
   }
 }
 
+export function ensureMessageDeliveryColumn(db: Database.Database): boolean {
+  try {
+    const cols = db.prepare('PRAGMA table_info(ai_messages)').all() as any[];
+    if (!cols.some((c: any) => c.name === 'delivered_at')) {
+      db.prepare('ALTER TABLE ai_messages ADD COLUMN delivered_at TEXT').run();
+    }
+    return true;
+  } catch {
+    return false; // table might not exist yet
+  }
+}
+
 /** Create secondary indexes. Run after migrations so referenced columns exist. */
 export function createIndexes(db: Database.Database): void {
   db.exec(`
