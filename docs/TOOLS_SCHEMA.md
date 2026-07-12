@@ -1037,7 +1037,7 @@ Parameters
 ```
 
 ### get_entity_detail
-Retrieve full content for specific entities by ID. Use after scanning compact results from search_entities.
+Retrieve full entity content by storage ID, canonical entity name, or alias. `ids` preserves the scan-then-detail workflow; `names` or the singular `entity` input skips the search-then-refetch round trip and returns resolution metadata.
 
 Parameters
 
@@ -1050,17 +1050,44 @@ Parameters
       "items": {
         "type": "string"
       },
-      "description": "Entity IDs to retrieve (max 5)",
+      "description": "Storage IDs to retrieve (max 5)",
       "maxItems": 5
+    },
+    "names": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Canonical entity names or aliases to resolve and retrieve (max 5)",
+      "maxItems": 5
+    },
+    "entity": {
+      "type": "string",
+      "description": "Convenience alias for one canonical entity name or alias"
     },
     "maxTotalSize": {
       "type": "number",
-      "description": "Maximum total response size in characters",
-      "default": 80000
+      "description": "Hard maximum for the serialized response text in characters. Oversized entities are returned as truncated envelopes when possible. Minimum 256.",
+      "default": 80000,
+      "minimum": 256
     }
   },
-  "required": [
-    "ids"
+  "anyOf": [
+    {
+      "required": [
+        "ids"
+      ]
+    },
+    {
+      "required": [
+        "names"
+      ]
+    },
+    {
+      "required": [
+        "entity"
+      ]
+    }
   ]
 }
 ```
@@ -1093,7 +1120,7 @@ Parameters
 ```
 
 ### archive_messages
-Archive messages for an agent — either specific messageIds, or all messages older than N days. Archived messages are excluded from get_ai_messages by default.
+Archive messages for an agent — either specific messageIds, or all messages older than N days. Set markAsRead:true to acknowledge and archive the same scoped messages atomically. Archived messages are excluded from get_ai_messages by default.
 
 Parameters
 
@@ -1116,6 +1143,11 @@ Parameters
       "type": "number",
       "description": "Archive messages older than this many days (used when messageIds is omitted)",
       "default": 30
+    },
+    "markAsRead": {
+      "type": "boolean",
+      "description": "Mark the same scoped messages as read in the archive transaction",
+      "default": false
     }
   },
   "required": [

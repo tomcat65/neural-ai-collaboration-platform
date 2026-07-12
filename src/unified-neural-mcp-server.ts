@@ -2335,83 +2335,290 @@ export class NeuralMCPServer {
 
           const returnedResults = budgetedResults.length;
           const nextOffset = offset + returnedResults < totalMatches ? offset + returnedResults : null;
+          const responseText = this.serializeWithTokenEstimate({
+            query,
+            searchType,
+            totalMatches,
+            returnedResults,
+            nextOffset,
+            responseSize,
+            compact,
+            exactOnly,
+            exactAnchored,
+            semanticSkipped,
+            semanticDegraded,
+            deduplicated: scoredResults.length !== dedupMap.size || redundantRepresentationCount > 0,
+            preDeduplicationCount: scoredResults.length,
+            preRepresentationDeduplicationCount,
+            redundantRepresentationCount,
+            includeRedundantRepresentations,
+            sortBy: normalizedSortBy,
+            canonicalEntityKey: canonicalEntityKey || null,
+            memoryTypes: Array.from(requestedMemoryTypes),
+            scopedEntityMatches: scopedEntityResults.length + scopedObservationResults.length + scopedRelationResults.length,
+            exactEntityMatches: exactEntityResults.length,
+            exactObservationMatches: exactObservationResults.length,
+            exactRelationMatches: exactRelationResults.length,
+            filteredExactMatches: queryExactFiltered.filteredResults.length,
+            totalResults: totalMatches,
+            results: budgetedResults,
+          });
 
           return {
             content: [
               {
                 type: 'text',
-                text: JSON.stringify({
-                  query,
-                  searchType,
-                  totalMatches,
-                  returnedResults,
-                  nextOffset,
-                  responseSize,
-                  compact,
-                  exactOnly,
-                  exactAnchored,
-                  semanticSkipped,
-                  semanticDegraded,
-                  deduplicated: scoredResults.length !== dedupMap.size || redundantRepresentationCount > 0,
-                  preDeduplicationCount: scoredResults.length,
-                  preRepresentationDeduplicationCount,
-                  redundantRepresentationCount,
-                  includeRedundantRepresentations,
-                  sortBy: normalizedSortBy,
-                  canonicalEntityKey: canonicalEntityKey || null,
-                  memoryTypes: Array.from(requestedMemoryTypes),
-                  scopedEntityMatches: scopedEntityResults.length + scopedObservationResults.length + scopedRelationResults.length,
-                  exactEntityMatches: exactEntityResults.length,
-                  exactObservationMatches: exactObservationResults.length,
-                  exactRelationMatches: exactRelationResults.length,
-                  filteredExactMatches: queryExactFiltered.filteredResults.length,
-                  totalResults: totalMatches,
-                  results: budgetedResults,
-                }, null, 2),
+                text: responseText,
               },
             ],
           };
         }
 
         case 'get_entity_detail': {
-          const { ids, maxTotalSize = 80000 } = args;
-          if (!ids || !Array.isArray(ids) || ids.length === 0) {
-            return { content: [{ type: 'text', text: JSON.stringify({ error: 'ids array is required and must not be empty' }) }] };
+          const maxTotalSize = Number.isFinite(Number(args.maxTotalSize))
+            ? Math.max(0, Math.floor(Number(args.maxTotalSize)))
+            : 80000;
+          const minimumDetailResponseSize = 256;
+          if (maxTotalSize < minimumDetailResponseSize) {
+            const errorText = JSON.stringify({
+              error: 'maxTotalSize_too_small',
+              minimum: minimumDetailResponseSize,
+            });
+            return {
+              content: [{
+                type: 'text',
+                text: errorText.length <= maxTotalSize
+                  ? errorText
+                  : (maxTotalSize >= 2 ? '{}' : ''),
+              }],
+            };
           }
-          if (ids.length > 5) {
-            return { content: [{ type: 'text', text: JSON.stringify({ error: 'Maximum 5 IDs per request' }) }] };
+          const serializeDetailError = (payload: Record<string, any>): string => {
+            const responseText = this.serializeWithTokenEstimate(payload, false);
+            return responseText.length <= maxTotalSize
+              ? responseText
+              : JSON.stringify({ error: 'response_too_large' });
+          };
+          const ids = Array.isArray(args.ids)
+            ? args.ids.filter((id: any) => typeof id === 'string' && id.trim()).map((id: string) => id.trim())
+            : [];
+          const names = Array.isArray(args.names)
+            ? args.names.filter((name: any) => typeof name === 'string' && name.trim()).map((name: string) => name.trim())
+            : [];
+          if (typeof args.entity === 'string' && args.entity.trim()) {
+            names.push(args.entity.trim());
+          }
+
+          const requestedCount = ids.length + names.length;
+          if (requestedCount === 0) {
+            const responseText = serializeDetailError({
+              error: 'Provide at least one storage ID (`ids`), entity name/alias (`names`), or singular `entity`.',
+            });
+            return { content: [{ type: 'text', text: responseText }] };
+          }
+          if (requestedCount > 5) {
+            const responseText = serializeDetailError({ error: 'Maximum 5 combined IDs and names per request' });
+            return { content: [{ type: 'text', text: responseText }] };
           }
 
           const retrieved: any[] = [];
           const skipped: any[] = [];
+          const resolutionEntries: any[] = [];
           let budgetUsed = 0;
 
-          for (const id of ids) {
+          const retrieveResolved = async (
+            input: string,
+            inputType: 'id' | 'name',
+            id: string,
+            matchedBy: 'id' | 'canonical_name' | 'alias' | 'normalized_name',
+            canonicalName?: string
+          ) => {
             const entity = await this.memoryManager.getEntityById(id, tenantId);
             if (!entity) {
-              skipped.push({ id, reason: 'not_found' });
-              continue;
+              skipped.push(inputType === 'id'
+                ? { id: input, reason: 'not_found' }
+                : { name: input, reason: 'resolved_row_not_found', resolvedId: id });
+              resolutionEntries.push({ input, inputType, status: 'not_found', id, matchedBy });
+              return;
             }
+
+            const resolvedCanonicalName = canonicalName || entity.content?.name || null;
             const entityStr = JSON.stringify(entity);
             if (retrieved.length > 0 && budgetUsed + entityStr.length > maxTotalSize) {
-              skipped.push({ id, reason: 'budget_exceeded', contentSize: entityStr.length });
-              continue;
+              skipped.push({
+                ...(inputType === 'id' ? { id: input } : { name: input, resolvedId: id }),
+                reason: 'budget_exceeded',
+                contentSize: entityStr.length,
+              });
+              resolutionEntries.push({
+                input,
+                inputType,
+                status: 'resolved',
+                id,
+                canonicalName: resolvedCanonicalName,
+                matchedBy,
+                retrieved: false,
+                reason: 'budget_exceeded',
+              });
+              return;
             }
             budgetUsed += entityStr.length;
             retrieved.push(entity);
+            resolutionEntries.push({
+              input,
+              inputType,
+              status: 'resolved',
+              id,
+              canonicalName: resolvedCanonicalName,
+              matchedBy,
+              retrieved: true,
+            });
+          };
+
+          for (const id of ids) {
+            await retrieveResolved(id, 'id', id, 'id');
+          }
+
+          for (const name of names) {
+            const candidateRows = this.memoryManager.findEntitiesByNameOrAlias(name, tenantId);
+            const candidatesById = new Map<string, {
+              id: string;
+              canonicalName: string | null;
+              aliases: string[];
+            }>();
+
+            for (const row of candidateRows) {
+              const lookupKinds = String(row.lookup_key_kinds || '')
+                .split(',')
+                .map((kind) => kind.trim())
+                .filter(Boolean);
+              if (lookupKinds.length > 0 &&
+                  !lookupKinds.includes('canonical_name') &&
+                  !lookupKinds.includes('alias')) {
+                continue;
+              }
+
+              let content: any = {};
+              try { content = JSON.parse(row.content || '{}'); } catch { content = {}; }
+              candidatesById.set(row.id, {
+                id: row.id,
+                canonicalName: typeof content.name === 'string' ? content.name : null,
+                aliases: Array.isArray(content.aliases)
+                  ? content.aliases.filter((alias: any) => typeof alias === 'string')
+                  : [],
+              });
+            }
+
+            const candidates = Array.from(candidatesById.values());
+            const comparableName = name.toLowerCase();
+            const canonicalMatches = candidates.filter((candidate) =>
+              candidate.canonicalName?.toLowerCase() === comparableName
+            );
+            const aliasMatches = candidates.filter((candidate) =>
+              candidate.aliases.some((alias) => alias.toLowerCase() === comparableName)
+            );
+            const preferred = canonicalMatches.length > 0
+              ? canonicalMatches
+              : (aliasMatches.length > 0 ? aliasMatches : candidates);
+
+            if (preferred.length === 0) {
+              skipped.push({ name, reason: 'not_found' });
+              resolutionEntries.push({ input: name, inputType: 'name', status: 'not_found' });
+              continue;
+            }
+            if (preferred.length > 1) {
+              const candidateIds = preferred.map((candidate) => candidate.id);
+              skipped.push({ name, reason: 'ambiguous_name', candidateIds });
+              resolutionEntries.push({
+                input: name,
+                inputType: 'name',
+                status: 'ambiguous',
+                candidateIds,
+              });
+              continue;
+            }
+
+            const candidate = preferred[0];
+            const matchedBy = canonicalMatches.length === 1
+              ? 'canonical_name'
+              : (aliasMatches.length === 1 ? 'alias' : 'normalized_name');
+            await retrieveResolved(
+              name,
+              'name',
+              candidate.id,
+              matchedBy,
+              candidate.canonicalName || undefined
+            );
+          }
+
+          const buildResponse = (entities: any[], entries: any[], truncatedEntities: number = 0) =>
+            this.serializeWithTokenEstimate({
+              retrieved: entities.length,
+              skipped,
+              budgetUsed,
+              maxTotalSize,
+              truncatedEntities,
+              resolution: {
+                requested: { ids, names },
+                entries,
+              },
+              entities,
+            });
+
+          let responseText = buildResponse(retrieved, resolutionEntries);
+          if (responseText.length > maxTotalSize && retrieved.length > 0) {
+            const compactEntities = retrieved.map((entity) => ({
+              id: entity.id,
+              sourceTable: entity.sourceTable,
+              type: entity.type,
+              memoryType: entity.memoryType,
+              source: entity.source,
+              createdAt: entity.createdAt,
+              content: {
+                ...(entity.content?.name ? { name: entity.content.name } : {}),
+                ...(entity.content?.entityName ? { entityName: entity.content.entityName } : {}),
+                ...(entity.content?.entityType ? { entityType: entity.content.entityType } : {}),
+                ...(entity.content?.type ? { type: entity.content.type } : {}),
+              },
+              contentSize: JSON.stringify(entity).length,
+              _truncated: true,
+            }));
+            const compactIds = new Set(compactEntities.map((entity) => entity.id));
+            const compactResolution = resolutionEntries.map((entry) =>
+              compactIds.has(entry.id) && entry.retrieved
+                ? { ...entry, truncated: true }
+                : entry
+            );
+            responseText = buildResponse(compactEntities, compactResolution, compactEntities.length);
+
+            while (responseText.length > maxTotalSize && compactEntities.length > 0) {
+              const removed = compactEntities.pop();
+              const removedEntry = compactResolution.find((entry) => entry.id === removed?.id && entry.retrieved);
+              if (removedEntry) {
+                removedEntry.retrieved = false;
+                removedEntry.truncated = false;
+                removedEntry.reason = 'budget_exceeded';
+              }
+              responseText = buildResponse(compactEntities, compactResolution, compactEntities.length);
+            }
+          }
+
+          if (responseText.length > maxTotalSize) {
+            responseText = this.serializeWithTokenEstimate({
+              error: 'response_exceeds_maxTotalSize',
+              maxTotalSize,
+              retrieved: 0,
+            }, false);
+          }
+          if (responseText.length > maxTotalSize) {
+            responseText = JSON.stringify({ error: 'response_too_large' });
           }
 
           return {
             content: [
               {
                 type: 'text',
-                text: JSON.stringify({
-                  retrieved: retrieved.length,
-                  skipped,
-                  budgetUsed,
-                  maxTotalSize,
-                  entities: retrieved,
-                }, null, 2),
+                text: responseText,
               },
             ],
           };
@@ -2820,13 +3027,14 @@ export class NeuralMCPServer {
         case 'get_current_observation': {
           const entityArg = args.entity ?? args.entityName ?? args.name;
           if (typeof entityArg !== 'string' || !entityArg.trim()) {
+            const responseText = this.serializeWithTokenEstimate({
+              error: 'entity is required: the entity name to resolve the current observation for (aliases accepted: entityName, name)',
+              example: { entity: 'pm-loop-state' },
+            });
             return {
               content: [{
                 type: 'text',
-                text: JSON.stringify({
-                  error: 'entity is required: the entity name to resolve the current observation for (aliases accepted: entityName, name)',
-                  example: { entity: 'pm-loop-state' },
-                }),
+                text: responseText,
               }],
             };
           }
@@ -2836,15 +3044,14 @@ export class NeuralMCPServer {
             tenantId,
             typeof args.windowSize === 'number' ? args.windowSize : undefined
           );
+          const responseText = this.serializeWithTokenEstimate(
+            result.current ? result : { ...result, reason: 'no_observations' }
+          );
 
           return {
             content: [{
               type: 'text',
-              text: JSON.stringify(
-                result.current ? result : { ...result, reason: 'no_observations' },
-                null,
-                2
-              ),
+              text: responseText,
             }],
           };
         }
@@ -3131,14 +3338,15 @@ export class NeuralMCPServer {
 
           const centerRow = getEntityRow(entityName);
           if (!centerRow) {
+            const responseText = this.serializeWithTokenEstimate({
+              entity: entityName, found: false, center: null, nodes: [], edges: [],
+              statistics: { depth: maxHops, nodeCount: 0, edgeCount: 0 },
+              truncated: { nodes: false, edges: false },
+            });
             return {
               content: [{
                 type: 'text',
-                text: JSON.stringify({
-                  entity: entityName, found: false, center: null, nodes: [], edges: [],
-                  statistics: { depth: maxHops, nodeCount: 0, edgeCount: 0 },
-                  truncated: { nodes: false, edges: false },
-                }, null, 2),
+                text: responseText,
               }],
             };
           }
@@ -3244,9 +3452,10 @@ export class NeuralMCPServer {
             },
             truncated: { nodes: nodesTrunc, edges: edgesTrunc },
           };
+          const responseText = this.serializeWithTokenEstimate(neighborhood);
 
           return {
-            content: [{ type: 'text', text: JSON.stringify(neighborhood, null, 2) }],
+            content: [{ type: 'text', text: responseText }],
           };
         }
 
@@ -3646,13 +3855,14 @@ export class NeuralMCPServer {
         }
 
         case 'archive_messages': {
-          const { agentId: archiveAgentId, olderThanDays, messageIds: archiveIds } = args;
+          const { agentId: archiveAgentId, olderThanDays, messageIds: archiveIds, markAsRead } = args;
           const byId = Array.isArray(archiveIds) && archiveIds.length > 0;
-          const archivedCount = this.memoryManager.archiveMessages(
+          const archiveResult = this.memoryManager.archiveMessagesDetailed(
             archiveAgentId,
             byId ? undefined : (olderThanDays ?? 30),
             tenantId,
-            byId ? archiveIds : undefined
+            byId ? archiveIds : undefined,
+            markAsRead === true
           );
           return {
             content: [{
@@ -3660,8 +3870,12 @@ export class NeuralMCPServer {
               text: JSON.stringify({
                 status: 'ok',
                 agentId: archiveAgentId,
-                archived: archivedCount,
+                archived: archiveResult.archived,
+                markedAsRead: archiveResult.markedAsRead,
+                remainingUnarchived: archiveResult.remainingUnarchived,
+                remainingUnread: archiveResult.remainingUnread,
                 scope: byId ? 'specific' : 'older_than_days',
+                markAsRead: markAsRead === true,
                 ...(byId ? { messageIds: archiveIds } : { olderThanDays: olderThanDays ?? 30 }),
               }, null, 2)
             }]
@@ -4469,6 +4683,33 @@ export class NeuralMCPServer {
   }
 
   // === HELPER METHODS ===
+  private serializeWithTokenEstimate<T extends Record<string, any>>(payload: T, pretty: boolean = true): string {
+    const response: any = {
+      ...payload,
+      meta: {
+        ...(payload.meta && typeof payload.meta === 'object' ? payload.meta : {}),
+        responseCharacters: 0,
+        tokenEstimate: 0,
+        tokenEstimator: 'json_chars_div_4',
+      },
+    };
+
+    let serialized = '';
+    for (let pass = 0; pass < 8; pass++) {
+      serialized = JSON.stringify(response, null, pretty ? 2 : undefined);
+      const responseCharacters = serialized.length;
+      const tokenEstimate = Math.ceil(responseCharacters / 4);
+      if (response.meta.responseCharacters === responseCharacters &&
+          response.meta.tokenEstimate === tokenEstimate) {
+        return serialized;
+      }
+      response.meta.responseCharacters = responseCharacters;
+      response.meta.tokenEstimate = tokenEstimate;
+    }
+
+    return JSON.stringify(response, null, pretty ? 2 : undefined);
+  }
+
   private messageDeliveryStatus(msg: any, metadata: any = {}): 'queued' | 'delivered' | 'read' | 'failed' {
     if (msg?.read_at) return 'read';
     if (msg?.delivered_at) return 'delivered';

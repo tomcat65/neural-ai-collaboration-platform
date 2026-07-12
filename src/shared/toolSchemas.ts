@@ -564,19 +564,38 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   // Entity detail retrieval (companion to search_entities compact mode)
   get_entity_detail: {
     name: 'get_entity_detail',
-    description: 'Retrieve full content for specific entities by ID. Use after scanning compact results from search_entities.',
+    description: 'Retrieve full entity content by storage ID, canonical entity name, or alias. `ids` preserves the scan-then-detail workflow; `names` or the singular `entity` input skips the search-then-refetch round trip and returns resolution metadata.',
     inputSchema: {
       type: 'object',
       properties: {
         ids: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Entity IDs to retrieve (max 5)',
+          description: 'Storage IDs to retrieve (max 5)',
           maxItems: 5
         },
-        maxTotalSize: { type: 'number', description: 'Maximum total response size in characters', default: 80000 }
+        names: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Canonical entity names or aliases to resolve and retrieve (max 5)',
+          maxItems: 5
+        },
+        entity: {
+          type: 'string',
+          description: 'Convenience alias for one canonical entity name or alias'
+        },
+        maxTotalSize: {
+          type: 'number',
+          description: 'Hard maximum for the serialized response text in characters. Oversized entities are returned as truncated envelopes when possible. Minimum 256.',
+          default: 80000,
+          minimum: 256
+        }
       },
-      required: ['ids']
+      anyOf: [
+        { required: ['ids'] },
+        { required: ['names'] },
+        { required: ['entity'] }
+      ]
     }
   },
   // Task 1200: Message lifecycle tools
@@ -598,7 +617,7 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   },
   archive_messages: {
     name: 'archive_messages',
-    description: 'Archive messages for an agent — either specific messageIds, or all messages older than N days. Archived messages are excluded from get_ai_messages by default.',
+    description: 'Archive messages for an agent — either specific messageIds, or all messages older than N days. Set markAsRead:true to acknowledge and archive the same scoped messages atomically. Archived messages are excluded from get_ai_messages by default.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -608,7 +627,12 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
           items: { type: 'string' },
           description: 'Specific message IDs to archive. If provided, olderThanDays is ignored.'
         },
-        olderThanDays: { type: 'number', description: 'Archive messages older than this many days (used when messageIds is omitted)', default: 30 }
+        olderThanDays: { type: 'number', description: 'Archive messages older than this many days (used when messageIds is omitted)', default: 30 },
+        markAsRead: {
+          type: 'boolean',
+          description: 'Mark the same scoped messages as read in the archive transaction',
+          default: false
+        }
       },
       required: ['agentId']
     }

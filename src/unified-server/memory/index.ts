@@ -3114,30 +3114,85 @@ export class MemoryManager {
     tenantId: string = 'default',
     messageIds?: string[]
   ): number {
+    return this.archiveMessagesDetailed(
+      agentId,
+      olderThanDays,
+      tenantId,
+      messageIds,
+      false
+    ).archived;
+  }
+
+  /**
+   * Archive a scoped message set and optionally acknowledge that exact set in
+   * one SQLite transaction. The existing archiveMessages() number-returning
+   * wrapper remains for internal compatibility.
+   */
+  archiveMessagesDetailed(
+    agentId: string,
+    olderThanDays?: number,
+    tenantId: string = 'default',
+    messageIds?: string[],
+    markAsRead: boolean = false
+  ): {
+    archived: number;
+    markedAsRead: number;
+    remainingUnarchived: number;
+    remainingUnread: number;
+  } {
+    this.ensureReadAtColumn();
     this.ensureArchivedAtColumn();
+    this.ensureMessageDeliveryColumn();
+    this.ensureMessageSupersessionColumns();
     const now = new Date().toISOString();
     const recipientAliases = this.getAgentAliases(agentId);
     const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
+    const scopedIds = Array.isArray(messageIds) ? messageIds : [];
+    const byId = scopedIds.length > 0;
+    let targetWhere: string;
+    let targetParams: any[];
 
-    if (messageIds && messageIds.length > 0) {
-      // Archive specific messages by id (still scoped to this agent's inbox).
-      const placeholders = messageIds.map(() => '?').join(',');
-      const result = this.db.prepare(
-        `UPDATE ai_messages
-         SET archived_at = ?
-         WHERE id IN (${placeholders}) AND to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND archived_at IS NULL`
-      ).run(now, ...messageIds, ...recipientAliases, tenantId);
-      return result.changes;
+    if (byId) {
+      const placeholders = scopedIds.map(() => '?').join(',');
+      targetWhere = `id IN (${placeholders}) AND to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND archived_at IS NULL`;
+      targetParams = [...scopedIds, ...recipientAliases, tenantId];
+    } else {
+      const cutoff = new Date(Date.now() - (olderThanDays ?? 30) * 86400000).toISOString();
+      targetWhere = `to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND created_at < ? AND archived_at IS NULL`;
+      targetParams = [...recipientAliases, tenantId, cutoff];
     }
 
-    // Otherwise archive by age cutoff (default 30 days).
-    const cutoff = new Date(Date.now() - (olderThanDays ?? 30) * 86400000).toISOString();
-    const result = this.db.prepare(
-      `UPDATE ai_messages
-       SET archived_at = ?
-       WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND created_at < ? AND archived_at IS NULL`
-    ).run(now, ...recipientAliases, tenantId, cutoff);
-    return result.changes;
+    const run = this.db.transaction(() => {
+      let markedAsRead = 0;
+      if (markAsRead) {
+        markedAsRead = this.db.prepare(
+          `UPDATE ai_messages
+           SET read_at = ?, delivered_at = COALESCE(delivered_at, ?)
+           WHERE ${targetWhere} AND read_at IS NULL`
+        ).run(now, now, ...targetParams).changes;
+      }
+
+      const archived = this.db.prepare(
+        `UPDATE ai_messages SET archived_at = ? WHERE ${targetWhere}`
+      ).run(now, ...targetParams).changes;
+
+      const remaining = this.db.prepare(
+        `SELECT
+           COUNT(*) AS unarchived,
+           SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS unread
+         FROM ai_messages
+         WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND archived_at IS NULL AND superseded_at IS NULL`
+      ).get(...recipientAliases, tenantId) as any;
+
+      return {
+        archived,
+        markedAsRead,
+        remainingUnarchived: Number(remaining?.unarchived || 0),
+        remainingUnread: Number(remaining?.unread || 0),
+      };
+    });
+
+    return run();
   }
 
   // ─── Task 1100: User Profile methods ───
