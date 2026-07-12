@@ -37,6 +37,7 @@ import {
   ensureReadAtColumn as ensureReadAtColumnImpl,
   ensureSummaryColumn as ensureSummaryColumnImpl,
   ensureArchivedAtColumn as ensureArchivedAtColumnImpl,
+  ensureMessageSupersessionColumns as ensureMessageSupersessionColumnsImpl,
 } from './schema.js';
 import {
   setSystemConnected,
@@ -596,6 +597,8 @@ export class MemoryManager {
         priority TEXT DEFAULT 'normal',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         read_at DATETIME,
+        superseded_by TEXT,
+        superseded_at DATETIME,
         metadata TEXT
       )
     `);
@@ -631,6 +634,12 @@ export class MemoryManager {
 
     // Migration 002: Users table + tenant_id/user_id on ai_messages & session_handoffs
     this.migrateUsersAndTenantColumns();
+
+    // Additive message supersession columns depend on tenant_id, archived_at,
+    // and read_at being available on upgraded databases.
+    ensureArchivedAtColumnImpl(this.db);
+    ensureReadAtColumnImpl(this.db);
+    ensureMessageSupersessionColumnsImpl(this.db);
 
     // Create indexes after migrations to avoid referencing missing columns on older databases
     createIndexes(this.db);
@@ -2016,15 +2025,16 @@ export class MemoryManager {
       this.ensureReadAtColumn();
       this.ensureArchivedAtColumn();
       this.ensureSummaryColumn();
+      this.ensureMessageSupersessionColumns();
       const previewLimit = 5;
       const countRow = this.db.prepare(
-        'SELECT COUNT(*) as cnt FROM ai_messages WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL'
+        'SELECT COUNT(*) as cnt FROM ai_messages WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL AND superseded_at IS NULL'
       ).get(agentId, tenantId) as any;
       const unreadCount = countRow?.cnt ?? 0;
       const previewRows = unreadCount > 0 ? this.db.prepare(
         `SELECT id, from_agent, message_type, priority, created_at, summary, content
          FROM ai_messages
-         WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL
+         WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL AND superseded_at IS NULL
          ORDER BY created_at DESC LIMIT ?`
       ).all(agentId, tenantId, previewLimit) as any[] : [];
       const messages = previewRows.map((m: any) => {
@@ -2370,7 +2380,8 @@ export class MemoryManager {
     priority: string = 'normal',
     metadata?: Record<string, any>,
     tenantId: string = 'default',
-    context?: RequestContext
+    context?: RequestContext,
+    supersedes: string[] = []
   ): Promise<string> {
     const id = uuidv4();
     const fromActorType = context?.authType || null;
@@ -2400,11 +2411,43 @@ export class MemoryManager {
 
     try {
       this.ensureSummaryColumn();
+      this.ensureMessageSupersessionColumns();
       const stmt = this.db.prepare(`
         INSERT INTO ai_messages (id, from_agent, from_source, to_agent, content, message_type, priority, metadata, tenant_id, from_actor_type, from_actor_id, summary)
         VALUES (?, ?, 'direct', ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
-      stmt.run(id, from, to, storedContent, messageType, priority, JSON.stringify(metadata || {}), tenantId, fromActorType, fromActorId, summary);
+      const requestedSupersedes = Array.from(new Set(
+        supersedes.filter((candidate) => typeof candidate === 'string' && candidate.trim()).map((candidate) => candidate.trim())
+      )).slice(0, 100);
+      const senderAliases = this.getAgentAliases(from);
+      const recipientAliases = this.getAgentAliases(to);
+      const write = this.db.transaction(() => {
+        stmt.run(id, from, to, storedContent, messageType, priority, JSON.stringify(metadata || {}), tenantId, fromActorType, fromActorId, summary);
+        if (requestedSupersedes.length === 0) return;
+
+        const idPlaceholders = requestedSupersedes.map(() => '?').join(',');
+        const senderPlaceholders = senderAliases.map(() => '?').join(',');
+        const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
+        this.db.prepare(
+          `UPDATE ai_messages
+           SET superseded_by = ?, superseded_at = ?
+           WHERE id IN (${idPlaceholders})
+             AND tenant_id = ?
+             AND from_agent IN (${senderPlaceholders})
+             AND to_agent IN (${recipientPlaceholders})
+             AND superseded_at IS NULL
+             AND id <> ?`
+        ).run(
+          id,
+          new Date().toISOString(),
+          ...requestedSupersedes,
+          tenantId,
+          ...senderAliases,
+          ...recipientAliases,
+          id
+        );
+      });
+      write();
     } catch (err: any) {
       // Fallback: ai_messages table may not exist yet (pre-migration)
       if (err.message?.includes('no such table')) {
@@ -2465,6 +2508,7 @@ export class MemoryManager {
       markAsRead?: boolean;
       tenantId?: string;
       includeArchived?: boolean;
+      includeSuperseded?: boolean;
       compact?: boolean;
       from?: string;
     } = {}
@@ -2479,11 +2523,13 @@ export class MemoryManager {
       // Ensure read_at + archived_at + summary columns exist (idempotent migration)
       this.ensureReadAtColumn();
       this.ensureArchivedAtColumn();
+      this.ensureMessageSupersessionColumns();
       this.ensureSummaryColumn();
+      this.ensureMessageSupersessionColumns();
 
       // Compact mode: exclude full content column to reduce token consumption
       const columns = compact
-        ? 'id, from_agent, to_agent, message_type, priority, created_at, read_at, archived_at, summary, metadata'
+        ? 'id, from_agent, to_agent, message_type, priority, created_at, read_at, archived_at, superseded_by, superseded_at, summary, metadata'
         : '*';
       const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
       let query = `SELECT ${columns} FROM ai_messages WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ?`;
@@ -2492,6 +2538,9 @@ export class MemoryManager {
       // Task 1200: Exclude archived by default
       if (!options.includeArchived) {
         query += ' AND archived_at IS NULL';
+      }
+      if (!options.includeSuperseded) {
+        query += ' AND superseded_at IS NULL';
       }
 
       if (options.messageType) {
@@ -2549,6 +2598,7 @@ export class MemoryManager {
       markAsRead?: boolean;
       tenantId?: string;
       includeArchived?: boolean;
+      includeSuperseded?: boolean;
       compact?: boolean;
       from?: string;
     } = {}
@@ -2597,6 +2647,8 @@ export class MemoryManager {
           created_at: createdAt,
           read_at: null,
           archived_at: null,
+          superseded_by: null,
+          superseded_at: null,
           summary: MemoryManager.generateSummary(content),
           metadata: JSON.stringify(payload.metadata || {}),
         };
@@ -2889,7 +2941,7 @@ export class MemoryManager {
       const row = this.db.prepare(
         `SELECT COUNT(*) as cnt
          FROM ai_messages
-         WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL`
+         WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL AND superseded_at IS NULL`
       ).get(...recipientAliases, tenantId) as any;
       return row?.cnt ?? 0;
     } catch {
@@ -2950,6 +3002,12 @@ export class MemoryManager {
   private ensureArchivedAtColumn(): void {
     if (this._archivedAtColumnChecked) return;
     if (ensureArchivedAtColumnImpl(this.db)) this._archivedAtColumnChecked = true;
+  }
+
+  private _messageSupersessionColumnsChecked = false;
+  private ensureMessageSupersessionColumns(): void {
+    if (this._messageSupersessionColumnsChecked) return;
+    if (ensureMessageSupersessionColumnsImpl(this.db)) this._messageSupersessionColumnsChecked = true;
   }
 
   /**

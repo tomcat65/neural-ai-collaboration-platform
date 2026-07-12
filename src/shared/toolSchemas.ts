@@ -260,6 +260,12 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
           enum: ['low', 'normal', 'high', 'urgent'],
           description: 'Message priority',
           default: 'normal'
+        },
+        supersedes: {
+          type: 'array',
+          items: { type: 'string' },
+          maxItems: 100,
+          description: 'Older message IDs this message replaces. Only messages from the same sender to the same recipient in the same tenant are superseded.'
         }
       },
       required: ['content', 'from']
@@ -283,7 +289,8 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
         unreadOnly: { type: 'boolean', description: 'Only return unread messages (default: true). This is the recommended way to check your inbox. Set to false when monitoring a shared inbox — other agents mark their own messages read.', default: true },
         compact: { type: 'boolean', description: 'Return summaries only without full content (use get_message_detail for full content)', default: true },
         markAsRead: { type: 'boolean', description: 'Mark returned messages as read after retrieval', default: false },
-        includeArchived: { type: 'boolean', description: 'Include archived messages in results (excluded by default)', default: false }
+        includeArchived: { type: 'boolean', description: 'Include archived messages in results (excluded by default)', default: false },
+        includeSuperseded: { type: 'boolean', description: 'Include messages replaced by newer messages (excluded by default)', default: false }
       },
       required: ['agentId']
     }
@@ -385,7 +392,7 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   },
   search_entities: {
     name: 'search_entities',
-    description: 'Advanced federated search across graph, vectors, and cache. AGENT TIP: for a KNOWN entity/project name, pass searchType=exact — it is fast, precise, and name-anchored; hybrid/semantic is a bounded, lower-precision supplement best for fuzzy/exploratory queries (entity & observation hits are ranked above ai_message chatter). Returns compact summaries by default (use get_entity_detail for full content). Supports pagination via offset/nextOffset and filtering by memoryType/agentFilter.',
+    description: 'Advanced federated search across graph, vectors, and cache. AGENT TIP: for a KNOWN entity/project name, pass searchType=exact — it is fast, precise, and name-anchored; hybrid/semantic is a bounded, lower-precision supplement best for fuzzy/exploratory queries (entity & observation hits are ranked above ai_message chatter). Returns compact summaries by default (use get_entity_detail for full content). Supports pagination, relevance/recency ordering, and entity/memory-type scoping.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -397,6 +404,21 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
         maxResponseSize: { type: 'number', description: 'Maximum response size in characters (budget enforcement)', default: 40000 },
         memoryType: { type: 'string', description: 'Filter results by memory type (e.g. "individual", "shared")' },
         agentFilter: { type: 'string', description: 'Filter results by agent/source ID' },
+        sortBy: {
+          type: 'string',
+          enum: ['relevance', 'recency'],
+          description: 'Result ordering. Relevance preserves the default ranking; recency sorts newest first before pagination.',
+          default: 'relevance'
+        },
+        canonicalEntityKey: {
+          type: 'string',
+          description: 'Restrict results to one canonical entity and its direct observations/relations.'
+        },
+        memoryTypes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Restrict results to storage memory types such as entity, observation, relation, or ai_message.'
+        },
         includeRedundantRepresentations: {
           type: 'boolean',
           description: 'Include dual-storage representations that are hidden by default, such as an entity row matched only through embedded inline observation text when the materialized observation row is also returned',

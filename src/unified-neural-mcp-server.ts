@@ -1836,11 +1836,23 @@ export class NeuralMCPServer {
             maxResponseSize = 40000,
             memoryType,
             agentFilter,
+            sortBy = 'relevance',
+            canonicalEntityKey,
+            memoryTypes,
             includeRedundantRepresentations = false,
           } = args;
           const normalizedSearchType = String(searchType).toLowerCase();
           const exactSearch = normalizedSearchType === 'exact';
           const semanticSearch = normalizedSearchType === 'semantic';
+          const normalizedSortBy = String(sortBy).toLowerCase() === 'recency' ? 'recency' : 'relevance';
+          const normalizedCanonicalEntityKey = typeof canonicalEntityKey === 'string'
+            ? canonicalEntityKey.trim().toLowerCase()
+            : '';
+          const requestedMemoryTypes = new Set(
+            (Array.isArray(memoryTypes) ? memoryTypes : [])
+              .map((value: any) => String(value).trim().toLowerCase())
+              .filter(Boolean)
+          );
 
           // Recall-quality type weighting. The searchable corpus is ~85% chat
           // messages + raw observations vs ~10% curated entities, so raw vector
@@ -1955,6 +1967,8 @@ export class NeuralMCPServer {
             const lowerQuery = query.toLowerCase();
             const nameMatch = getEntityName(result)?.toLowerCase().includes(lowerQuery);
             const typeMatch = getDomainType(result)?.toLowerCase().includes(lowerQuery);
+            const contentMatch = normalizedCanonicalEntityKey.length > 0 &&
+              JSON.stringify(payload).toLowerCase().includes(lowerQuery);
             // Semantic similarity (0..1) propagated from the vec0 distance, if any.
             // Previously this was dropped and every semantic hit got a flat 0.6,
             // so results fell back to arbitrary order — irrelevant rows ranked
@@ -1973,6 +1987,7 @@ export class NeuralMCPServer {
                           result.exactRelationMatch ? 1.0 :
                           nameMatch ? 1.0 :
                           typeMatch ? 0.8 :
+                          contentMatch ? 0.75 :
                           weightedSemSim !== null ? 0.5 + 0.4 * weightedSemSim : // 0.5..0.9 band, type-weighted
                           0.6;
             const entry: any = {
@@ -2000,6 +2015,22 @@ export class NeuralMCPServer {
             }
             return entry;
           }).sort((a: any, b: any) => b.searchScore - a.searchScore);
+
+          const resultTimestamp = (result: any): number => {
+            const value = result?.timestamp || result?.createdAt || result?.content?.timestamp;
+            if (value instanceof Date) return value.getTime();
+            const parsed = Date.parse(String(value || ''));
+            return Number.isFinite(parsed) ? parsed : 0;
+          };
+
+          const sortFilteredResults = (results: any[]): any[] => {
+            if (normalizedSortBy !== 'recency') return results;
+            return [...results].sort((a: any, b: any) =>
+              resultTimestamp(b) - resultTimestamp(a) ||
+              b.searchScore - a.searchScore ||
+              String(a.id || '').localeCompare(String(b.id || ''))
+            );
+          };
 
           const inlineObservationRepresentationKey = (result: any): string | null => {
             const payload = getContentPayload(result);
@@ -2093,6 +2124,22 @@ export class NeuralMCPServer {
                 String(r.entityType || getDomainType(r) || '').toLowerCase() === filterLower
               );
             }
+            if (requestedMemoryTypes.size > 0) {
+              filteredResults = filteredResults.filter((r: any) =>
+                requestedMemoryTypes.has(String(r.storageMemoryType || getStorageMemoryType(r) || '').toLowerCase())
+              );
+            }
+            if (normalizedCanonicalEntityKey) {
+              filteredResults = filteredResults.filter((r: any) => {
+                const payload = getContentPayload(r);
+                const storageType = r.storageMemoryType || getStorageMemoryType(r);
+                if (storageType === 'relation') {
+                  return [payload?.from, payload?.to]
+                    .some((value) => String(value || '').toLowerCase() === normalizedCanonicalEntityKey);
+                }
+                return String(r.canonicalEntityName || getEntityName(r) || '').toLowerCase() === normalizedCanonicalEntityKey;
+              });
+            }
             if (agentFilter) {
               const filterLower = agentFilter.toLowerCase();
               filteredResults = filteredResults.filter((r: any) => {
@@ -2109,7 +2156,7 @@ export class NeuralMCPServer {
 
             return {
               dedupMap,
-              filteredResults: representationDeduped.results,
+              filteredResults: sortFilteredResults(representationDeduped.results),
               preRepresentationDeduplicationCount,
               redundantRepresentationCount: representationDeduped.redundantRepresentationCount,
             };
@@ -2130,17 +2177,56 @@ export class NeuralMCPServer {
                 rowToSearchResult(row, 'relation', { exactRelationMatch: true })
               )
             : [];
-          const exactDirectResults = [
+          const queryExactDirectResults = [
             ...exactEntityResults,
             ...exactObservationResults,
             ...exactRelationResults,
           ];
 
+          // An entity scope is a bounded direct-read path. It avoids a global
+          // semantic search and lets callers retrieve one entity's timeline
+          // even when the free-text query is not the entity name.
+          const scopeQueryMatches = (result: any): boolean => {
+            const normalizedQuery = String(query || '').trim().toLowerCase();
+            if (!normalizedQuery || normalizedQuery === normalizedCanonicalEntityKey) return true;
+            const searchable = JSON.stringify(getContentPayload(result)).toLowerCase();
+            const terms = normalizedQuery.split(/\s+/).filter(Boolean);
+            return terms.length > 0 && terms.every((term) => searchable.includes(term));
+          };
+          const scopedEntityResults = normalizedCanonicalEntityKey
+            ? this.memoryManager.findEntitiesByNameOrAlias(canonicalEntityKey, tenantId).map((row: any) =>
+                rowToSearchResult(row, 'entity', { scopedEntityMatch: true })
+              ).filter(scopeQueryMatches)
+            : [];
+          const scopedObservationResults = normalizedCanonicalEntityKey
+            ? this.memoryManager.findObservationsByEntityOrAlias(canonicalEntityKey, tenantId).map((row: any) =>
+                rowToSearchResult(row, 'observation', { scopedEntityMatch: true })
+              ).filter(scopeQueryMatches)
+            : [];
+          const scopedRelationResults = normalizedCanonicalEntityKey
+            ? this.memoryManager.findRelationsByEntityOrAlias(canonicalEntityKey, tenantId).map((row: any) =>
+                rowToSearchResult(row, 'relation', { scopedEntityMatch: true })
+              ).filter(scopeQueryMatches)
+            : [];
+          const directResultMap = new Map<string, any>();
+          for (const result of [
+            ...queryExactDirectResults,
+            ...scopedEntityResults,
+            ...scopedObservationResults,
+            ...scopedRelationResults,
+          ]) {
+            if (!directResultMap.has(result.id)) directResultMap.set(result.id, result);
+          }
+          const exactDirectResults = Array.from(directResultMap.values());
+
+          const queryExactScoredResults = scoreAndDecorate(queryExactDirectResults);
+          const queryExactFiltered = dedupAndFilter(queryExactScoredResults);
           const exactScoredResults = scoreAndDecorate(exactDirectResults);
           const exactFiltered = dedupAndFilter(exactScoredResults);
-          const exactAnchored = useIndexedExact && exactFiltered.filteredResults.length > 0;
+          const exactAnchored = useIndexedExact && queryExactFiltered.filteredResults.length > 0;
           const exactOnly = exactSearch && exactAnchored;
-          const semanticSkipped = exactAnchored ? 'exact_matches' : null;
+          const scopedSearch = normalizedCanonicalEntityKey.length > 0;
+          const semanticSkipped = exactAnchored ? 'exact_matches' : (scopedSearch ? 'entity_scope' : null);
 
           // Search with propagated limit (tenant-scoped). Exact graph matches are
           // prepended so "read entity X" workflows land on canonical rows first.
@@ -2154,7 +2240,7 @@ export class NeuralMCPServer {
           // past the MCP request timeout (observed live).
           let semanticDegraded = false;
           let fallbackResults: any[] = [];
-          if (!exactAnchored) {
+          if (!exactAnchored && !scopedSearch) {
             const SEMANTIC_TIMEOUT_MS = parseInt(process.env.SEARCH_SEMANTIC_TIMEOUT_MS || '4000', 10);
             let timer: ReturnType<typeof setTimeout> | undefined;
             try {
@@ -2270,10 +2356,14 @@ export class NeuralMCPServer {
                   preRepresentationDeduplicationCount,
                   redundantRepresentationCount,
                   includeRedundantRepresentations,
+                  sortBy: normalizedSortBy,
+                  canonicalEntityKey: canonicalEntityKey || null,
+                  memoryTypes: Array.from(requestedMemoryTypes),
+                  scopedEntityMatches: scopedEntityResults.length + scopedObservationResults.length + scopedRelationResults.length,
                   exactEntityMatches: exactEntityResults.length,
                   exactObservationMatches: exactObservationResults.length,
                   exactRelationMatches: exactRelationResults.length,
-                  filteredExactMatches: exactFiltered.filteredResults.length,
+                  filteredExactMatches: queryExactFiltered.filteredResults.length,
                   totalResults: totalMatches,
                   results: budgetedResults,
                 }, null, 2),
@@ -3321,7 +3411,8 @@ export class NeuralMCPServer {
               priority,
               messageData.metadata,
               tenantId,
-              context
+              context,
+              Array.isArray(args.supersedes) ? args.supersedes : []
             );
             results.push({ to: targetAgentId, messageId });
 
@@ -3369,7 +3460,7 @@ export class NeuralMCPServer {
         }
 
         case 'get_ai_messages': {
-          const { agentId: targetAgentId, messageType, since, markAsRead, includeArchived, from } = args;
+          const { agentId: targetAgentId, messageType, since, markAsRead, includeArchived, includeSuperseded, from } = args;
           const compact = args.compact !== false; // default true
           const unreadOnly = args.unreadOnly !== false; // default true
           // Server-side hard cap: 20 messages max, floor of 1
@@ -3384,6 +3475,7 @@ export class NeuralMCPServer {
             markAsRead,
             tenantId,
             includeArchived,
+            includeSuperseded,
             compact,
             from,
           });
@@ -3401,6 +3493,7 @@ export class NeuralMCPServer {
                 priority: msg.priority,
                 timestamp: msg.created_at,
                 deliveryStatus: msgMeta.deliveryStatus || 'delivered',
+                ...(msg.superseded_by ? { supersededBy: msg.superseded_by, supersededAt: msg.superseded_at } : {}),
               },
               relevance: 0.6,
               source: msg.from_agent,
@@ -3430,6 +3523,7 @@ export class NeuralMCPServer {
                     messageType: messageType || 'all',
                     since: since || 'beginning',
                     unreadOnly,
+                    includeSuperseded: includeSuperseded === true,
                     from: from || undefined,
                     limit
                   },
