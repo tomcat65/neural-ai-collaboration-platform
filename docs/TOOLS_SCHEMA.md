@@ -472,7 +472,7 @@ Parameters
 ```
 
 ### get_ai_messages
-Retrieve messages for an AI agent with filtering and pagination. IMPORTANT: For routine inbox checks, just pass agentId — the defaults (unreadOnly: true, compact: true, limit: 5) will return your latest unread messages. Do NOT use the since filter for inbox checks; it often causes missed messages when the timestamp is stale. SHARED INBOX NOTE: When monitoring another agent's inbox (e.g. claude-desktop checking codex), use unreadOnly: false — the target agent marks its own messages read during execution, so unreadOnly: true returns 0.
+Retrieve messages for an AI agent with filtering and real offset pagination. The response reports the true total matching the filters plus hasMore/nextOffset. IMPORTANT: For routine inbox checks, just pass agentId — the defaults (unreadOnly: true, compact: true, limit: 5, offset: 0) return the latest unread messages. Do NOT use the since filter for inbox checks; it often causes missed messages when the timestamp is stale. SHARED INBOX NOTE: When monitoring another agent's inbox (e.g. claude-desktop checking codex), use unreadOnly: false — the target agent marks its own messages read during execution, so unreadOnly: true returns 0.
 
 Parameters
 
@@ -489,9 +489,17 @@ Parameters
       "description": "Filter by sender agent ID (e.g. \"codex\", \"claude-code-sm\")"
     },
     "limit": {
-      "type": "number",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20,
       "description": "Maximum number of messages (server hard cap: 20)",
       "default": 5
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Skip this many matching messages. Use nextOffset from the previous response. When unreadOnly and markAsRead are both true, nextOffset intentionally stays at the current offset because the returned rows leave the unread result set.",
+      "default": 0
     },
     "messageType": {
       "type": "string",
@@ -806,8 +814,9 @@ Parameters
       "description": "Context depth: hot (identity+messages+guardrails), warm (hot+project 30d), cold (everything). Defaults to warm if projectId provided, else hot."
     },
     "maxTokens": {
-      "type": "number",
-      "description": "Hard token budget ceiling. Context is trimmed by priority if exceeded. Default: 4000.",
+      "type": "integer",
+      "minimum": 1,
+      "description": "Requested hard ceiling on the server's serialized-size token estimate. Requests below the minimal identity-envelope budget are raised to the reported effectiveMaxTokens; all other estimates stay at or below the request. Default: 4000.",
       "default": 4000
     },
     "userId": {
@@ -839,8 +848,9 @@ Parameters
       "description": "Project to open a session for"
     },
     "maxTokens": {
-      "type": "number",
-      "description": "Hard token budget ceiling for the returned context. Default: 4000.",
+      "type": "integer",
+      "minimum": 1,
+      "description": "Requested hard ceiling on the returned context's serialized-size token estimate. Requests below the minimal identity-envelope budget are raised to context meta.effectiveMaxTokens. Default: 4000.",
       "default": 4000
     },
     "userId": {

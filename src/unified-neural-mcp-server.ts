@@ -2716,7 +2716,9 @@ export class NeuralMCPServer {
           // Resolve userId: from RequestContext (JWT) or from args (service key callers)
           const resolvedUserId = context.userId || ctxUserId || null;
           const bundle = this.memoryManager.getAgentContext(ctxAgentId, projectId, depth, tenantId, maxTokens, resolvedUserId);
-          return { content: [{ type: 'text', text: JSON.stringify(bundle, null, 2) }] };
+          // The budget estimator measures compact JSON; return that same
+          // representation so transport whitespace cannot violate the ceiling.
+          return { content: [{ type: 'text', text: JSON.stringify(bundle) }] };
         }
 
         case 'begin_session': {
@@ -3669,13 +3671,21 @@ export class NeuralMCPServer {
           const compact = args.compact !== false; // default true
           const unreadOnly = args.unreadOnly !== false; // default true
           // Server-side hard cap: 20 messages max, floor of 1
-          const limit = Math.max(1, Math.min(args.limit ?? 5, 20));
+          const requestedLimit = Number(args.limit ?? 5);
+          const requestedOffset = Number(args.offset ?? 0);
+          const limit = Number.isFinite(requestedLimit)
+            ? Math.max(1, Math.min(Math.floor(requestedLimit), 20))
+            : 5;
+          const offset = Number.isFinite(requestedOffset)
+            ? Math.max(0, Math.floor(requestedOffset))
+            : 0;
 
           // P1: Use dedicated ai_messages table with indexed queries (tenant-scoped)
-          const rawMessages = this.memoryManager.getMessages(targetAgentId, {
+          const page = this.memoryManager.getMessagesPage(targetAgentId, {
             messageType,
             since,
             limit,
+            offset,
             unreadOnly,
             markAsRead,
             tenantId,
@@ -3684,6 +3694,7 @@ export class NeuralMCPServer {
             compact,
             from,
           });
+          const rawMessages = page.messages;
 
           // Transform to response format — compact mode omits full content
           const formattedMessages = rawMessages.map((msg: any) => {
@@ -3713,6 +3724,10 @@ export class NeuralMCPServer {
             }
             return base;
           });
+          const hasMore = page.offset + formattedMessages.length < page.totalMatching;
+          const nextOffset = hasMore
+            ? (markAsRead && unreadOnly ? page.offset : page.offset + formattedMessages.length)
+            : null;
 
           return {
             content: [
@@ -3720,8 +3735,10 @@ export class NeuralMCPServer {
                 type: 'text',
                 text: JSON.stringify({
                   agentId: targetAgentId,
-                  totalMessages: formattedMessages.length,
+                  totalMessages: page.totalMatching,
                   returnedMessages: formattedMessages.length,
+                  hasMore,
+                  nextOffset,
                   compact,
                   hint: compact ? 'Use get_message_detail(messageId) for full content' : undefined,
                   filters: {
@@ -3730,7 +3747,9 @@ export class NeuralMCPServer {
                     unreadOnly,
                     includeSuperseded: includeSuperseded === true,
                     from: from || undefined,
-                    limit
+                    limit: page.limit,
+                    offset: page.offset,
+                    includeArchived: includeArchived === true,
                   },
                   messages: formattedMessages,
                   metadata: {
