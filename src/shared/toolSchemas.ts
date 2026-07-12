@@ -280,7 +280,7 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
         agentId: { type: 'string', description: 'AI agent ID to get messages for' },
         from: { type: 'string', description: 'Filter by sender agent ID (e.g. "codex", "claude-code-sm")' },
         limit: { type: 'integer', minimum: 1, maximum: 20, description: 'Maximum number of messages (server hard cap: 20)', default: 5 },
-        offset: { type: 'integer', minimum: 0, description: 'Skip this many matching messages. Use nextOffset from the previous response. When unreadOnly and markAsRead are both true, nextOffset intentionally stays at the current offset because the returned rows leave the unread result set.', default: 0 },
+        offset: { type: 'integer', minimum: 0, description: 'Skip this many matching messages. Use nextOffset from the previous response. When unreadOnly and markAsRead are both true, nextOffset resets to 0 while unread matches remain because each returned page leaves the unread result set.', default: 0 },
         messageType: {
           type: 'string',
           enum: ['info', 'task', 'query', 'response', 'collaboration'],

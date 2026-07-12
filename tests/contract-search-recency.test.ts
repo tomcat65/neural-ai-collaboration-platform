@@ -87,4 +87,30 @@ describe('Scoped recency search', () => {
     });
     expect(secondPage.results[0].id).toBe(oldId);
   });
+
+  it('normalizes spaces and punctuation in canonical entity scopes', async () => {
+    const suffix = Date.now();
+    const scopedEntity = `Canonical Scope.Project ${suffix}`;
+    const canonicalKey = `canonical-scope-project-${suffix}`;
+
+    await mcpCall(server, 'create_entities', {
+      entities: [{ name: scopedEntity, entityType: 'test', observations: [] }],
+    });
+    const added = await mcpCall(server, 'add_observations', {
+      observations: [{ entityName: scopedEntity, contents: ['normalized scope result'] }],
+    });
+
+    const page = await mcpCall(server, 'search_entities', {
+      query: 'normalized scope result',
+      canonicalEntityKey: `  Canonical Scope/Project ${suffix}  `,
+      memoryTypes: ['observation'],
+      compact: false,
+      limit: 10,
+    });
+
+    expect(page.canonicalEntityKey).toBe(canonicalKey);
+    expect(page.totalMatches).toBe(1);
+    expect(page.results[0].id).toBe(added.observations[0].id);
+    expect(page.results[0].canonicalEntityName).toBe(scopedEntity);
+  });
 });

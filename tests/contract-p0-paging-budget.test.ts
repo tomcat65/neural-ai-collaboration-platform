@@ -171,6 +171,50 @@ describe('P0 message paging and context budgets', () => {
     expect(new Set(ids).size).toBe(5);
   });
 
+  it('resets mutating unread pagination after a nonzero initial offset', async () => {
+    const stamp = Date.now();
+    const recipient = `paging-mark-offset-rx-${stamp}`;
+
+    for (let index = 0; index < 5; index += 1) {
+      await mcpCall(server, 'send_ai_message', {
+        from: `paging-mark-offset-tx-${stamp}`,
+        to: recipient,
+        content: `mark offset page ${index}`,
+      });
+    }
+
+    const first = await mcpCall(server, 'get_ai_messages', {
+      agentId: recipient,
+      unreadOnly: true,
+      markAsRead: true,
+      limit: 2,
+      offset: 2,
+    });
+    const second = await mcpCall(server, 'get_ai_messages', {
+      agentId: recipient,
+      unreadOnly: true,
+      markAsRead: true,
+      limit: 2,
+      offset: first.nextOffset,
+    });
+    const third = await mcpCall(server, 'get_ai_messages', {
+      agentId: recipient,
+      unreadOnly: true,
+      markAsRead: true,
+      limit: 2,
+      offset: second.nextOffset,
+    });
+
+    expect(first).toMatchObject({ totalMessages: 5, returnedMessages: 2, hasMore: true, nextOffset: 0 });
+    expect(second).toMatchObject({ totalMessages: 3, returnedMessages: 2, hasMore: true, nextOffset: 0 });
+    expect(third).toMatchObject({ totalMessages: 1, returnedMessages: 1, hasMore: false, nextOffset: null });
+
+    const ids = [...first.messages, ...second.messages, ...third.messages].map((message: any) => message.id);
+    expect(new Set(ids).size).toBe(5);
+    const unread = await mcpCall(server, 'get_ai_messages', { agentId: recipient, unreadOnly: true });
+    expect(unread).toMatchObject({ totalMessages: 0, returnedMessages: 0, hasMore: false, nextOffset: null });
+  });
+
   it('keeps the legacy shared-memory fallback bounded and pageable', async () => {
     const legacyServer = new NeuralMCPServer(0, ':memory:');
     try {
@@ -320,5 +364,28 @@ describe('P0 message paging and context budgets', () => {
     expect(bundle.meta.truncated).toBe(true);
     expect(bundle.meta.tokenEstimate).toBeLessThanOrEqual(bundle.meta.effectiveMaxTokens);
     expect(bundle.meta.tokenEstimate).toBe(Math.ceil(JSON.stringify(bundle).length / 4));
+  });
+
+  it('does not mark message previews delivered when token trimming removes them', async () => {
+    const stamp = Date.now();
+    const agentId = `budget-preview-agent-${stamp}`;
+    const sent = await mcpCall(server, 'send_ai_message', {
+      from: `budget-preview-sender-${stamp}`,
+      to: agentId,
+      content: `oversized preview ${'p'.repeat(1000)}`,
+    });
+    const messageId = sent.messageIds[0].messageId;
+
+    const bundle = await mcpCall(server, 'get_agent_context', {
+      agentId,
+      maxTokens: 160,
+    });
+
+    expect(bundle.unreadMessages?.messages).toBeUndefined();
+    const row = server.getMemoryManager().getDb().prepare(
+      'SELECT delivered_at, read_at FROM ai_messages WHERE id = ?'
+    ).get(messageId) as any;
+    expect(row.delivered_at).toBeNull();
+    expect(row.read_at).toBeNull();
   });
 });

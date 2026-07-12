@@ -1847,7 +1847,7 @@ export class NeuralMCPServer {
           const semanticSearch = normalizedSearchType === 'semantic';
           const normalizedSortBy = String(sortBy).toLowerCase() === 'recency' ? 'recency' : 'relevance';
           const normalizedCanonicalEntityKey = typeof canonicalEntityKey === 'string'
-            ? canonicalEntityKey.trim().toLowerCase()
+            ? this.memoryManager.canonicalEntityKey(canonicalEntityKey)
             : '';
           const requestedMemoryTypes = new Set(
             (Array.isArray(memoryTypes) ? memoryTypes : [])
@@ -2136,9 +2136,11 @@ export class NeuralMCPServer {
                 const storageType = r.storageMemoryType || getStorageMemoryType(r);
                 if (storageType === 'relation') {
                   return [payload?.from, payload?.to]
-                    .some((value) => String(value || '').toLowerCase() === normalizedCanonicalEntityKey);
+                    .some((value) => this.memoryManager.canonicalEntityKey(value) === normalizedCanonicalEntityKey);
                 }
-                return String(r.canonicalEntityName || getEntityName(r) || '').toLowerCase() === normalizedCanonicalEntityKey;
+                return this.memoryManager.canonicalEntityKey(
+                  r.canonicalEntityName || getEntityName(r) || ''
+                ) === normalizedCanonicalEntityKey;
               });
             }
             if (agentFilter) {
@@ -2189,7 +2191,10 @@ export class NeuralMCPServer {
           // even when the free-text query is not the entity name.
           const scopeQueryMatches = (result: any): boolean => {
             const normalizedQuery = String(query || '').trim().toLowerCase();
-            if (!normalizedQuery || normalizedQuery === normalizedCanonicalEntityKey) return true;
+            if (
+              !normalizedQuery ||
+              this.memoryManager.canonicalEntityKey(normalizedQuery) === normalizedCanonicalEntityKey
+            ) return true;
             const searchable = JSON.stringify(getContentPayload(result)).toLowerCase();
             const terms = normalizedQuery.split(/\s+/).filter(Boolean);
             return terms.length > 0 && terms.every((term) => searchable.includes(term));
@@ -2353,7 +2358,7 @@ export class NeuralMCPServer {
             redundantRepresentationCount,
             includeRedundantRepresentations,
             sortBy: normalizedSortBy,
-            canonicalEntityKey: canonicalEntityKey || null,
+            canonicalEntityKey: normalizedCanonicalEntityKey || null,
             memoryTypes: Array.from(requestedMemoryTypes),
             scopedEntityMatches: scopedEntityResults.length + scopedObservationResults.length + scopedRelationResults.length,
             exactEntityMatches: exactEntityResults.length,
@@ -3724,9 +3729,12 @@ export class NeuralMCPServer {
             }
             return base;
           });
-          const hasMore = page.offset + formattedMessages.length < page.totalMatching;
+          const mutatingUnreadPage = markAsRead === true && unreadOnly;
+          const hasMore = mutatingUnreadPage
+            ? page.totalMatching > formattedMessages.length
+            : page.offset + formattedMessages.length < page.totalMatching;
           const nextOffset = hasMore
-            ? (markAsRead && unreadOnly ? page.offset : page.offset + formattedMessages.length)
+            ? (mutatingUnreadPage ? 0 : page.offset + formattedMessages.length)
             : null;
 
           return {

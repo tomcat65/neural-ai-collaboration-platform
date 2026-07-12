@@ -2055,6 +2055,7 @@ export class MemoryManager {
         sectionsDropped: [],
       }
     };
+    let previewMessageIds: string[] = [];
 
     // --- HOT tier (always included) ---
 
@@ -2113,13 +2114,7 @@ export class MemoryManager {
          WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL AND superseded_at IS NULL
          ORDER BY created_at DESC LIMIT ?`
       ).all(agentId, tenantId, previewLimit) as any[] : [];
-      if (previewRows.length > 0) {
-        const ids = previewRows.map((row: any) => row.id);
-        const placeholders = ids.map(() => '?').join(',');
-        this.db.prepare(
-          `UPDATE ai_messages SET delivered_at = ? WHERE id IN (${placeholders}) AND delivered_at IS NULL`
-        ).run(new Date().toISOString(), ...ids);
-      }
+      previewMessageIds = previewRows.map((row: any) => row.id);
       const messages = previewRows.map((m: any) => {
         const raw = (typeof m.summary === 'string' && m.summary.length > 0) ? m.summary : (m.content || '');
         const preview = raw.length > 200 ? raw.slice(0, 200) + '…' : raw;
@@ -2420,6 +2415,20 @@ export class MemoryManager {
     }
 
     refreshTokenEstimate();
+    const returnedPreviewIds = new Set(
+      Array.isArray(bundle.unreadMessages?.messages)
+        ? bundle.unreadMessages.messages.map((message: any) => message.id)
+        : []
+    );
+    const deliveredPreviewIds = previewMessageIds.filter((id) => returnedPreviewIds.has(id));
+    if (deliveredPreviewIds.length > 0) {
+      try {
+        const placeholders = deliveredPreviewIds.map(() => '?').join(',');
+        this.db.prepare(
+          `UPDATE ai_messages SET delivered_at = ? WHERE id IN (${placeholders}) AND delivered_at IS NULL`
+        ).run(new Date().toISOString(), ...deliveredPreviewIds);
+      } catch { /* ai_messages table may not exist */ }
+    }
     return bundle;
   }
 

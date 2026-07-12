@@ -506,7 +506,7 @@ Parameters
     "offset": {
       "type": "integer",
       "minimum": 0,
-      "description": "Skip this many matching messages. Use nextOffset from the previous response. When unreadOnly and markAsRead are both true, nextOffset intentionally stays at the current offset because the returned rows leave the unread result set.",
+      "description": "Skip this many matching messages. Use nextOffset from the previous response. When unreadOnly and markAsRead are both true, nextOffset resets to 0 while unread matches remain because each returned page leaves the unread result set.",
       "default": 0
     },
     "messageType": {
