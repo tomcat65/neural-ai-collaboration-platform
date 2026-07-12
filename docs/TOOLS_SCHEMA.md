@@ -462,6 +462,14 @@ Parameters
       ],
       "description": "Message priority",
       "default": "normal"
+    },
+    "supersedes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 100,
+      "description": "Older message IDs this message replaces. Only messages from the same sender to the same recipient in the same tenant are superseded."
     }
   },
   "required": [
@@ -534,6 +542,11 @@ Parameters
     "includeArchived": {
       "type": "boolean",
       "description": "Include archived messages in results (excluded by default)",
+      "default": false
+    },
+    "includeSuperseded": {
+      "type": "boolean",
+      "description": "Include messages replaced by newer messages (excluded by default)",
       "default": false
     }
   },
@@ -725,7 +738,7 @@ Parameters
 ```
 
 ### search_entities
-Advanced federated search across graph, vectors, and cache. AGENT TIP: for a KNOWN entity/project name, pass searchType=exact — it is fast, precise, and name-anchored; hybrid/semantic is a bounded, lower-precision supplement best for fuzzy/exploratory queries (entity & observation hits are ranked above ai_message chatter). Returns compact summaries by default (use get_entity_detail for full content). Supports pagination via offset/nextOffset and filtering by memoryType/agentFilter.
+Advanced federated search across graph, vectors, and cache. AGENT TIP: for a KNOWN entity/project name, pass searchType=exact — it is fast, precise, and name-anchored; hybrid/semantic is a bounded, lower-precision supplement best for fuzzy/exploratory queries (entity & observation hits are ranked above ai_message chatter). Returns compact summaries by default (use get_entity_detail for full content). Supports pagination, relevance/recency ordering, and entity/memory-type scoping.
 
 Parameters
 
@@ -774,6 +787,26 @@ Parameters
     "agentFilter": {
       "type": "string",
       "description": "Filter results by agent/source ID"
+    },
+    "sortBy": {
+      "type": "string",
+      "enum": [
+        "relevance",
+        "recency"
+      ],
+      "description": "Result ordering. Relevance preserves the default ranking; recency sorts newest first before pagination.",
+      "default": "relevance"
+    },
+    "canonicalEntityKey": {
+      "type": "string",
+      "description": "Restrict results to one canonical entity and its direct observations/relations."
+    },
+    "memoryTypes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Restrict results to storage memory types such as entity, observation, relation, or ai_message."
     },
     "includeRedundantRepresentations": {
       "type": "boolean",
