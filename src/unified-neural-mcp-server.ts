@@ -3609,6 +3609,7 @@ export class NeuralMCPServer {
               priority,
               timestamp: new Date().toISOString(),
               deliveryStatus: 'queued',
+              tenantId,
               metadata: {
                 original: {
                   requestedFrom: requestedSenderAgentId,
@@ -4757,6 +4758,7 @@ export class NeuralMCPServer {
           from: messageData.from,
           content: messageData.content,
           priority: messageData.priority,
+          tenantId: messageData.tenantId,
           timestamp: messageData.timestamp
         });
         if (clientsNotified > 0) {

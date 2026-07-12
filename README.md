@@ -66,6 +66,9 @@ so rebuilds never touch your DB. Back up before migrations (consistent online
   startup** if no `API_KEY`/`NEURAL_API_KEY` is set (single-key mode) — no
   silent keyless boot. Constant-time key comparison; format-validated.
 - Clients send `X-API-Key` header (or `Authorization: Bearer`).
+- MessageHub WebSocket upgrades require the same API key plus
+  `X-Neural-Agent-Id: <agent-id>`. The subsequent `register.agentId` must match
+  that authenticated identity; clients may subscribe only to their own agent ID.
 - Public endpoints: `/health`, `/health.json`, `/ready`.
 - CORS is open by default; set `CORS_ORIGINS` (comma-separated) to restrict.
 - Rate limiting with optional Redis backend, graceful in-memory fallback (limits

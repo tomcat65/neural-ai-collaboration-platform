@@ -19,6 +19,7 @@ export interface MessageHubEvent {
   type: 'message.new' | 'message.read' | 'agent.online' | 'agent.offline' | 'heartbeat';
   agentId?: string;
   targetAgentId?: string;
+  tenantId?: string;
   messageId?: string;
   content?: any;
   timestamp: string;

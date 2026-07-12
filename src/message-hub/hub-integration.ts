@@ -36,7 +36,8 @@ export class MessageHubIntegration {
         messageData.messageId || `msg_${Date.now()}`,
         messageData.from,
         targetAgentId,
-        messageData.content
+        messageData.content,
+        messageData.tenantId || 'default'
       );
 
       console.log(`📨 Message notification for ${targetAgentId}: ${notifiedClients} connected client(s)`);
