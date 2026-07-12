@@ -64,7 +64,12 @@ describe('Token Budget Ceiling (Task 1400)', () => {
       maxTokens: 50,
     });
     expect(bundle.meta.truncated).toBe(true);
-    expect(bundle.meta.tokenEstimate).toBeDefined();
+    expect(bundle.meta.requestedMaxTokens).toBe(50);
+    expect(bundle.meta.effectiveMaxTokens).toBe(bundle.meta.minimumTokenBudget);
+    expect(bundle.meta.budgetFloorApplied).toBe(true);
+    expect(bundle.meta.truncationReason).toBe('minimum_identity_envelope');
+    expect(bundle.meta.tokenEstimate).toBeLessThanOrEqual(bundle.meta.effectiveMaxTokens);
+    expect(bundle.meta.tokenEstimate).toBe(Math.ceil(JSON.stringify(bundle).length / 4));
     // Identity should always survive (highest priority)
     expect(bundle.identity).toBeDefined();
   });

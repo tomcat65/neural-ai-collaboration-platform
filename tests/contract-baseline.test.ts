@@ -460,7 +460,7 @@ describe('Neural Contract Baseline', () => {
         type: 'info',
       });
 
-      expect(sent.status).toBe('delivered');
+      expect(sent.status).toBe('queued');
       expect(sent.messageId).toBeTruthy();
 
       // Retrieve via HTTP endpoint

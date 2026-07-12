@@ -29,27 +29,19 @@ export class MessageHubIntegration {
    * Notify specific agent of a new message
    * This is what simulateRealTimeDelivery needs to call
    */
-  public async notifyAgentOfMessage(targetAgentId: string, messageData: any): Promise<void> {
+  public async notifyAgentOfMessage(targetAgentId: string, messageData: any): Promise<number> {
     try {
       // Notify via WebSocket for real-time delivery
-      this.webSocketServer.notifyNewMessage(
+      const notifiedClients = this.webSocketServer.notifyNewMessage(
         messageData.messageId || `msg_${Date.now()}`,
         messageData.from,
         targetAgentId,
-        messageData.content
+        messageData.content,
+        messageData.tenantId || 'default'
       );
-      
-      // Broadcast event for any listening clients
-      this.webSocketServer.broadcastEvent({
-        type: 'message.new',
-        agentId: messageData.from,
-        targetAgentId: targetAgentId,
-        messageId: messageData.messageId,
-        content: messageData.content,
-        timestamp: messageData.timestamp || new Date().toISOString()
-      });
-      
-      console.log(`📨 Agent ${targetAgentId} notified of message from ${messageData.from}`);
+
+      console.log(`📨 Message notification for ${targetAgentId}: ${notifiedClients} connected client(s)`);
+      return notifiedClients;
     } catch (error) {
       console.error(`❌ Failed to notify agent ${targetAgentId}:`, error);
       throw error;

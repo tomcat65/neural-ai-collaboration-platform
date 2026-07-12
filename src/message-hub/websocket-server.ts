@@ -1,21 +1,81 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { EventEmitter } from 'events';
-import { createServer } from 'http';
+import { createServer, type IncomingMessage } from 'http';
+import { isValidApiKeyFormat, safeKeyEqual } from '../middleware/security.js';
+import { getTenantManager } from '../tenant/index.js';
 
 // WebSocket event types for real-time notifications
 export interface MessageHubEvent {
   type: 'message.new' | 'message.read' | 'agent.online' | 'agent.offline' | 'heartbeat';
   agentId?: string;
   targetAgentId?: string;
+  tenantId?: string;
   messageId?: string;
   content?: any;
   timestamp: string;
+}
+
+export interface MessageHubPrincipal {
+  agentId: string;
+  tenantId: string;
+}
+
+interface AuthenticatedHubRequest extends IncomingMessage {
+  messageHubPrincipal?: MessageHubPrincipal;
+}
+
+function headerValue(request: IncomingMessage, name: string): string | undefined {
+  const value = request.headers[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+/**
+ * Authenticate a WebSocket upgrade with the same API-key aliases and
+ * constant-time comparison used by the HTTP surface. The agent identity is
+ * supplied during the authenticated handshake and cannot be changed later by
+ * register/subscribe messages.
+ */
+function authenticateMessageHubRequest(request: IncomingMessage): MessageHubPrincipal | null {
+  let query: URLSearchParams | undefined;
+  try {
+    query = new URL(request.url || '/', 'http://localhost').searchParams;
+  } catch {
+    return null;
+  }
+
+  const agentId = (headerValue(request, 'x-neural-agent-id') || query.get('agent_id') || '').trim();
+  if (!agentId || agentId.length > 256 || /[\x00-\x1F\x7F]/.test(agentId)) return null;
+
+  const authorization = headerValue(request, 'authorization') || '';
+  const bearerKey = authorization.replace(/^Bearer\s+/i, '');
+  const providedKey = headerValue(request, 'x-api-key') || bearerKey || query.get('api_key') || '';
+  if (!isValidApiKeyFormat(providedKey)) return null;
+
+  // Match HTTP auth ordering: tenant keys first, then the legacy env key.
+  if (process.env.MULTI_TENANT_ENABLED === 'true') {
+    try {
+      const validation = getTenantManager().validateApiKey(providedKey);
+      if (validation.valid && validation.tenant && validation.record) {
+        return {
+          agentId,
+          tenantId: validation.tenant.id,
+        };
+      }
+    } catch {
+      // Fall through to the legacy env-key path, as HTTP auth does.
+    }
+  }
+
+  const configuredKey = process.env.API_KEY || process.env.NEURAL_API_KEY;
+  if (!configuredKey || !safeKeyEqual(providedKey, configuredKey)) return null;
+  return { agentId, tenantId: 'default' };
 }
 
 // Connected client information
 interface ConnectedClient {
   ws: WebSocket;
   agentId: string;
+  tenantId: string;
   lastHeartbeat: Date;
   subscriptions: Set<string>; // Agent IDs this client wants notifications for
 }
@@ -36,12 +96,29 @@ export class MessageHubWebSocketServer extends EventEmitter {
     super();
     this.port = port;
     this.server = createServer();
-    this.wss = new WebSocketServer({ server: this.server });
+    this.wss = new WebSocketServer({
+      server: this.server,
+      verifyClient: ({ req }: { origin: string; secure: boolean; req: IncomingMessage }) => {
+        try {
+          const principal = authenticateMessageHubRequest(req);
+          if (!principal) return false;
+          (req as AuthenticatedHubRequest).messageHubPrincipal = principal;
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    });
     this.setupWebSocketServer();
   }
 
   private setupWebSocketServer() {
     this.wss.on('connection', (ws: WebSocket, req) => {
+      const principal = (req as AuthenticatedHubRequest).messageHubPrincipal;
+      if (!principal) {
+        ws.close(1008, 'Authentication required');
+        return;
+      }
       console.log('🔌 New WebSocket connection from:', req.socket.remoteAddress);
       
       // Connection ID for tracking
@@ -51,7 +128,7 @@ export class MessageHubWebSocketServer extends EventEmitter {
       ws.on('message', (data) => {
         try {
           const message = JSON.parse(data.toString());
-          this.handleClientMessage(connectionId, ws, message);
+          this.handleClientMessage(connectionId, ws, principal, message);
         } catch (error) {
           console.error('❌ Invalid JSON from WebSocket client:', error);
           ws.send(JSON.stringify({
@@ -77,6 +154,7 @@ export class MessageHubWebSocketServer extends EventEmitter {
         type: 'connection.welcome',
         connectionId,
         message: 'Connected to Message Hub WebSocket',
+        authenticatedAgentId: principal.agentId,
         timestamp: new Date().toISOString()
       }));
     });
@@ -84,10 +162,15 @@ export class MessageHubWebSocketServer extends EventEmitter {
     console.log(`📡 WebSocket server configured on port ${this.port}`);
   }
 
-  private handleClientMessage(connectionId: string, ws: WebSocket, message: any) {
+  private handleClientMessage(
+    connectionId: string,
+    ws: WebSocket,
+    principal: MessageHubPrincipal,
+    message: any
+  ) {
     switch (message.type) {
       case 'register':
-        this.handleClientRegistration(connectionId, ws, message);
+        this.handleClientRegistration(connectionId, ws, principal, message);
         break;
       
       case 'subscribe':
@@ -111,7 +194,12 @@ export class MessageHubWebSocketServer extends EventEmitter {
     }
   }
 
-  private handleClientRegistration(connectionId: string, ws: WebSocket, message: any) {
+  private handleClientRegistration(
+    connectionId: string,
+    ws: WebSocket,
+    principal: MessageHubPrincipal,
+    message: any
+  ) {
     if (!message.agentId) {
       ws.send(JSON.stringify({
         type: 'error',
@@ -121,9 +209,20 @@ export class MessageHubWebSocketServer extends EventEmitter {
       return;
     }
 
+    if (message.agentId !== principal.agentId) {
+      ws.send(JSON.stringify({
+        type: 'error',
+        code: 'AGENT_IDENTITY_MISMATCH',
+        message: 'Registered agentId must match the authenticated WebSocket identity',
+        timestamp: new Date().toISOString()
+      }));
+      return;
+    }
+
     const client: ConnectedClient = {
       ws,
-      agentId: message.agentId,
+      agentId: principal.agentId,
+      tenantId: principal.tenantId,
       lastHeartbeat: new Date(),
       subscriptions: new Set()
     };
@@ -136,19 +235,20 @@ export class MessageHubWebSocketServer extends EventEmitter {
     // Notify that agent is online
     this.broadcastEvent({
       type: 'agent.online',
-      agentId: message.agentId,
+      agentId: principal.agentId,
+      tenantId: principal.tenantId,
       timestamp: new Date().toISOString()
     });
 
     ws.send(JSON.stringify({
       type: 'registration.success',
-      agentId: message.agentId,
+      agentId: principal.agentId,
       connectionId,
       subscriptions: Array.from(client.subscriptions),
       timestamp: new Date().toISOString()
     }));
 
-    console.log(`✅ Agent registered: ${message.agentId} (${connectionId})`);
+    console.log(`✅ Agent registered: ${principal.agentId} (${connectionId})`);
   }
 
   private handleSubscription(connectionId: string, message: any) {
@@ -157,11 +257,21 @@ export class MessageHubWebSocketServer extends EventEmitter {
       return; // Client not registered
     }
 
-    if (message.targetAgentId) {
-      client.subscriptions.add(message.targetAgentId);
+    if (message.targetAgentId && message.targetAgentId !== client.agentId) {
+      client.ws.send(JSON.stringify({
+        type: 'subscription.denied',
+        targetAgentId: message.targetAgentId,
+        message: 'WebSocket clients may subscribe only to their authenticated agent identity',
+        timestamp: new Date().toISOString()
+      }));
+      return;
+    }
+
+    if (message.targetAgentId === client.agentId) {
+      client.subscriptions.add(client.agentId);
       client.ws.send(JSON.stringify({
         type: 'subscription.success',
-        targetAgentId: message.targetAgentId,
+        targetAgentId: client.agentId,
         timestamp: new Date().toISOString()
       }));
     }
@@ -201,6 +311,7 @@ export class MessageHubWebSocketServer extends EventEmitter {
       this.broadcastEvent({
         type: 'agent.offline',
         agentId: client.agentId,
+        tenantId: client.tenantId,
         timestamp: new Date().toISOString()
       });
 
@@ -213,7 +324,7 @@ export class MessageHubWebSocketServer extends EventEmitter {
    * Broadcast event to all subscribed clients
    * This is the core notification mechanism for <1 second message discovery
    */
-  public broadcastEvent(event: MessageHubEvent) {
+  public broadcastEvent(event: MessageHubEvent): number {
     const eventStr = JSON.stringify(event);
     let notifiedClients = 0;
 
@@ -236,23 +347,27 @@ export class MessageHubWebSocketServer extends EventEmitter {
     
     // Emit to internal event system for logging/metrics
     this.emit('event.broadcast', event, notifiedClients);
+    return notifiedClients;
   }
 
   private shouldNotifyClient(client: ConnectedClient, event: MessageHubEvent): boolean {
     switch (event.type) {
       case 'message.new':
-        // Notify if client subscribed to the target agent
-        return event.targetAgentId ? client.subscriptions.has(event.targetAgentId) : false;
+        // A delivery fact requires an authenticated, exact-recipient connection.
+        return Boolean(event.targetAgentId === client.agentId &&
+          client.subscriptions.has(client.agentId) &&
+          (!event.tenantId || event.tenantId === client.tenantId));
       
       case 'message.read':
         // Notify if client subscribed to sender or receiver
-        return Boolean((event.agentId && client.subscriptions.has(event.agentId)) ||
-               (event.targetAgentId && client.subscriptions.has(event.targetAgentId)));
+        return Boolean((!event.tenantId || event.tenantId === client.tenantId) &&
+          ((event.agentId && client.subscriptions.has(event.agentId)) ||
+           (event.targetAgentId && client.subscriptions.has(event.targetAgentId))));
       
       case 'agent.online':
       case 'agent.offline':
         // Notify all clients about agent status changes
-        return true;
+        return !event.tenantId || event.tenantId === client.tenantId;
       
       case 'heartbeat':
         // Only notify the specific agent
@@ -267,12 +382,19 @@ export class MessageHubWebSocketServer extends EventEmitter {
    * Public method for Message Hub API to notify new messages
    * This enables <1 second message discovery
    */
-  public notifyNewMessage(messageId: string, from: string, to: string, content?: string) {
-    this.broadcastEvent({
+  public notifyNewMessage(
+    messageId: string,
+    from: string,
+    to: string,
+    content?: string,
+    tenantId: string = 'default'
+  ): number {
+    return this.broadcastEvent({
       type: 'message.new',
       messageId,
       agentId: from,
       targetAgentId: to,
+      tenantId,
       content: content ? { preview: content.substring(0, 100) } : undefined,
       timestamp: new Date().toISOString()
     });
@@ -365,6 +487,7 @@ export class MessageHubWebSocketServer extends EventEmitter {
       stats.clientDetails.push({
         connectionId,
         agentId: client.agentId,
+        tenantId: client.tenantId,
         subscriptions: Array.from(client.subscriptions),
         lastHeartbeat: client.lastHeartbeat
       });

@@ -521,8 +521,9 @@ export class NeuralMCPServer {
         });
 
         res.json({
-          status: 'delivered',
+          status: 'queued',
           messageId: messageId,
+          deliveryStatus: 'queued',
           timestamp: new Date().toISOString()
         });
 
@@ -564,7 +565,7 @@ export class NeuralMCPServer {
             messageType: msg.message_type,
             priority: msg.priority,
             timestamp: msg.created_at,
-            deliveryStatus: meta.deliveryStatus || 'delivered',
+            deliveryStatus: this.messageDeliveryStatus(msg, meta),
           },
           timestamp: msg.created_at,
           from: msg.from_agent,
@@ -1836,11 +1837,23 @@ export class NeuralMCPServer {
             maxResponseSize = 40000,
             memoryType,
             agentFilter,
+            sortBy = 'relevance',
+            canonicalEntityKey,
+            memoryTypes,
             includeRedundantRepresentations = false,
           } = args;
           const normalizedSearchType = String(searchType).toLowerCase();
           const exactSearch = normalizedSearchType === 'exact';
           const semanticSearch = normalizedSearchType === 'semantic';
+          const normalizedSortBy = String(sortBy).toLowerCase() === 'recency' ? 'recency' : 'relevance';
+          const normalizedCanonicalEntityKey = typeof canonicalEntityKey === 'string'
+            ? this.memoryManager.canonicalEntityKey(canonicalEntityKey)
+            : '';
+          const requestedMemoryTypes = new Set(
+            (Array.isArray(memoryTypes) ? memoryTypes : [])
+              .map((value: any) => String(value).trim().toLowerCase())
+              .filter(Boolean)
+          );
 
           // Recall-quality type weighting. The searchable corpus is ~85% chat
           // messages + raw observations vs ~10% curated entities, so raw vector
@@ -1955,6 +1968,8 @@ export class NeuralMCPServer {
             const lowerQuery = query.toLowerCase();
             const nameMatch = getEntityName(result)?.toLowerCase().includes(lowerQuery);
             const typeMatch = getDomainType(result)?.toLowerCase().includes(lowerQuery);
+            const contentMatch = normalizedCanonicalEntityKey.length > 0 &&
+              JSON.stringify(payload).toLowerCase().includes(lowerQuery);
             // Semantic similarity (0..1) propagated from the vec0 distance, if any.
             // Previously this was dropped and every semantic hit got a flat 0.6,
             // so results fell back to arbitrary order — irrelevant rows ranked
@@ -1973,6 +1988,7 @@ export class NeuralMCPServer {
                           result.exactRelationMatch ? 1.0 :
                           nameMatch ? 1.0 :
                           typeMatch ? 0.8 :
+                          contentMatch ? 0.75 :
                           weightedSemSim !== null ? 0.5 + 0.4 * weightedSemSim : // 0.5..0.9 band, type-weighted
                           0.6;
             const entry: any = {
@@ -2000,6 +2016,22 @@ export class NeuralMCPServer {
             }
             return entry;
           }).sort((a: any, b: any) => b.searchScore - a.searchScore);
+
+          const resultTimestamp = (result: any): number => {
+            const value = result?.timestamp || result?.createdAt || result?.content?.timestamp;
+            if (value instanceof Date) return value.getTime();
+            const parsed = Date.parse(String(value || ''));
+            return Number.isFinite(parsed) ? parsed : 0;
+          };
+
+          const sortFilteredResults = (results: any[]): any[] => {
+            if (normalizedSortBy !== 'recency') return results;
+            return [...results].sort((a: any, b: any) =>
+              resultTimestamp(b) - resultTimestamp(a) ||
+              b.searchScore - a.searchScore ||
+              String(a.id || '').localeCompare(String(b.id || ''))
+            );
+          };
 
           const inlineObservationRepresentationKey = (result: any): string | null => {
             const payload = getContentPayload(result);
@@ -2093,6 +2125,24 @@ export class NeuralMCPServer {
                 String(r.entityType || getDomainType(r) || '').toLowerCase() === filterLower
               );
             }
+            if (requestedMemoryTypes.size > 0) {
+              filteredResults = filteredResults.filter((r: any) =>
+                requestedMemoryTypes.has(String(r.storageMemoryType || getStorageMemoryType(r) || '').toLowerCase())
+              );
+            }
+            if (normalizedCanonicalEntityKey) {
+              filteredResults = filteredResults.filter((r: any) => {
+                const payload = getContentPayload(r);
+                const storageType = r.storageMemoryType || getStorageMemoryType(r);
+                if (storageType === 'relation') {
+                  return [payload?.from, payload?.to]
+                    .some((value) => this.memoryManager.canonicalEntityKey(value) === normalizedCanonicalEntityKey);
+                }
+                return this.memoryManager.canonicalEntityKey(
+                  r.canonicalEntityName || getEntityName(r) || ''
+                ) === normalizedCanonicalEntityKey;
+              });
+            }
             if (agentFilter) {
               const filterLower = agentFilter.toLowerCase();
               filteredResults = filteredResults.filter((r: any) => {
@@ -2109,7 +2159,7 @@ export class NeuralMCPServer {
 
             return {
               dedupMap,
-              filteredResults: representationDeduped.results,
+              filteredResults: sortFilteredResults(representationDeduped.results),
               preRepresentationDeduplicationCount,
               redundantRepresentationCount: representationDeduped.redundantRepresentationCount,
             };
@@ -2130,17 +2180,59 @@ export class NeuralMCPServer {
                 rowToSearchResult(row, 'relation', { exactRelationMatch: true })
               )
             : [];
-          const exactDirectResults = [
+          const queryExactDirectResults = [
             ...exactEntityResults,
             ...exactObservationResults,
             ...exactRelationResults,
           ];
 
+          // An entity scope is a bounded direct-read path. It avoids a global
+          // semantic search and lets callers retrieve one entity's timeline
+          // even when the free-text query is not the entity name.
+          const scopeQueryMatches = (result: any): boolean => {
+            const normalizedQuery = String(query || '').trim().toLowerCase();
+            if (
+              !normalizedQuery ||
+              this.memoryManager.canonicalEntityKey(normalizedQuery) === normalizedCanonicalEntityKey
+            ) return true;
+            const searchable = JSON.stringify(getContentPayload(result)).toLowerCase();
+            const terms = normalizedQuery.split(/\s+/).filter(Boolean);
+            return terms.length > 0 && terms.every((term) => searchable.includes(term));
+          };
+          const scopedEntityResults = normalizedCanonicalEntityKey
+            ? this.memoryManager.findEntitiesByNameOrAlias(canonicalEntityKey, tenantId).map((row: any) =>
+                rowToSearchResult(row, 'entity', { scopedEntityMatch: true })
+              ).filter(scopeQueryMatches)
+            : [];
+          const scopedObservationResults = normalizedCanonicalEntityKey
+            ? this.memoryManager.findObservationsByEntityOrAlias(canonicalEntityKey, tenantId).map((row: any) =>
+                rowToSearchResult(row, 'observation', { scopedEntityMatch: true })
+              ).filter(scopeQueryMatches)
+            : [];
+          const scopedRelationResults = normalizedCanonicalEntityKey
+            ? this.memoryManager.findRelationsByEntityOrAlias(canonicalEntityKey, tenantId).map((row: any) =>
+                rowToSearchResult(row, 'relation', { scopedEntityMatch: true })
+              ).filter(scopeQueryMatches)
+            : [];
+          const directResultMap = new Map<string, any>();
+          for (const result of [
+            ...queryExactDirectResults,
+            ...scopedEntityResults,
+            ...scopedObservationResults,
+            ...scopedRelationResults,
+          ]) {
+            if (!directResultMap.has(result.id)) directResultMap.set(result.id, result);
+          }
+          const exactDirectResults = Array.from(directResultMap.values());
+
+          const queryExactScoredResults = scoreAndDecorate(queryExactDirectResults);
+          const queryExactFiltered = dedupAndFilter(queryExactScoredResults);
           const exactScoredResults = scoreAndDecorate(exactDirectResults);
           const exactFiltered = dedupAndFilter(exactScoredResults);
-          const exactAnchored = useIndexedExact && exactFiltered.filteredResults.length > 0;
+          const exactAnchored = useIndexedExact && queryExactFiltered.filteredResults.length > 0;
           const exactOnly = exactSearch && exactAnchored;
-          const semanticSkipped = exactAnchored ? 'exact_matches' : null;
+          const scopedSearch = normalizedCanonicalEntityKey.length > 0;
+          const semanticSkipped = exactAnchored ? 'exact_matches' : (scopedSearch ? 'entity_scope' : null);
 
           // Search with propagated limit (tenant-scoped). Exact graph matches are
           // prepended so "read entity X" workflows land on canonical rows first.
@@ -2154,7 +2246,7 @@ export class NeuralMCPServer {
           // past the MCP request timeout (observed live).
           let semanticDegraded = false;
           let fallbackResults: any[] = [];
-          if (!exactAnchored) {
+          if (!exactAnchored && !scopedSearch) {
             const SEMANTIC_TIMEOUT_MS = parseInt(process.env.SEARCH_SEMANTIC_TIMEOUT_MS || '4000', 10);
             let timer: ReturnType<typeof setTimeout> | undefined;
             try {
@@ -2248,79 +2340,290 @@ export class NeuralMCPServer {
 
           const returnedResults = budgetedResults.length;
           const nextOffset = offset + returnedResults < totalMatches ? offset + returnedResults : null;
+          const responseText = this.serializeWithTokenEstimate({
+            query,
+            searchType,
+            totalMatches,
+            returnedResults,
+            nextOffset,
+            responseSize,
+            compact,
+            exactOnly,
+            exactAnchored,
+            semanticSkipped,
+            semanticDegraded,
+            deduplicated: scoredResults.length !== dedupMap.size || redundantRepresentationCount > 0,
+            preDeduplicationCount: scoredResults.length,
+            preRepresentationDeduplicationCount,
+            redundantRepresentationCount,
+            includeRedundantRepresentations,
+            sortBy: normalizedSortBy,
+            canonicalEntityKey: normalizedCanonicalEntityKey || null,
+            memoryTypes: Array.from(requestedMemoryTypes),
+            scopedEntityMatches: scopedEntityResults.length + scopedObservationResults.length + scopedRelationResults.length,
+            exactEntityMatches: exactEntityResults.length,
+            exactObservationMatches: exactObservationResults.length,
+            exactRelationMatches: exactRelationResults.length,
+            filteredExactMatches: queryExactFiltered.filteredResults.length,
+            totalResults: totalMatches,
+            results: budgetedResults,
+          });
 
           return {
             content: [
               {
                 type: 'text',
-                text: JSON.stringify({
-                  query,
-                  searchType,
-                  totalMatches,
-                  returnedResults,
-                  nextOffset,
-                  responseSize,
-                  compact,
-                  exactOnly,
-                  exactAnchored,
-                  semanticSkipped,
-                  semanticDegraded,
-                  deduplicated: scoredResults.length !== dedupMap.size || redundantRepresentationCount > 0,
-                  preDeduplicationCount: scoredResults.length,
-                  preRepresentationDeduplicationCount,
-                  redundantRepresentationCount,
-                  includeRedundantRepresentations,
-                  exactEntityMatches: exactEntityResults.length,
-                  exactObservationMatches: exactObservationResults.length,
-                  exactRelationMatches: exactRelationResults.length,
-                  filteredExactMatches: exactFiltered.filteredResults.length,
-                  totalResults: totalMatches,
-                  results: budgetedResults,
-                }, null, 2),
+                text: responseText,
               },
             ],
           };
         }
 
         case 'get_entity_detail': {
-          const { ids, maxTotalSize = 80000 } = args;
-          if (!ids || !Array.isArray(ids) || ids.length === 0) {
-            return { content: [{ type: 'text', text: JSON.stringify({ error: 'ids array is required and must not be empty' }) }] };
+          const maxTotalSize = Number.isFinite(Number(args.maxTotalSize))
+            ? Math.max(0, Math.floor(Number(args.maxTotalSize)))
+            : 80000;
+          const minimumDetailResponseSize = 256;
+          if (maxTotalSize < minimumDetailResponseSize) {
+            const errorText = JSON.stringify({
+              error: 'maxTotalSize_too_small',
+              minimum: minimumDetailResponseSize,
+            });
+            return {
+              content: [{
+                type: 'text',
+                text: errorText.length <= maxTotalSize
+                  ? errorText
+                  : (maxTotalSize >= 2 ? '{}' : ''),
+              }],
+            };
           }
-          if (ids.length > 5) {
-            return { content: [{ type: 'text', text: JSON.stringify({ error: 'Maximum 5 IDs per request' }) }] };
+          const serializeDetailError = (payload: Record<string, any>): string => {
+            const responseText = this.serializeWithTokenEstimate(payload, false);
+            return responseText.length <= maxTotalSize
+              ? responseText
+              : JSON.stringify({ error: 'response_too_large' });
+          };
+          const ids = Array.isArray(args.ids)
+            ? args.ids.filter((id: any) => typeof id === 'string' && id.trim()).map((id: string) => id.trim())
+            : [];
+          const names = Array.isArray(args.names)
+            ? args.names.filter((name: any) => typeof name === 'string' && name.trim()).map((name: string) => name.trim())
+            : [];
+          if (typeof args.entity === 'string' && args.entity.trim()) {
+            names.push(args.entity.trim());
+          }
+
+          const requestedCount = ids.length + names.length;
+          if (requestedCount === 0) {
+            const responseText = serializeDetailError({
+              error: 'Provide at least one storage ID (`ids`), entity name/alias (`names`), or singular `entity`.',
+            });
+            return { content: [{ type: 'text', text: responseText }] };
+          }
+          if (requestedCount > 5) {
+            const responseText = serializeDetailError({ error: 'Maximum 5 combined IDs and names per request' });
+            return { content: [{ type: 'text', text: responseText }] };
           }
 
           const retrieved: any[] = [];
           const skipped: any[] = [];
+          const resolutionEntries: any[] = [];
           let budgetUsed = 0;
 
-          for (const id of ids) {
+          const retrieveResolved = async (
+            input: string,
+            inputType: 'id' | 'name',
+            id: string,
+            matchedBy: 'id' | 'canonical_name' | 'alias' | 'normalized_name',
+            canonicalName?: string
+          ) => {
             const entity = await this.memoryManager.getEntityById(id, tenantId);
             if (!entity) {
-              skipped.push({ id, reason: 'not_found' });
-              continue;
+              skipped.push(inputType === 'id'
+                ? { id: input, reason: 'not_found' }
+                : { name: input, reason: 'resolved_row_not_found', resolvedId: id });
+              resolutionEntries.push({ input, inputType, status: 'not_found', id, matchedBy });
+              return;
             }
+
+            const resolvedCanonicalName = canonicalName || entity.content?.name || null;
             const entityStr = JSON.stringify(entity);
             if (retrieved.length > 0 && budgetUsed + entityStr.length > maxTotalSize) {
-              skipped.push({ id, reason: 'budget_exceeded', contentSize: entityStr.length });
-              continue;
+              skipped.push({
+                ...(inputType === 'id' ? { id: input } : { name: input, resolvedId: id }),
+                reason: 'budget_exceeded',
+                contentSize: entityStr.length,
+              });
+              resolutionEntries.push({
+                input,
+                inputType,
+                status: 'resolved',
+                id,
+                canonicalName: resolvedCanonicalName,
+                matchedBy,
+                retrieved: false,
+                reason: 'budget_exceeded',
+              });
+              return;
             }
             budgetUsed += entityStr.length;
             retrieved.push(entity);
+            resolutionEntries.push({
+              input,
+              inputType,
+              status: 'resolved',
+              id,
+              canonicalName: resolvedCanonicalName,
+              matchedBy,
+              retrieved: true,
+            });
+          };
+
+          for (const id of ids) {
+            await retrieveResolved(id, 'id', id, 'id');
+          }
+
+          for (const name of names) {
+            const candidateRows = this.memoryManager.findEntitiesByNameOrAlias(name, tenantId);
+            const candidatesById = new Map<string, {
+              id: string;
+              canonicalName: string | null;
+              aliases: string[];
+            }>();
+
+            for (const row of candidateRows) {
+              const lookupKinds = String(row.lookup_key_kinds || '')
+                .split(',')
+                .map((kind) => kind.trim())
+                .filter(Boolean);
+              if (lookupKinds.length > 0 &&
+                  !lookupKinds.includes('canonical_name') &&
+                  !lookupKinds.includes('alias')) {
+                continue;
+              }
+
+              let content: any = {};
+              try { content = JSON.parse(row.content || '{}'); } catch { content = {}; }
+              candidatesById.set(row.id, {
+                id: row.id,
+                canonicalName: typeof content.name === 'string' ? content.name : null,
+                aliases: Array.isArray(content.aliases)
+                  ? content.aliases.filter((alias: any) => typeof alias === 'string')
+                  : [],
+              });
+            }
+
+            const candidates = Array.from(candidatesById.values());
+            const comparableName = name.toLowerCase();
+            const canonicalMatches = candidates.filter((candidate) =>
+              candidate.canonicalName?.toLowerCase() === comparableName
+            );
+            const aliasMatches = candidates.filter((candidate) =>
+              candidate.aliases.some((alias) => alias.toLowerCase() === comparableName)
+            );
+            const preferred = canonicalMatches.length > 0
+              ? canonicalMatches
+              : (aliasMatches.length > 0 ? aliasMatches : candidates);
+
+            if (preferred.length === 0) {
+              skipped.push({ name, reason: 'not_found' });
+              resolutionEntries.push({ input: name, inputType: 'name', status: 'not_found' });
+              continue;
+            }
+            if (preferred.length > 1) {
+              const candidateIds = preferred.map((candidate) => candidate.id);
+              skipped.push({ name, reason: 'ambiguous_name', candidateIds });
+              resolutionEntries.push({
+                input: name,
+                inputType: 'name',
+                status: 'ambiguous',
+                candidateIds,
+              });
+              continue;
+            }
+
+            const candidate = preferred[0];
+            const matchedBy = canonicalMatches.length === 1
+              ? 'canonical_name'
+              : (aliasMatches.length === 1 ? 'alias' : 'normalized_name');
+            await retrieveResolved(
+              name,
+              'name',
+              candidate.id,
+              matchedBy,
+              candidate.canonicalName || undefined
+            );
+          }
+
+          const buildResponse = (entities: any[], entries: any[], truncatedEntities: number = 0) =>
+            this.serializeWithTokenEstimate({
+              retrieved: entities.length,
+              skipped,
+              budgetUsed,
+              maxTotalSize,
+              truncatedEntities,
+              resolution: {
+                requested: { ids, names },
+                entries,
+              },
+              entities,
+            });
+
+          let responseText = buildResponse(retrieved, resolutionEntries);
+          if (responseText.length > maxTotalSize && retrieved.length > 0) {
+            const compactEntities = retrieved.map((entity) => ({
+              id: entity.id,
+              sourceTable: entity.sourceTable,
+              type: entity.type,
+              memoryType: entity.memoryType,
+              source: entity.source,
+              createdAt: entity.createdAt,
+              content: {
+                ...(entity.content?.name ? { name: entity.content.name } : {}),
+                ...(entity.content?.entityName ? { entityName: entity.content.entityName } : {}),
+                ...(entity.content?.entityType ? { entityType: entity.content.entityType } : {}),
+                ...(entity.content?.type ? { type: entity.content.type } : {}),
+              },
+              contentSize: JSON.stringify(entity).length,
+              _truncated: true,
+            }));
+            const compactIds = new Set(compactEntities.map((entity) => entity.id));
+            const compactResolution = resolutionEntries.map((entry) =>
+              compactIds.has(entry.id) && entry.retrieved
+                ? { ...entry, truncated: true }
+                : entry
+            );
+            responseText = buildResponse(compactEntities, compactResolution, compactEntities.length);
+
+            while (responseText.length > maxTotalSize && compactEntities.length > 0) {
+              const removed = compactEntities.pop();
+              const removedEntry = compactResolution.find((entry) => entry.id === removed?.id && entry.retrieved);
+              if (removedEntry) {
+                removedEntry.retrieved = false;
+                removedEntry.truncated = false;
+                removedEntry.reason = 'budget_exceeded';
+              }
+              responseText = buildResponse(compactEntities, compactResolution, compactEntities.length);
+            }
+          }
+
+          if (responseText.length > maxTotalSize) {
+            responseText = this.serializeWithTokenEstimate({
+              error: 'response_exceeds_maxTotalSize',
+              maxTotalSize,
+              retrieved: 0,
+            }, false);
+          }
+          if (responseText.length > maxTotalSize) {
+            responseText = JSON.stringify({ error: 'response_too_large' });
           }
 
           return {
             content: [
               {
                 type: 'text',
-                text: JSON.stringify({
-                  retrieved: retrieved.length,
-                  skipped,
-                  budgetUsed,
-                  maxTotalSize,
-                  entities: retrieved,
-                }, null, 2),
+                text: responseText,
               },
             ],
           };
@@ -2418,7 +2721,9 @@ export class NeuralMCPServer {
           // Resolve userId: from RequestContext (JWT) or from args (service key callers)
           const resolvedUserId = context.userId || ctxUserId || null;
           const bundle = this.memoryManager.getAgentContext(ctxAgentId, projectId, depth, tenantId, maxTokens, resolvedUserId);
-          return { content: [{ type: 'text', text: JSON.stringify(bundle, null, 2) }] };
+          // The budget estimator measures compact JSON; return that same
+          // representation so transport whitespace cannot violate the ceiling.
+          return { content: [{ type: 'text', text: JSON.stringify(bundle) }] };
         }
 
         case 'begin_session': {
@@ -2729,13 +3034,14 @@ export class NeuralMCPServer {
         case 'get_current_observation': {
           const entityArg = args.entity ?? args.entityName ?? args.name;
           if (typeof entityArg !== 'string' || !entityArg.trim()) {
+            const responseText = this.serializeWithTokenEstimate({
+              error: 'entity is required: the entity name to resolve the current observation for (aliases accepted: entityName, name)',
+              example: { entity: 'pm-loop-state' },
+            });
             return {
               content: [{
                 type: 'text',
-                text: JSON.stringify({
-                  error: 'entity is required: the entity name to resolve the current observation for (aliases accepted: entityName, name)',
-                  example: { entity: 'pm-loop-state' },
-                }),
+                text: responseText,
               }],
             };
           }
@@ -2745,15 +3051,14 @@ export class NeuralMCPServer {
             tenantId,
             typeof args.windowSize === 'number' ? args.windowSize : undefined
           );
+          const responseText = this.serializeWithTokenEstimate(
+            result.current ? result : { ...result, reason: 'no_observations' }
+          );
 
           return {
             content: [{
               type: 'text',
-              text: JSON.stringify(
-                result.current ? result : { ...result, reason: 'no_observations' },
-                null,
-                2
-              ),
+              text: responseText,
             }],
           };
         }
@@ -3040,14 +3345,15 @@ export class NeuralMCPServer {
 
           const centerRow = getEntityRow(entityName);
           if (!centerRow) {
+            const responseText = this.serializeWithTokenEstimate({
+              entity: entityName, found: false, center: null, nodes: [], edges: [],
+              statistics: { depth: maxHops, nodeCount: 0, edgeCount: 0 },
+              truncated: { nodes: false, edges: false },
+            });
             return {
               content: [{
                 type: 'text',
-                text: JSON.stringify({
-                  entity: entityName, found: false, center: null, nodes: [], edges: [],
-                  statistics: { depth: maxHops, nodeCount: 0, edgeCount: 0 },
-                  truncated: { nodes: false, edges: false },
-                }, null, 2),
+                text: responseText,
               }],
             };
           }
@@ -3153,9 +3459,10 @@ export class NeuralMCPServer {
             },
             truncated: { nodes: nodesTrunc, edges: edgesTrunc },
           };
+          const responseText = this.serializeWithTokenEstimate(neighborhood);
 
           return {
-            content: [{ type: 'text', text: JSON.stringify(neighborhood, null, 2) }],
+            content: [{ type: 'text', text: responseText }],
           };
         }
 
@@ -3291,7 +3598,7 @@ export class NeuralMCPServer {
           // De-duplicate recipients
           recipients = Array.from(new Set(recipients));
 
-          const results: { to: string; messageId: string }[] = [];
+          const results: { to: string; messageId: string; deliveryStatus: 'queued' | 'delivered'; clientsNotified: number }[] = [];
 
           for (const targetAgentId of recipients) {
             const messageData = {
@@ -3301,11 +3608,9 @@ export class NeuralMCPServer {
               messageType,
               priority,
               timestamp: new Date().toISOString(),
-              deliveryStatus: 'pending',
+              deliveryStatus: 'queued',
+              tenantId,
               metadata: {
-                realTimeDelivery: "true",
-                persistentStorage: "true", 
-                crossPlatform: "true",
                 original: {
                   requestedFrom: requestedSenderAgentId,
                   requestedTo: explicitTarget || null,
@@ -3321,15 +3626,14 @@ export class NeuralMCPServer {
               priority,
               messageData.metadata,
               tenantId,
-              context
+              context,
+              Array.isArray(args.supersedes) ? args.supersedes : []
             );
-            results.push({ to: targetAgentId, messageId });
-
             // NE-S6b: Audit log
             this.memoryManager.auditLog('send_ai_message', senderAgentId, content, targetAgentId);
 
-            // Simulate real-time delivery per recipient
-            await this.simulateRealTimeDelivery(messageData, messageId);
+            const delivery = await this.simulateRealTimeDelivery(messageData, messageId);
+            results.push({ to: targetAgentId, messageId, ...delivery });
 
             await this.publishEventToUnified('ai.message.sent', {
               messageId,
@@ -3337,7 +3641,8 @@ export class NeuralMCPServer {
               to: targetAgentId,
               messageType,
               priority,
-              realTimeDelivered: true
+              realTimeDelivered: delivery.deliveryStatus === 'delivered',
+              clientsNotified: delivery.clientsNotified,
             });
           }
 
@@ -3350,17 +3655,16 @@ export class NeuralMCPServer {
                   recipients: recipients,
                   sentCount: results.length,
                   messageIds: results,
-                  deliveryTime: '<100ms',
                   selection: {
                     mode: broadcast ? 'broadcast' : (capSelector?.length ? 'capabilities' : 'direct'),
                     capabilities: capSelector || [],
                     excludeSelf
                   },
-                  features: {
-                    realTimeDelivery: 'websocket',
-                    persistentStorage: 'enabled',
-                    crossPlatformSync: 'active',
-                    priorityQueue: priority
+                  delivery: {
+                    persisted: results.length,
+                    delivered: results.filter((result) => result.deliveryStatus === 'delivered').length,
+                    queued: results.filter((result) => result.deliveryStatus === 'queued').length,
+                    clientsNotified: results.reduce((sum, result) => sum + result.clientsNotified, 0),
                   }
                 }, null, 2),
               },
@@ -3369,24 +3673,34 @@ export class NeuralMCPServer {
         }
 
         case 'get_ai_messages': {
-          const { agentId: targetAgentId, messageType, since, markAsRead, includeArchived, from } = args;
+          const { agentId: targetAgentId, messageType, since, markAsRead, includeArchived, includeSuperseded, from } = args;
           const compact = args.compact !== false; // default true
           const unreadOnly = args.unreadOnly !== false; // default true
           // Server-side hard cap: 20 messages max, floor of 1
-          const limit = Math.max(1, Math.min(args.limit ?? 5, 20));
+          const requestedLimit = Number(args.limit ?? 5);
+          const requestedOffset = Number(args.offset ?? 0);
+          const limit = Number.isFinite(requestedLimit)
+            ? Math.max(1, Math.min(Math.floor(requestedLimit), 20))
+            : 5;
+          const offset = Number.isFinite(requestedOffset)
+            ? Math.max(0, Math.floor(requestedOffset))
+            : 0;
 
           // P1: Use dedicated ai_messages table with indexed queries (tenant-scoped)
-          const rawMessages = this.memoryManager.getMessages(targetAgentId, {
+          const page = this.memoryManager.getMessagesPage(targetAgentId, {
             messageType,
             since,
             limit,
+            offset,
             unreadOnly,
             markAsRead,
             tenantId,
             includeArchived,
+            includeSuperseded,
             compact,
             from,
           });
+          const rawMessages = page.messages;
 
           // Transform to response format — compact mode omits full content
           const formattedMessages = rawMessages.map((msg: any) => {
@@ -3400,7 +3714,8 @@ export class NeuralMCPServer {
                 messageType: msg.message_type,
                 priority: msg.priority,
                 timestamp: msg.created_at,
-                deliveryStatus: msgMeta.deliveryStatus || 'delivered',
+                deliveryStatus: this.messageDeliveryStatus(msg, msgMeta),
+                ...(msg.superseded_by ? { supersededBy: msg.superseded_by, supersededAt: msg.superseded_at } : {}),
               },
               relevance: 0.6,
               source: msg.from_agent,
@@ -3415,6 +3730,13 @@ export class NeuralMCPServer {
             }
             return base;
           });
+          const mutatingUnreadPage = markAsRead === true && unreadOnly;
+          const hasMore = mutatingUnreadPage
+            ? page.totalMatching > formattedMessages.length
+            : page.offset + formattedMessages.length < page.totalMatching;
+          const nextOffset = hasMore
+            ? (mutatingUnreadPage ? 0 : page.offset + formattedMessages.length)
+            : null;
 
           return {
             content: [
@@ -3422,22 +3744,25 @@ export class NeuralMCPServer {
                 type: 'text',
                 text: JSON.stringify({
                   agentId: targetAgentId,
-                  totalMessages: formattedMessages.length,
+                  totalMessages: page.totalMatching,
                   returnedMessages: formattedMessages.length,
+                  hasMore,
+                  nextOffset,
                   compact,
                   hint: compact ? 'Use get_message_detail(messageId) for full content' : undefined,
                   filters: {
                     messageType: messageType || 'all',
                     since: since || 'beginning',
                     unreadOnly,
+                    includeSuperseded: includeSuperseded === true,
                     from: from || undefined,
-                    limit
+                    limit: page.limit,
+                    offset: page.offset,
+                    includeArchived: includeArchived === true,
                   },
                   messages: formattedMessages,
                   metadata: {
-                    realTimeSync: true,
-                    crossPlatformAccess: true,
-                    searchPerformance: 'optimized'
+                    returnedAt: new Date().toISOString(),
                   }
                 }, null, 2),
               },
@@ -3477,6 +3802,7 @@ export class NeuralMCPServer {
                 messageType: msg.message_type,
                 priority: msg.priority,
                 timestamp: msg.created_at,
+                deliveryStatus: this.messageDeliveryStatus(msg, msg.metadata ? JSON.parse(msg.metadata) : {}),
                 readAt: msg.read_at,
                 summary: msg.summary,
                 metadata: msg.metadata ? JSON.parse(msg.metadata) : {},
@@ -3557,13 +3883,14 @@ export class NeuralMCPServer {
         }
 
         case 'archive_messages': {
-          const { agentId: archiveAgentId, olderThanDays, messageIds: archiveIds } = args;
+          const { agentId: archiveAgentId, olderThanDays, messageIds: archiveIds, markAsRead } = args;
           const byId = Array.isArray(archiveIds) && archiveIds.length > 0;
-          const archivedCount = this.memoryManager.archiveMessages(
+          const archiveResult = this.memoryManager.archiveMessagesDetailed(
             archiveAgentId,
             byId ? undefined : (olderThanDays ?? 30),
             tenantId,
-            byId ? archiveIds : undefined
+            byId ? archiveIds : undefined,
+            markAsRead === true
           );
           return {
             content: [{
@@ -3571,8 +3898,12 @@ export class NeuralMCPServer {
               text: JSON.stringify({
                 status: 'ok',
                 agentId: archiveAgentId,
-                archived: archivedCount,
+                archived: archiveResult.archived,
+                markedAsRead: archiveResult.markedAsRead,
+                remainingUnarchived: archiveResult.remainingUnarchived,
+                remainingUnread: archiveResult.remainingUnread,
                 scope: byId ? 'specific' : 'older_than_days',
+                markAsRead: markAsRead === true,
                 ...(byId ? { messageIds: archiveIds } : { olderThanDays: olderThanDays ?? 30 }),
               }, null, 2)
             }]
@@ -4380,61 +4711,68 @@ export class NeuralMCPServer {
   }
 
   // === HELPER METHODS ===
-  private async simulateRealTimeDelivery(messageData: any, messageId?: string) {
-    // Simulate WebSocket message delivery
+  private serializeWithTokenEstimate<T extends Record<string, any>>(payload: T, pretty: boolean = true): string {
+    const response: any = {
+      ...payload,
+      meta: {
+        ...(payload.meta && typeof payload.meta === 'object' ? payload.meta : {}),
+        responseCharacters: 0,
+        tokenEstimate: 0,
+        tokenEstimator: 'json_chars_div_4',
+      },
+    };
+
+    let serialized = '';
+    for (let pass = 0; pass < 8; pass++) {
+      serialized = JSON.stringify(response, null, pretty ? 2 : undefined);
+      const responseCharacters = serialized.length;
+      const tokenEstimate = Math.ceil(responseCharacters / 4);
+      if (response.meta.responseCharacters === responseCharacters &&
+          response.meta.tokenEstimate === tokenEstimate) {
+        return serialized;
+      }
+      response.meta.responseCharacters = responseCharacters;
+      response.meta.tokenEstimate = tokenEstimate;
+    }
+
+    return JSON.stringify(response, null, pretty ? 2 : undefined);
+  }
+
+  private messageDeliveryStatus(msg: any, metadata: any = {}): 'queued' | 'delivered' | 'read' | 'failed' {
+    if (msg?.read_at) return 'read';
+    if (msg?.delivered_at) return 'delivered';
+    if (metadata?.deliveryStatus === 'failed') return 'failed';
+    return 'queued';
+  }
+
+  private async simulateRealTimeDelivery(
+    messageData: any,
+    messageId?: string
+  ): Promise<{ deliveryStatus: 'queued' | 'delivered'; clientsNotified: number }> {
     console.log(`⚡ Real-time delivery: ${messageData.from} → ${messageData.to}`);
-    
-    // TODO: Implement actual WebSocket delivery
-    // This should:
-    // 1. Connect to MessageHub WebSocket server on port 3003
-    // 2. Send notification to target agent
-    // 3. Update deliveryStatus from 'pending' to 'delivered'
-    // 4. Handle offline agents with queue mechanism
-    
-    // For now, we'll update the message status in memory and persist it
+
     try {
-      // Update the message delivery status
       if (this.messageHub) {
-        await this.messageHub.notifyAgentOfMessage(messageData.to, {
+        const clientsNotified = await this.messageHub.notifyAgentOfMessage(messageData.to, {
           messageId: messageId || messageData.id,
           from: messageData.from,
           content: messageData.content,
           priority: messageData.priority,
+          tenantId: messageData.tenantId,
           timestamp: messageData.timestamp
         });
-        
-        // Update status to delivered
-        messageData.deliveryStatus = 'delivered';
-        console.log(`✅ Message delivered to ${messageData.to}`);
-      } else {
-        console.log(`⚠️ MessageHub not initialized - simulating delivery for ${messageData.to}`);
-        // Even without MessageHub, we'll mark as delivered for testing
-        messageData.deliveryStatus = 'delivered';
-      }
-
-      // Persist the updated delivery status to ai_messages
-      if (messageId) {
-        try {
-          await this.memoryManager.updateMessageStatus(messageId, messageData.deliveryStatus);
-          console.log(`💾 Updated delivery status to '${messageData.deliveryStatus}' for message ${messageId}`);
-        } catch (updateError) {
-          console.error(`❌ Failed to update delivery status in database:`, updateError);
+        if (clientsNotified > 0) {
+          messageData.deliveryStatus = 'delivered';
+          if (messageId) {
+            await this.memoryManager.updateMessageStatus(messageId, messageData.deliveryStatus);
+          }
+          return { deliveryStatus: 'delivered', clientsNotified };
         }
       }
     } catch (error) {
-      console.error(`❌ Failed to deliver message to ${messageData.to}:`, error);
-      messageData.deliveryStatus = 'failed';
-
-      // Persist the failed status to ai_messages
-      if (messageId) {
-        try {
-          await this.memoryManager.updateMessageStatus(messageId, 'failed');
-          console.log(`💾 Updated delivery status to 'failed' for message ${messageId}`);
-        } catch (updateError) {
-          console.error(`❌ Failed to update failed delivery status in database:`, updateError);
-        }
-      }
+      console.error(`❌ Push notification failed for ${messageData.to}; message remains queued:`, error);
     }
+    return { deliveryStatus: 'queued', clientsNotified: 0 };
   }
 
   private async simulateAgentRegistration(agentData: any) {

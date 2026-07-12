@@ -37,6 +37,8 @@ import {
   ensureReadAtColumn as ensureReadAtColumnImpl,
   ensureSummaryColumn as ensureSummaryColumnImpl,
   ensureArchivedAtColumn as ensureArchivedAtColumnImpl,
+  ensureMessageSupersessionColumns as ensureMessageSupersessionColumnsImpl,
+  ensureMessageDeliveryColumn as ensureMessageDeliveryColumnImpl,
 } from './schema.js';
 import {
   setSystemConnected,
@@ -56,9 +58,32 @@ interface GraphLookupEntry {
   weight: number;
 }
 
+interface MessageQueryOptions {
+  messageType?: string;
+  since?: string;
+  limit?: number;
+  offset?: number;
+  unreadOnly?: boolean;
+  markAsRead?: boolean;
+  tenantId?: string;
+  includeArchived?: boolean;
+  includeSuperseded?: boolean;
+  compact?: boolean;
+  from?: string;
+}
+
+interface MessagePage {
+  messages: any[];
+  totalMatching: number;
+  limit: number;
+  offset: number;
+}
+
 export class MemoryManager {
   /** ENG-2 index diet: hard cap on graph_lookup_keys rows per memory. */
   static readonly MAX_LOOKUP_KEYS_PER_MEMORY = 64;
+  /** Smallest honest context budget that can carry identity + budget metadata. */
+  static readonly MIN_CONTEXT_TOKEN_BUDGET = 128;
 
   private db: Database.Database;
   private dbPath: string;
@@ -595,7 +620,10 @@ export class MemoryManager {
         message_type TEXT DEFAULT 'info',
         priority TEXT DEFAULT 'normal',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        delivered_at DATETIME,
         read_at DATETIME,
+        superseded_by TEXT,
+        superseded_at DATETIME,
         metadata TEXT
       )
     `);
@@ -631,6 +659,13 @@ export class MemoryManager {
 
     // Migration 002: Users table + tenant_id/user_id on ai_messages & session_handoffs
     this.migrateUsersAndTenantColumns();
+
+    // Additive message supersession columns depend on tenant_id, archived_at,
+    // and read_at being available on upgraded databases.
+    ensureArchivedAtColumnImpl(this.db);
+    ensureReadAtColumnImpl(this.db);
+    ensureMessageSupersessionColumnsImpl(this.db);
+    ensureMessageDeliveryColumnImpl(this.db);
 
     // Create indexes after migrations to avoid referencing missing columns on older databases
     createIndexes(this.db);
@@ -1288,6 +1323,7 @@ export class MemoryManager {
    */
   async updateMessageStatus(messageId: string, deliveryStatus: string): Promise<void> {
     try {
+      this.ensureMessageDeliveryColumn();
       const row = this.db.prepare('SELECT metadata FROM ai_messages WHERE id = ?').get(messageId) as any;
       if (!row) {
         console.warn(`⚠️ updateMessageStatus: message ${messageId} not found in ai_messages`);
@@ -1295,8 +1331,15 @@ export class MemoryManager {
       }
       const metadata = row.metadata ? JSON.parse(row.metadata) : {};
       metadata.deliveryStatus = deliveryStatus;
-      metadata.deliveredAt = new Date().toISOString();
-      this.db.prepare('UPDATE ai_messages SET metadata = ? WHERE id = ?').run(JSON.stringify(metadata), messageId);
+      const now = new Date().toISOString();
+      if (deliveryStatus === 'delivered' || deliveryStatus === 'read') {
+        metadata.deliveredAt = metadata.deliveredAt || now;
+        this.db.prepare(
+          'UPDATE ai_messages SET metadata = ?, delivered_at = COALESCE(delivered_at, ?) WHERE id = ?'
+        ).run(JSON.stringify(metadata), now, messageId);
+      } else {
+        this.db.prepare('UPDATE ai_messages SET metadata = ? WHERE id = ?').run(JSON.stringify(metadata), messageId);
+      }
     } catch (err: any) {
       if (err.message?.includes('no such table')) {
         console.warn('⚠️ updateMessageStatus: ai_messages table not found, skipping');
@@ -1962,6 +2005,37 @@ export class MemoryManager {
     maxTokens: number = 4000,
     userId?: string | null
   ): any {
+    const requestedMaxTokens = Number.isFinite(maxTokens)
+      ? Math.max(1, Math.floor(maxTokens))
+      : 4000;
+    const minimumTokenBudget = MemoryManager.MIN_CONTEXT_TOKEN_BUDGET;
+    const effectiveMaxTokens = Math.max(requestedMaxTokens, minimumTokenBudget);
+    const minimalContextBundle = (truncationReason: string) => {
+      const minimal: any = {
+        identity: { learnings: [] },
+        meta: {
+          depth,
+          tokenEstimate: 0,
+          requestedMaxTokens,
+          effectiveMaxTokens,
+          minimumTokenBudget,
+          budgetFloorApplied: effectiveMaxTokens !== requestedMaxTokens,
+          truncated: true,
+          truncationReason,
+          sectionsDropped: ['contextBeyondIdentityEnvelope'],
+        },
+      };
+      const estimate = () => Math.ceil(JSON.stringify(minimal).length / 4);
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        minimal.meta.tokenEstimate = estimate();
+      }
+      return minimal;
+    };
+
+    if (effectiveMaxTokens !== requestedMaxTokens) {
+      return minimalContextBundle('minimum_identity_envelope');
+    }
+
     const bundle: any = {
       identity: { learnings: [] },
       user: null,
@@ -1969,8 +2043,19 @@ export class MemoryManager {
       handoff: null,
       unreadMessages: { count: 0, hint: 'Use get_ai_messages(agentId) to retrieve' },
       guardrails: [],
-      meta: { depth, tokenEstimate: 0, truncated: false, sectionsDropped: [] }
+      meta: {
+        depth,
+        tokenEstimate: 0,
+        requestedMaxTokens,
+        effectiveMaxTokens,
+        minimumTokenBudget,
+        budgetFloorApplied: effectiveMaxTokens !== requestedMaxTokens,
+        truncated: false,
+        truncationReason: null,
+        sectionsDropped: [],
+      }
     };
+    let previewMessageIds: string[] = [];
 
     // --- HOT tier (always included) ---
 
@@ -2016,17 +2101,20 @@ export class MemoryManager {
       this.ensureReadAtColumn();
       this.ensureArchivedAtColumn();
       this.ensureSummaryColumn();
+      this.ensureMessageSupersessionColumns();
+      this.ensureMessageDeliveryColumn();
       const previewLimit = 5;
       const countRow = this.db.prepare(
-        'SELECT COUNT(*) as cnt FROM ai_messages WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL'
+        'SELECT COUNT(*) as cnt FROM ai_messages WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL AND superseded_at IS NULL'
       ).get(agentId, tenantId) as any;
       const unreadCount = countRow?.cnt ?? 0;
       const previewRows = unreadCount > 0 ? this.db.prepare(
         `SELECT id, from_agent, message_type, priority, created_at, summary, content
          FROM ai_messages
-         WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL
+         WHERE to_agent = ? AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL AND superseded_at IS NULL
          ORDER BY created_at DESC LIMIT ?`
       ).all(agentId, tenantId, previewLimit) as any[] : [];
+      previewMessageIds = previewRows.map((row: any) => row.id);
       const messages = previewRows.map((m: any) => {
         const raw = (typeof m.summary === 'string' && m.summary.length > 0) ? m.summary : (m.content || '');
         const preview = raw.length > 200 ? raw.slice(0, 200) + '…' : raw;
@@ -2179,85 +2267,168 @@ export class MemoryManager {
       } catch { /* ok */ }
     }
 
-    // --- Task 1400: Priority-based token budget enforcement ---
+    // --- Priority-based token budget enforcement ---
     // Priority order (lowest priority dropped first):
     //   summary < messages < observations < guardrails < handoff < identity
     const estimateTokens = () => Math.ceil(JSON.stringify(bundle).length / 4);
-    bundle.meta.tokenEstimate = estimateTokens();
+    const refreshTokenEstimate = () => {
+      let estimate = estimateTokens();
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        bundle.meta.tokenEstimate = estimate;
+        const next = estimateTokens();
+        if (next === estimate) break;
+        estimate = next;
+      }
+      bundle.meta.tokenEstimate = estimate;
+      return estimate;
+    };
+    const overBudget = () => refreshTokenEstimate() > effectiveMaxTokens;
+    const sectionsDropped = bundle.meta.sectionsDropped as string[];
+    const noteDropped = (section: string) => {
+      if (!sectionsDropped.includes(section)) sectionsDropped.push(section);
+    };
 
-    if (bundle.meta.tokenEstimate > maxTokens) {
+    refreshTokenEstimate();
+
+    if (bundle.meta.tokenEstimate > effectiveMaxTokens) {
       bundle.meta.truncated = true;
-      const sectionsDropped: string[] = [];
+      bundle.meta.truncationReason = 'content_trimmed';
 
       // 1. Drop COLD observations + entities first (lowest priority bulk)
-      if (bundle.project?.allObservations && estimateTokens() > maxTokens) {
+      if (bundle.project?.allObservations && overBudget()) {
         bundle.project.allObservations = bundle.project.allObservations.slice(0, 3);
-        if (estimateTokens() > maxTokens) {
+        noteDropped('allObservations(trimmed)');
+        if (overBudget()) {
           delete bundle.project.allObservations;
-          sectionsDropped.push('allObservations');
+          noteDropped('allObservations');
         }
       }
-      if (bundle.project?.allEntities && estimateTokens() > maxTokens) {
+      if (bundle.project?.allEntities && overBudget()) {
         delete bundle.project.allEntities;
-        sectionsDropped.push('allEntities');
+        noteDropped('allEntities');
       }
 
       // 2. Drop project summary (low priority)
-      if (bundle.project?._summaryWrapped && estimateTokens() > maxTokens) {
+      if (bundle.project?._summaryWrapped && overBudget()) {
         delete bundle.project._summaryWrapped;
-        sectionsDropped.push('projectSummary');
+        noteDropped('projectSummary');
       }
 
       // 2b. Drop inlined message previews (keep count + hint). Per the priority
       // order, message bodies are low — trim them before observations/guardrails.
-      if (bundle.unreadMessages?.messages?.length > 0 && estimateTokens() > maxTokens) {
+      if (bundle.unreadMessages?.messages?.length > 0 && overBudget()) {
         const total = bundle.unreadMessages.count;
         delete bundle.unreadMessages.messages;
         bundle.unreadMessages.truncated = total > 0;
         bundle.unreadMessages.hint = 'Previews omitted for token budget. Use get_ai_messages(agentId) to retrieve.';
-        sectionsDropped.push('messagePreviews');
+        noteDropped('messagePreviews');
       }
 
       // 3. Drop recent decisions
-      if (bundle.project?.recentDecisions && estimateTokens() > maxTokens) {
+      if (bundle.project?.recentDecisions && overBudget()) {
         delete bundle.project.recentDecisions;
-        sectionsDropped.push('recentDecisions');
+        noteDropped('recentDecisions');
       }
 
       // 4. Drop recent observations (warm tier)
-      if (bundle.project?.recentObservations && estimateTokens() > maxTokens) {
+      if (bundle.project?.recentObservations && overBudget()) {
         bundle.project.recentObservations = bundle.project.recentObservations.slice(0, 1);
-        if (estimateTokens() > maxTokens) {
+        noteDropped('recentObservations(trimmed)');
+        if (overBudget()) {
           delete bundle.project.recentObservations;
-          sectionsDropped.push('recentObservations');
+          noteDropped('recentObservations');
         }
       }
 
       // 5. Drop HOT observations
-      if (bundle.project?.hotObservations && estimateTokens() > maxTokens) {
+      if (bundle.project?.hotObservations && overBudget()) {
         delete bundle.project.hotObservations;
-        sectionsDropped.push('hotObservations');
+        noteDropped('hotObservations');
       }
 
       // 6. Drop guardrails (higher priority than observations, but lower than handoff/identity)
-      if (bundle.guardrails?.length > 0 && estimateTokens() > maxTokens) {
+      if (bundle.guardrails?.length > 0 && overBudget()) {
         bundle.guardrails = bundle.guardrails.slice(0, 2);
-        if (estimateTokens() > maxTokens) {
+        noteDropped('guardrails(trimmed)');
+        if (overBudget()) {
           bundle.guardrails = [];
-          sectionsDropped.push('guardrails');
+          noteDropped('guardrails');
         }
       }
 
-      // 7. Trim identity learnings (never drop identity entirely)
-      if (bundle.identity?.learnings?.length > 5 && estimateTokens() > maxTokens) {
-        bundle.identity.learnings = bundle.identity.learnings.slice(-5);
-        sectionsDropped.push('learnings(trimmed)');
+      // 7. Every remaining non-identity section yields before agent identity.
+      if (bundle.project?._entityWrapped && overBudget()) {
+        delete bundle.project._entityWrapped;
+        noteDropped('projectEntity');
+      }
+      if (bundle.unreadMessages && overBudget()) {
+        delete bundle.unreadMessages;
+        noteDropped('unreadMessages');
+      }
+      if (bundle.project !== undefined && overBudget()) {
+        delete bundle.project;
+        noteDropped('project');
+      }
+      if (bundle.handoff && overBudget()) {
+        bundle.handoff = null;
+        noteDropped('handoff');
+      }
+      if (bundle.user && overBudget()) {
+        bundle.user = null;
+        noteDropped('user');
+      }
+      if (bundle.handoff !== undefined && overBudget()) {
+        delete bundle.handoff;
+        noteDropped('handoffEnvelope');
+      }
+      if (bundle.user !== undefined && overBudget()) {
+        delete bundle.user;
+        noteDropped('userEnvelope');
+      }
+      if (bundle.guardrails !== undefined && overBudget()) {
+        delete bundle.guardrails;
+        noteDropped('guardrailsEnvelope');
       }
 
-      bundle.meta.sectionsDropped = sectionsDropped;
-      bundle.meta.tokenEstimate = estimateTokens();
+      // 8. Trim identity payloads while preserving the identity object itself.
+      if (bundle.identity?.learnings?.length > 5 && overBudget()) {
+        bundle.identity.learnings = bundle.identity.learnings.slice(-5);
+        noteDropped('learnings(trimmed)');
+      }
+      while (bundle.identity?.learnings?.length > 0 && overBudget()) {
+        bundle.identity.learnings.shift();
+        noteDropped('learnings(trimmed)');
+      }
+      if (bundle.identity?._preferencesWrapped && overBudget()) {
+        delete bundle.identity._preferencesWrapped;
+        noteDropped('preferences');
+      }
+
+      refreshTokenEstimate();
     }
 
+    // The normal trimming path preserves as much context as possible. This
+    // final fallback makes the ceiling mechanically hard even if an unusually
+    // large wrapper or future field slips through the priority list.
+    if (refreshTokenEstimate() > effectiveMaxTokens) {
+      return minimalContextBundle('content_trimmed_to_identity_envelope');
+    }
+
+    refreshTokenEstimate();
+    const returnedPreviewIds = new Set(
+      Array.isArray(bundle.unreadMessages?.messages)
+        ? bundle.unreadMessages.messages.map((message: any) => message.id)
+        : []
+    );
+    const deliveredPreviewIds = previewMessageIds.filter((id) => returnedPreviewIds.has(id));
+    if (deliveredPreviewIds.length > 0) {
+      try {
+        const placeholders = deliveredPreviewIds.map(() => '?').join(',');
+        this.db.prepare(
+          `UPDATE ai_messages SET delivered_at = ? WHERE id IN (${placeholders}) AND delivered_at IS NULL`
+        ).run(new Date().toISOString(), ...deliveredPreviewIds);
+      } catch { /* ai_messages table may not exist */ }
+    }
     return bundle;
   }
 
@@ -2370,7 +2541,8 @@ export class MemoryManager {
     priority: string = 'normal',
     metadata?: Record<string, any>,
     tenantId: string = 'default',
-    context?: RequestContext
+    context?: RequestContext,
+    supersedes: string[] = []
   ): Promise<string> {
     const id = uuidv4();
     const fromActorType = context?.authType || null;
@@ -2400,11 +2572,48 @@ export class MemoryManager {
 
     try {
       this.ensureSummaryColumn();
+      this.ensureMessageSupersessionColumns();
+      this.ensureMessageDeliveryColumn();
+      const storedMetadata = {
+        ...(metadata || {}),
+        deliveryStatus: metadata?.deliveryStatus || 'queued',
+      };
       const stmt = this.db.prepare(`
         INSERT INTO ai_messages (id, from_agent, from_source, to_agent, content, message_type, priority, metadata, tenant_id, from_actor_type, from_actor_id, summary)
         VALUES (?, ?, 'direct', ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
-      stmt.run(id, from, to, storedContent, messageType, priority, JSON.stringify(metadata || {}), tenantId, fromActorType, fromActorId, summary);
+      const requestedSupersedes = Array.from(new Set(
+        supersedes.filter((candidate) => typeof candidate === 'string' && candidate.trim()).map((candidate) => candidate.trim())
+      )).slice(0, 100);
+      const senderAliases = this.getAgentAliases(from);
+      const recipientAliases = this.getAgentAliases(to);
+      const write = this.db.transaction(() => {
+        stmt.run(id, from, to, storedContent, messageType, priority, JSON.stringify(storedMetadata), tenantId, fromActorType, fromActorId, summary);
+        if (requestedSupersedes.length === 0) return;
+
+        const idPlaceholders = requestedSupersedes.map(() => '?').join(',');
+        const senderPlaceholders = senderAliases.map(() => '?').join(',');
+        const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
+        this.db.prepare(
+          `UPDATE ai_messages
+           SET superseded_by = ?, superseded_at = ?
+           WHERE id IN (${idPlaceholders})
+             AND tenant_id = ?
+             AND from_agent IN (${senderPlaceholders})
+             AND to_agent IN (${recipientPlaceholders})
+             AND superseded_at IS NULL
+             AND id <> ?`
+        ).run(
+          id,
+          new Date().toISOString(),
+          ...requestedSupersedes,
+          tenantId,
+          ...senderAliases,
+          ...recipientAliases,
+          id
+        );
+      });
+      write();
     } catch (err: any) {
       // Fallback: ai_messages table may not exist yet (pre-migration)
       if (err.message?.includes('no such table')) {
@@ -2420,7 +2629,7 @@ export class MemoryManager {
           messageType,
           priority,
           timestamp: new Date().toISOString(),
-          deliveryStatus: 'delivered',
+          deliveryStatus: 'queued',
           metadata: metadata || {},
         }, 'shared', 'ai_message', tenantId, context);
       }
@@ -2457,19 +2666,22 @@ export class MemoryManager {
    */
   getMessages(
     agentId: string,
-    options: {
-      messageType?: string;
-      since?: string;
-      limit?: number;
-      unreadOnly?: boolean;
-      markAsRead?: boolean;
-      tenantId?: string;
-      includeArchived?: boolean;
-      compact?: boolean;
-      from?: string;
-    } = {}
+    options: MessageQueryOptions = {}
   ): any[] {
-    const limit = options.limit || 5;
+    return this.getMessagesPage(agentId, options).messages;
+  }
+
+  /**
+   * Get one deterministic page of messages plus the true count for the same
+   * filter set. getMessages remains as the array-only compatibility wrapper.
+   */
+  getMessagesPage(agentId: string, options: MessageQueryOptions = {}): MessagePage {
+    const limit = Number.isFinite(options.limit)
+      ? Math.max(1, Math.floor(options.limit!))
+      : 5;
+    const offset = Number.isFinite(options.offset)
+      ? Math.max(0, Math.floor(options.offset!))
+      : 0;
     const tenantId = options.tenantId || 'default';
     const compact = options.compact !== false; // default true
     const recipientAliases = this.getAgentAliases(agentId);
@@ -2479,57 +2691,85 @@ export class MemoryManager {
       // Ensure read_at + archived_at + summary columns exist (idempotent migration)
       this.ensureReadAtColumn();
       this.ensureArchivedAtColumn();
+      this.ensureMessageSupersessionColumns();
       this.ensureSummaryColumn();
+      this.ensureMessageDeliveryColumn();
 
       // Compact mode: exclude full content column to reduce token consumption
       const columns = compact
-        ? 'id, from_agent, to_agent, message_type, priority, created_at, read_at, archived_at, summary, metadata'
+        ? 'id, from_agent, to_agent, message_type, priority, created_at, delivered_at, read_at, archived_at, superseded_by, superseded_at, summary, metadata'
         : '*';
       const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
-      let query = `SELECT ${columns} FROM ai_messages WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ?`;
+      let where = `to_agent IN (${recipientPlaceholders}) AND tenant_id = ?`;
       const params: any[] = [...recipientAliases, tenantId];
 
       // Task 1200: Exclude archived by default
       if (!options.includeArchived) {
-        query += ' AND archived_at IS NULL';
+        where += ' AND archived_at IS NULL';
+      }
+      if (!options.includeSuperseded) {
+        where += ' AND superseded_at IS NULL';
       }
 
       if (options.messageType) {
-        query += ' AND message_type = ?';
+        where += ' AND message_type = ?';
         params.push(options.messageType);
       }
       if (options.since) {
-        query += ' AND created_at >= ?';
+        where += ' AND created_at >= ?';
         params.push(options.since);
       }
       if (options.unreadOnly) {
-        query += ' AND read_at IS NULL';
+        where += ' AND read_at IS NULL';
       }
       if (options.from) {
         const senderPlaceholders = senderAliases.map(() => '?').join(',');
-        query += ` AND from_agent IN (${senderPlaceholders})`;
+        where += ` AND from_agent IN (${senderPlaceholders})`;
         params.push(...senderAliases);
       }
 
-      query += ' ORDER BY created_at DESC LIMIT ?';
-      params.push(limit);
+      const countRow = this.db.prepare(
+        `SELECT COUNT(*) AS count FROM ai_messages WHERE ${where}`
+      ).get(...params) as { count?: number } | undefined;
+      const totalMatching = Number(countRow?.count || 0);
 
-      const messages = this.db.prepare(query).all(...params) as any[];
+      const messages = this.db.prepare(
+        `SELECT ${columns} FROM ai_messages WHERE ${where}
+         ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+      ).all(...params, limit, offset) as any[];
+
+      // A recipient fetching a message is the first delivery fact we can
+      // always prove, even when no WebSocket client was connected at send time.
+      if (messages.length > 0) {
+        const now = new Date().toISOString();
+        const ids = messages.map((m: any) => m.id);
+        const placeholders = ids.map(() => '?').join(',');
+        this.db.prepare(
+          `UPDATE ai_messages SET delivered_at = ? WHERE id IN (${placeholders}) AND delivered_at IS NULL`
+        ).run(now, ...ids);
+        for (const message of messages) {
+          if (!message.delivered_at) message.delivered_at = now;
+        }
+      }
 
       // Mark retrieved messages as read if requested
       if (options.markAsRead && messages.length > 0) {
+        const now = new Date().toISOString();
         const ids = messages.map((m: any) => m.id);
         const placeholders = ids.map(() => '?').join(',');
         this.db.prepare(
           `UPDATE ai_messages SET read_at = ? WHERE id IN (${placeholders}) AND read_at IS NULL`
-        ).run(new Date().toISOString(), ...ids);
+        ).run(now, ...ids);
+        for (const message of messages) {
+          if (!message.read_at) message.read_at = now;
+        }
       }
 
-      return messages;
+      return { messages, totalMatching, limit, offset };
     } catch (err: any) {
       if (err.message?.includes('no such table')) {
         console.warn('⚠️ ai_messages table not found, falling back to shared_memory(ai_message)');
-        return this.getLegacyMessages(agentId, options);
+        return this.getLegacyMessagesPage(agentId, options);
       }
       throw err;
     }
@@ -2539,76 +2779,97 @@ export class MemoryManager {
    * Legacy fallback: read ai_message rows from shared_memory (pre-migration schema).
    * These rows do not track read/archive state, so unreadOnly/includeArchived are best-effort.
    */
-  private getLegacyMessages(
+  private getLegacyMessagesPage(
     agentId: string,
-    options: {
-      messageType?: string;
-      since?: string;
-      limit?: number;
-      unreadOnly?: boolean;
-      markAsRead?: boolean;
-      tenantId?: string;
-      includeArchived?: boolean;
-      compact?: boolean;
-      from?: string;
-    } = {}
-  ): any[] {
-    const limit = options.limit || 5;
+    options: MessageQueryOptions = {}
+  ): MessagePage {
+    const limit = Number.isFinite(options.limit)
+      ? Math.max(1, Math.floor(options.limit!))
+      : 5;
+    const offset = Number.isFinite(options.offset)
+      ? Math.max(0, Math.floor(options.offset!))
+      : 0;
     const tenantId = options.tenantId || 'default';
     const recipientAliases = this.getAgentAliases(agentId);
     const senderAliases = options.from ? this.getAgentAliases(options.from) : [];
 
-    let rows: any[] = [];
     try {
-      rows = this.db.prepare(
+      const safeContent = `CASE WHEN json_valid(content) THEN content ELSE '{}' END`;
+      const recipientExpression = `LOWER(TRIM(COALESCE(
+        json_extract(${safeContent}, '$.to'),
+        json_extract(${safeContent}, '$.target'),
+        json_extract(${safeContent}, '$.to_agent'),
+        ''
+      )))`;
+      const senderExpression = `LOWER(TRIM(COALESCE(
+        json_extract(${safeContent}, '$.from'),
+        json_extract(${safeContent}, '$.from_agent'),
+        created_by,
+        ''
+      )))`;
+      const messageTypeExpression = `COALESCE(
+        json_extract(${safeContent}, '$.messageType'),
+        json_extract(${safeContent}, '$.type'),
+        'info'
+      )`;
+      const timestampExpression = `COALESCE(json_extract(${safeContent}, '$.timestamp'), created_at)`;
+      const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
+      let where = `tenant_id = ? AND memory_type = 'ai_message' AND json_valid(content)
+        AND ${recipientExpression} IN (${recipientPlaceholders})`;
+      const params: any[] = [tenantId, ...recipientAliases];
+
+      if (options.messageType) {
+        where += ` AND ${messageTypeExpression} = ?`;
+        params.push(options.messageType);
+      }
+      if (options.since) {
+        where += ` AND ${timestampExpression} >= ?`;
+        params.push(options.since);
+      }
+      if (options.from) {
+        const senderPlaceholders = senderAliases.map(() => '?').join(',');
+        where += ` AND ${senderExpression} IN (${senderPlaceholders})`;
+        params.push(...senderAliases);
+      }
+
+      const countRow = this.db.prepare(
+        `SELECT COUNT(*) AS count FROM shared_memory WHERE ${where}`
+      ).get(...params) as { count?: number } | undefined;
+      const totalMatching = Number(countRow?.count || 0);
+      const rows = this.db.prepare(
         `SELECT id, content, created_by, created_at
          FROM shared_memory
-         WHERE tenant_id = ? AND memory_type = 'ai_message'
-         ORDER BY created_at DESC
-         LIMIT 500`
-      ).all(tenantId) as any[];
-    } catch {
-      return [];
-    }
+         WHERE ${where}
+         ORDER BY created_at DESC, id DESC
+         LIMIT ? OFFSET ?`
+      ).all(...params, limit, offset) as any[];
 
-    const filtered = rows
-      .map((row: any) => {
-        let payload: any = {};
-        try {
-          payload = JSON.parse(row.content || '{}');
-        } catch {
-          payload = {};
-        }
-
-        const toAgent = payload.to || payload.target || payload.to_agent;
-        const fromAgent = payload.from || payload.from_agent || row.created_by;
+      const messages = rows.map((row: any) => {
+        const payload = JSON.parse(row.content || '{}');
         const content = String(payload.content ?? payload.message ?? '');
-        const messageType = String(payload.messageType ?? payload.type ?? 'info');
-        const priority = String(payload.priority ?? 'normal');
-        const createdAt = payload.timestamp || row.created_at;
-
         return {
           id: row.id,
-          from_agent: fromAgent,
-          to_agent: toAgent,
+          from_agent: payload.from || payload.from_agent || row.created_by,
+          to_agent: payload.to || payload.target || payload.to_agent,
           content,
-          message_type: messageType,
-          priority,
-          created_at: createdAt,
+          message_type: String(payload.messageType ?? payload.type ?? 'info'),
+          priority: String(payload.priority ?? 'normal'),
+          created_at: payload.timestamp || row.created_at,
+          delivered_at: null,
           read_at: null,
           archived_at: null,
+          superseded_by: null,
+          superseded_at: null,
           summary: MemoryManager.generateSummary(content),
           metadata: JSON.stringify(payload.metadata || {}),
         };
-      })
-      .filter((msg: any) => recipientAliases.includes(this.comparableAgentId(msg.to_agent)))
-      .filter((msg: any) => !options.messageType || msg.message_type === options.messageType)
-      .filter((msg: any) => !options.since || String(msg.created_at) >= String(options.since))
-      .filter((msg: any) => !options.from || senderAliases.includes(this.comparableAgentId(msg.from_agent)))
-      .slice(0, limit);
+      });
 
-    // markAsRead is ignored in legacy mode (no read_at column).
-    return filtered;
+      // markAsRead is ignored in legacy mode (no read_at column).
+      return { messages, totalMatching, limit, offset };
+    } catch {
+      return { messages: [], totalMatching: 0, limit, offset };
+    }
   }
 
   /**
@@ -2625,6 +2886,7 @@ export class MemoryManager {
     try {
       this.ensureReadAtColumn();
       this.ensureSummaryColumn();
+      this.ensureMessageDeliveryColumn();
       // Scope by tenant + recipient to prevent cross-tenant/cross-agent reads
       let query = 'SELECT * FROM ai_messages WHERE id = ? AND tenant_id = ?';
       const params: any[] = [messageId, tenantId];
@@ -2635,9 +2897,16 @@ export class MemoryManager {
       }
       const msg = this.db.prepare(query).get(...params) as any;
       if (!msg) return null;
+      const now = new Date().toISOString();
+      if (!msg.delivered_at) {
+        this.db.prepare('UPDATE ai_messages SET delivered_at = ? WHERE id = ? AND delivered_at IS NULL')
+          .run(now, messageId);
+        msg.delivered_at = now;
+      }
       if (markAsRead && !msg.read_at) {
         this.db.prepare('UPDATE ai_messages SET read_at = ? WHERE id = ? AND read_at IS NULL')
-          .run(new Date().toISOString(), messageId);
+          .run(now, messageId);
+        msg.read_at = now;
       }
       // Resolve auto-split pointer: if content references an entity, fetch the full content
       const pointerMatch = msg.content?.match(/^Full content stored as entity "([^"]+)"/);
@@ -2889,7 +3158,7 @@ export class MemoryManager {
       const row = this.db.prepare(
         `SELECT COUNT(*) as cnt
          FROM ai_messages
-         WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL`
+         WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND read_at IS NULL AND archived_at IS NULL AND superseded_at IS NULL`
       ).get(...recipientAliases, tenantId) as any;
       return row?.cnt ?? 0;
     } catch {
@@ -2952,6 +3221,18 @@ export class MemoryManager {
     if (ensureArchivedAtColumnImpl(this.db)) this._archivedAtColumnChecked = true;
   }
 
+  private _messageSupersessionColumnsChecked = false;
+  private ensureMessageSupersessionColumns(): void {
+    if (this._messageSupersessionColumnsChecked) return;
+    if (ensureMessageSupersessionColumnsImpl(this.db)) this._messageSupersessionColumnsChecked = true;
+  }
+
+  private _messageDeliveryColumnChecked = false;
+  private ensureMessageDeliveryColumn(): void {
+    if (this._messageDeliveryColumnChecked) return;
+    if (ensureMessageDeliveryColumnImpl(this.db)) this._messageDeliveryColumnChecked = true;
+  }
+
   /**
    * Task 1200: Mark specific messages as read, or all unread messages for an agent.
    * Returns count of messages marked.
@@ -2962,6 +3243,7 @@ export class MemoryManager {
     tenantId: string = 'default'
   ): number {
     this.ensureReadAtColumn();
+    this.ensureMessageDeliveryColumn();
     const now = new Date().toISOString();
     const recipientAliases = this.getAgentAliases(agentId);
     const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
@@ -2971,17 +3253,17 @@ export class MemoryManager {
       const placeholders = messageIds.map(() => '?').join(',');
       const result = this.db.prepare(
         `UPDATE ai_messages
-         SET read_at = ?
+         SET read_at = ?, delivered_at = COALESCE(delivered_at, ?)
          WHERE id IN (${placeholders}) AND to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND read_at IS NULL`
-      ).run(now, ...messageIds, ...recipientAliases, tenantId);
+      ).run(now, now, ...messageIds, ...recipientAliases, tenantId);
       return result.changes;
     } else {
       // Mark all unread for this agent
       const result = this.db.prepare(
         `UPDATE ai_messages
-         SET read_at = ?
+         SET read_at = ?, delivered_at = COALESCE(delivered_at, ?)
          WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND read_at IS NULL`
-      ).run(now, ...recipientAliases, tenantId);
+      ).run(now, now, ...recipientAliases, tenantId);
       return result.changes;
     }
   }
@@ -2998,30 +3280,85 @@ export class MemoryManager {
     tenantId: string = 'default',
     messageIds?: string[]
   ): number {
+    return this.archiveMessagesDetailed(
+      agentId,
+      olderThanDays,
+      tenantId,
+      messageIds,
+      false
+    ).archived;
+  }
+
+  /**
+   * Archive a scoped message set and optionally acknowledge that exact set in
+   * one SQLite transaction. The existing archiveMessages() number-returning
+   * wrapper remains for internal compatibility.
+   */
+  archiveMessagesDetailed(
+    agentId: string,
+    olderThanDays?: number,
+    tenantId: string = 'default',
+    messageIds?: string[],
+    markAsRead: boolean = false
+  ): {
+    archived: number;
+    markedAsRead: number;
+    remainingUnarchived: number;
+    remainingUnread: number;
+  } {
+    this.ensureReadAtColumn();
     this.ensureArchivedAtColumn();
+    this.ensureMessageDeliveryColumn();
+    this.ensureMessageSupersessionColumns();
     const now = new Date().toISOString();
     const recipientAliases = this.getAgentAliases(agentId);
     const recipientPlaceholders = recipientAliases.map(() => '?').join(',');
+    const scopedIds = Array.isArray(messageIds) ? messageIds : [];
+    const byId = scopedIds.length > 0;
+    let targetWhere: string;
+    let targetParams: any[];
 
-    if (messageIds && messageIds.length > 0) {
-      // Archive specific messages by id (still scoped to this agent's inbox).
-      const placeholders = messageIds.map(() => '?').join(',');
-      const result = this.db.prepare(
-        `UPDATE ai_messages
-         SET archived_at = ?
-         WHERE id IN (${placeholders}) AND to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND archived_at IS NULL`
-      ).run(now, ...messageIds, ...recipientAliases, tenantId);
-      return result.changes;
+    if (byId) {
+      const placeholders = scopedIds.map(() => '?').join(',');
+      targetWhere = `id IN (${placeholders}) AND to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND archived_at IS NULL`;
+      targetParams = [...scopedIds, ...recipientAliases, tenantId];
+    } else {
+      const cutoff = new Date(Date.now() - (olderThanDays ?? 30) * 86400000).toISOString();
+      targetWhere = `to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND created_at < ? AND archived_at IS NULL`;
+      targetParams = [...recipientAliases, tenantId, cutoff];
     }
 
-    // Otherwise archive by age cutoff (default 30 days).
-    const cutoff = new Date(Date.now() - (olderThanDays ?? 30) * 86400000).toISOString();
-    const result = this.db.prepare(
-      `UPDATE ai_messages
-       SET archived_at = ?
-       WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND created_at < ? AND archived_at IS NULL`
-    ).run(now, ...recipientAliases, tenantId, cutoff);
-    return result.changes;
+    const run = this.db.transaction(() => {
+      let markedAsRead = 0;
+      if (markAsRead) {
+        markedAsRead = this.db.prepare(
+          `UPDATE ai_messages
+           SET read_at = ?, delivered_at = COALESCE(delivered_at, ?)
+           WHERE ${targetWhere} AND read_at IS NULL`
+        ).run(now, now, ...targetParams).changes;
+      }
+
+      const archived = this.db.prepare(
+        `UPDATE ai_messages SET archived_at = ? WHERE ${targetWhere}`
+      ).run(now, ...targetParams).changes;
+
+      const remaining = this.db.prepare(
+        `SELECT
+           COUNT(*) AS unarchived,
+           SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS unread
+         FROM ai_messages
+         WHERE to_agent IN (${recipientPlaceholders}) AND tenant_id = ? AND archived_at IS NULL AND superseded_at IS NULL`
+      ).get(...recipientAliases, tenantId) as any;
+
+      return {
+        archived,
+        markedAsRead,
+        remainingUnarchived: Number(remaining?.unarchived || 0),
+        remainingUnread: Number(remaining?.unread || 0),
+      };
+    });
+
+    return run();
   }
 
   // ─── Task 1100: User Profile methods ───

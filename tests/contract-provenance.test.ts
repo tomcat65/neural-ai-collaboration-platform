@@ -171,7 +171,7 @@ describe('Trusted Provenance (Phase B)', () => {
       });
 
       const json = await res.json();
-      expect(json.status).toBe('delivered');
+      expect(json.status).toBe('queued');
       expect(json.messageId).toBeTruthy();
 
       // Verify message is retrievable

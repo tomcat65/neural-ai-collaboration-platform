@@ -260,6 +260,12 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
           enum: ['low', 'normal', 'high', 'urgent'],
           description: 'Message priority',
           default: 'normal'
+        },
+        supersedes: {
+          type: 'array',
+          items: { type: 'string' },
+          maxItems: 100,
+          description: 'Older message IDs this message replaces. Only messages from the same sender to the same recipient in the same tenant are superseded.'
         }
       },
       required: ['content', 'from']
@@ -267,13 +273,14 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   },
   get_ai_messages: {
     name: 'get_ai_messages',
-    description: 'Retrieve messages for an AI agent with filtering and pagination. IMPORTANT: For routine inbox checks, just pass agentId — the defaults (unreadOnly: true, compact: true, limit: 5) will return your latest unread messages. Do NOT use the since filter for inbox checks; it often causes missed messages when the timestamp is stale. SHARED INBOX NOTE: When monitoring another agent\'s inbox (e.g. claude-desktop checking codex), use unreadOnly: false — the target agent marks its own messages read during execution, so unreadOnly: true returns 0.',
+    description: 'Retrieve messages for an AI agent with filtering and real offset pagination. The response reports the true total matching the filters plus hasMore/nextOffset. IMPORTANT: For routine inbox checks, just pass agentId — the defaults (unreadOnly: true, compact: true, limit: 5, offset: 0) return the latest unread messages. Do NOT use the since filter for inbox checks; it often causes missed messages when the timestamp is stale. SHARED INBOX NOTE: When monitoring another agent\'s inbox (e.g. claude-desktop checking codex), use unreadOnly: false — the target agent marks its own messages read during execution, so unreadOnly: true returns 0.',
     inputSchema: {
       type: 'object',
       properties: {
         agentId: { type: 'string', description: 'AI agent ID to get messages for' },
         from: { type: 'string', description: 'Filter by sender agent ID (e.g. "codex", "claude-code-sm")' },
-        limit: { type: 'number', description: 'Maximum number of messages (server hard cap: 20)', default: 5 },
+        limit: { type: 'integer', minimum: 1, maximum: 20, description: 'Maximum number of messages (server hard cap: 20)', default: 5 },
+        offset: { type: 'integer', minimum: 0, description: 'Skip this many matching messages. Use nextOffset from the previous response. When unreadOnly and markAsRead are both true, nextOffset resets to 0 while unread matches remain because each returned page leaves the unread result set.', default: 0 },
         messageType: {
           type: 'string',
           enum: ['info', 'task', 'query', 'response', 'collaboration'],
@@ -283,7 +290,8 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
         unreadOnly: { type: 'boolean', description: 'Only return unread messages (default: true). This is the recommended way to check your inbox. Set to false when monitoring a shared inbox — other agents mark their own messages read.', default: true },
         compact: { type: 'boolean', description: 'Return summaries only without full content (use get_message_detail for full content)', default: true },
         markAsRead: { type: 'boolean', description: 'Mark returned messages as read after retrieval', default: false },
-        includeArchived: { type: 'boolean', description: 'Include archived messages in results (excluded by default)', default: false }
+        includeArchived: { type: 'boolean', description: 'Include archived messages in results (excluded by default)', default: false },
+        includeSuperseded: { type: 'boolean', description: 'Include messages replaced by newer messages (excluded by default)', default: false }
       },
       required: ['agentId']
     }
@@ -385,7 +393,7 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   },
   search_entities: {
     name: 'search_entities',
-    description: 'Advanced federated search across graph, vectors, and cache. AGENT TIP: for a KNOWN entity/project name, pass searchType=exact — it is fast, precise, and name-anchored; hybrid/semantic is a bounded, lower-precision supplement best for fuzzy/exploratory queries (entity & observation hits are ranked above ai_message chatter). Returns compact summaries by default (use get_entity_detail for full content). Supports pagination via offset/nextOffset and filtering by memoryType/agentFilter.',
+    description: 'Advanced federated search across graph, vectors, and cache. AGENT TIP: for a KNOWN entity/project name, pass searchType=exact — it is fast, precise, and name-anchored; hybrid/semantic is a bounded, lower-precision supplement best for fuzzy/exploratory queries (entity & observation hits are ranked above ai_message chatter). Returns compact summaries by default (use get_entity_detail for full content). Supports pagination, relevance/recency ordering, and entity/memory-type scoping.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -397,6 +405,21 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
         maxResponseSize: { type: 'number', description: 'Maximum response size in characters (budget enforcement)', default: 40000 },
         memoryType: { type: 'string', description: 'Filter results by memory type (e.g. "individual", "shared")' },
         agentFilter: { type: 'string', description: 'Filter results by agent/source ID' },
+        sortBy: {
+          type: 'string',
+          enum: ['relevance', 'recency'],
+          description: 'Result ordering. Relevance preserves the default ranking; recency sorts newest first before pagination.',
+          default: 'relevance'
+        },
+        canonicalEntityKey: {
+          type: 'string',
+          description: 'Restrict results to one canonical entity and its direct observations/relations.'
+        },
+        memoryTypes: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Restrict results to storage memory types such as entity, observation, relation, or ai_message.'
+        },
         includeRedundantRepresentations: {
           type: 'boolean',
           description: 'Include dual-storage representations that are hidden by default, such as an entity row matched only through embedded inline observation text when the materialized observation row is also returned',
@@ -420,8 +443,9 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
           description: 'Context depth: hot (identity+messages+guardrails), warm (hot+project 30d), cold (everything). Defaults to warm if projectId provided, else hot.',
         },
         maxTokens: {
-          type: 'number',
-          description: 'Hard token budget ceiling. Context is trimmed by priority if exceeded. Default: 4000.',
+          type: 'integer',
+          minimum: 1,
+          description: 'Requested hard ceiling on the server\'s serialized-size token estimate. Requests below the minimal identity-envelope budget are raised to the reported effectiveMaxTokens; all other estimates stay at or below the request. Default: 4000.',
           default: 4000
         },
         userId: { type: 'string', description: 'Optional user ID to include HOT tier user profile block. Overridden by JWT userId when authenticated.' }
@@ -438,8 +462,9 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
         agentId: { type: 'string', description: 'Agent opening the session' },
         projectId: { type: 'string', description: 'Project to open a session for' },
         maxTokens: {
-          type: 'number',
-          description: 'Hard token budget ceiling for the returned context. Default: 4000.',
+          type: 'integer',
+          minimum: 1,
+          description: 'Requested hard ceiling on the returned context\'s serialized-size token estimate. Requests below the minimal identity-envelope budget are raised to context meta.effectiveMaxTokens. Default: 4000.',
           default: 4000
         },
         userId: { type: 'string', description: 'Optional user ID for user-scoped context. Overridden by JWT userId when authenticated.' }
@@ -542,19 +567,38 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   // Entity detail retrieval (companion to search_entities compact mode)
   get_entity_detail: {
     name: 'get_entity_detail',
-    description: 'Retrieve full content for specific entities by ID. Use after scanning compact results from search_entities.',
+    description: 'Retrieve full entity content by storage ID, canonical entity name, or alias. `ids` preserves the scan-then-detail workflow; `names` or the singular `entity` input skips the search-then-refetch round trip and returns resolution metadata.',
     inputSchema: {
       type: 'object',
       properties: {
         ids: {
           type: 'array',
           items: { type: 'string' },
-          description: 'Entity IDs to retrieve (max 5)',
+          description: 'Storage IDs to retrieve (max 5)',
           maxItems: 5
         },
-        maxTotalSize: { type: 'number', description: 'Maximum total response size in characters', default: 80000 }
+        names: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Canonical entity names or aliases to resolve and retrieve (max 5)',
+          maxItems: 5
+        },
+        entity: {
+          type: 'string',
+          description: 'Convenience alias for one canonical entity name or alias'
+        },
+        maxTotalSize: {
+          type: 'number',
+          description: 'Hard maximum for the serialized response text in characters. Oversized entities are returned as truncated envelopes when possible. Minimum 256.',
+          default: 80000,
+          minimum: 256
+        }
       },
-      required: ['ids']
+      anyOf: [
+        { required: ['ids'] },
+        { required: ['names'] },
+        { required: ['entity'] }
+      ]
     }
   },
   // Task 1200: Message lifecycle tools
@@ -576,7 +620,7 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
   },
   archive_messages: {
     name: 'archive_messages',
-    description: 'Archive messages for an agent — either specific messageIds, or all messages older than N days. Archived messages are excluded from get_ai_messages by default.',
+    description: 'Archive messages for an agent — either specific messageIds, or all messages older than N days. Set markAsRead:true to acknowledge and archive the same scoped messages atomically. Archived messages are excluded from get_ai_messages by default.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -586,7 +630,12 @@ export const UnifiedToolSchemas: Record<string, ToolDefinition> = {
           items: { type: 'string' },
           description: 'Specific message IDs to archive. If provided, olderThanDays is ignored.'
         },
-        olderThanDays: { type: 'number', description: 'Archive messages older than this many days (used when messageIds is omitted)', default: 30 }
+        olderThanDays: { type: 'number', description: 'Archive messages older than this many days (used when messageIds is omitted)', default: 30 },
+        markAsRead: {
+          type: 'boolean',
+          description: 'Mark the same scoped messages as read in the archive transaction',
+          default: false
+        }
       },
       required: ['agentId']
     }
